@@ -41,9 +41,13 @@ Décisions validées (chat) : réutiliser `ConfigState::diff` ; listeners statiq
 - `Dockerfile` multi-stage, chart Helm (controller + Sōzu dans un Pod, Service LoadBalancer, IngressClass, RBAC, ConfigMap), `deploy/sozu/config.toml`, `Makefile`, CI GitHub Actions.
 - **e2e in-cluster réel réussi** sur `poc-sozu-gateway-2` (image via ttl.sh) : HTTP 200 + HTTPS 200 (SNI), backend = pod réel, LoadBalancer avec IP externe (Cilium LB-IPAM), suppression à chaud → 404.
 
-## Phase 1 — TERMINÉE ✅ (Ingress + TLS, vérifiée de bout en bout)
+### Post-revue — durcissement + publication ✅
+- Revue adversariale multi-agents (19 findings confirmés) corrigée : diff de certs par `(listener, fingerprint)` + `ReplaceCertificate` sur changement de noms, dedup frontends/certs, résolution de port multi-services correcte, wildcard TLS à un label, timeouts (sync caches, apply), sortie process si un watcher meurt, deadline globale d'ack + backoff de reconnexion.
+- **Publication façon CleverCloud** : chart dans `charts/sozu-gateway/`, image `ghcr.io/clevercloud/sozu-gateway`, chart poussée en **OCI** (`oci://ghcr.io/clevercloud/sozu-gateway`) sur tags `v*` via `.github/workflows/release.yml`. RBAC moindre privilège + securityContext durci (runAsNonRoot, seccomp, drop ALL caps, rootfs read-only contrôleur). dependabot. Installable : `helm install oci://ghcr.io/clevercloud/sozu-gateway --version X`.
+
+## Phase 1 — TERMINÉE ✅ (Ingress + TLS, vérifiée de bout en bout, packagée)
 
 Limitations connues / Phase 1.x :
-- Redémarrage du *seul* conteneur contrôleur (sans Sōzu) : le shadow repart vide → ré-applique tout (idempotent) mais ne nettoie pas un éventuel état résiduel côté Sōzu tant qu'un changement ne le supprime pas. Mitigation future : reconstruire le shadow depuis Sōzu au démarrage, ou `saved_state`.
-- Status K8s des Ingress pas encore réécrit (les `Problem`s sont seulement loggés) — l'architecture le permet (RBAC `ingresses/status` déjà accordé).
-- Conteneurs en uid 1000 partagé (socket) ; durcissement (séparation d'uid, capabilities) à faire.
+- Redémarrage du *seul* conteneur contrôleur : le shadow repart vide → ré-applique tout (idempotent/tolérant, donc auto-réparant) mais ne supprime pas un éventuel état résiduel côté Sōzu tant qu'un changement ne le retire pas. Mitigation future : reconstruire le shadow depuis Sōzu au démarrage, ou `saved_state`.
+- Status K8s des Ingress pas encore réécrit (les `Problem`s sont loggés) — Phase 2 (RBAC `ingresses/status` activable via `rbac.allowStatusWrites`).
+- Pas d'endpoint /healthz dédié dans le contrôleur (probe readiness/liveness) — Phase 1.x.
