@@ -80,9 +80,13 @@ get wrong:
   `sozu-command-lib` 2.1.0 that fires when `ConfigState::diff` removes the last cert at a listener.
 
 All output is reordered into **dependency-safe tiers** (`canonicalize` / `tier()`): adds go
-clusters → backends → certificates → frontends; removes in reverse; a replacement cert lands
-before the old is removed (no TLS gap). This also makes the HashSet-ordered routing diff
-deterministic for golden snapshots.
+clusters → backends → certificates → frontends; removes in reverse. Frontend *removes* are
+tiered **before** frontend *adds*: Sōzu keys a route by `address;hostname;path[;method]`
+(*not* `cluster_id`), so re-pointing a host+path at a different cluster is a `Remove`+`Add` on
+the same route key, and adding first would be rejected as a duplicate (`StateError::Exists`)
+— there is no atomic frontend replace in 2.1.0. A replacement cert lands before the old is
+removed (no TLS gap). This also makes the HashSet-ordered routing diff deterministic for
+golden snapshots.
 
 ### Conventions that matter
 

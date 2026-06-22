@@ -11,9 +11,12 @@
 //!    is left behind and the replay check is not normalised for it).
 //!
 //! Output is canonicalised into dependency-safe tiers (adds: clusters →
-//! backends → certificates → frontends; removes in reverse; a new/replacement
-//! certificate lands before the old one is removed → no TLS gap). This also
-//! makes the otherwise HashSet-ordered routing diff deterministic.
+//! backends → certificates → frontends; removes in reverse). Frontend *removes*
+//! are ordered before frontend *adds*: Sōzu keys a route by host+path (not by
+//! cluster_id), so re-pointing a route at another cluster is a Remove+Add on the
+//! same key, and adding first would be rejected as a duplicate. A new/replacement
+//! certificate lands before the old one is removed → no TLS gap. This also makes
+//! the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap};
@@ -209,8 +212,16 @@ fn tier(req: &Request) -> u8 {
         Some(RequestType::AddCluster(_)) => 1,
         Some(RequestType::AddBackend(_)) => 2,
         Some(RequestType::AddCertificate(_)) | Some(RequestType::ReplaceCertificate(_)) => 3,
-        Some(RequestType::AddHttpFrontend(_)) | Some(RequestType::AddHttpsFrontend(_)) => 4,
-        Some(RequestType::RemoveHttpFrontend(_)) | Some(RequestType::RemoveHttpsFrontend(_)) => 5,
+        // Frontend removes precede frontend adds. Sōzu keys a route by
+        // `address;hostname;path[;method]` (cluster_id is NOT part of the key),
+        // so re-pointing a host+path at a different cluster yields a Remove(old)
+        // + Add(new) on the *same* key. Add-before-Remove would make the live
+        // `add_http_frontend` hit an Occupied entry → `StateError::Exists`, and
+        // the trailing Remove would then delete the route outright. Removing
+        // first leaves the entry Vacant for the re-add (a tiny, unavoidable gap
+        // since Sōzu 2.1.0 has no atomic frontend replace).
+        Some(RequestType::RemoveHttpFrontend(_)) | Some(RequestType::RemoveHttpsFrontend(_)) => 4,
+        Some(RequestType::AddHttpFrontend(_)) | Some(RequestType::AddHttpsFrontend(_)) => 5,
         Some(RequestType::RemoveBackend(_)) => 6,
         Some(RequestType::RemoveCluster(_)) => 7,
         Some(RequestType::RemoveCertificate(_)) => 8,

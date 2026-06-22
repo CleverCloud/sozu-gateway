@@ -214,6 +214,87 @@ fn reconcile_cert_name_change_replaces_in_place() {
 }
 
 #[test]
+fn reconcile_retarget_route_removes_before_adds() {
+    // Re-pointing the same host+path at a DIFFERENT cluster. Sōzu keys a route by
+    // host+path (not cluster_id), so this is a Remove(old)+Add(new) on the same
+    // route key. The old frontend MUST be removed before the new one is added —
+    // otherwise the live add_http_frontend rejects the duplicate (StateError::Exists)
+    // and the trailing remove deletes the route, so the reconcile never converges.
+    let before = ir::Ir {
+        clusters: vec![cluster("old", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("old", "10.0.0.1:8080", None)],
+        frontends: vec![frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            "old",
+            false,
+        )],
+        certificates: vec![],
+    };
+    let after = ir::Ir {
+        clusters: vec![cluster("new", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("new", "10.0.0.2:8080", None)],
+        frontends: vec![frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            "new",
+            false,
+        )],
+        certificates: vec![],
+    };
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+
+    let remove_idx = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::RemoveHttpFrontend(_))))
+        .expect("a RemoveHttpFrontend for the old route");
+    let add_idx = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
+        .expect("an AddHttpFrontend for the new route");
+    assert!(
+        remove_idx < add_idx,
+        "old frontend must be removed before the new one is added (same Sōzu route key), \
+         got remove at {remove_idx}, add at {add_idx}: {reqs:#?}"
+    );
+    insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn reconcile_retarget_https_route_removes_before_adds() {
+    // Same retarget but on a TLS frontend: RemoveHttpsFrontend must precede
+    // AddHttpsFrontend. Assertion-only (the HTTP case already pins a snapshot).
+    let ir_for = |cluster_id: &str, addr_s: &str| ir::Ir {
+        clusters: vec![cluster(cluster_id, ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend(cluster_id, addr_s, None)],
+        frontends: vec![frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            cluster_id,
+            true,
+        )],
+        certificates: vec![cert(CERT_A, KEY_A)],
+    };
+    let before = ir_for("old", "10.0.0.1:8080");
+    let after = ir_for("new", "10.0.0.2:8080");
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+
+    let remove_idx = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::RemoveHttpsFrontend(_))))
+        .expect("a RemoveHttpsFrontend for the old route");
+    let add_idx = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::AddHttpsFrontend(_))))
+        .expect("an AddHttpsFrontend for the new route");
+    assert!(
+        remove_idx < add_idx,
+        "old HTTPS frontend must be removed before the new one is added, \
+         got remove at {remove_idx}, add at {add_idx}: {reqs:#?}"
+    );
+}
+
+#[test]
 fn reconcile_add_new_route() {
     let small = ir::Ir {
         clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
