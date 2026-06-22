@@ -1,0 +1,71 @@
+---
+source: crates/builder/tests/build.rs
+expression: out
+---
+{
+  "ir": {
+    "clusters": [
+      {
+        "id": "demo.web.80",
+        "load_balancing": "RoundRobin",
+        "sticky_session": false,
+        "https_redirect": false
+      }
+    ],
+    "frontends": [
+      {
+        "hostname": "app.example.com",
+        "path": {
+          "Prefix": "/"
+        },
+        "method": null,
+        "cluster_id": "demo.web.80",
+        "tls": false,
+        "listener": "0.0.0.0:80"
+      },
+      {
+        "hostname": "app.example.com",
+        "path": {
+          "Prefix": "/"
+        },
+        "method": null,
+        "cluster_id": "demo.web.80",
+        "tls": true,
+        "listener": "0.0.0.0:443"
+      }
+    ],
+    "backends": [
+      {
+        "cluster_id": "demo.web.80",
+        "backend_id": "demo.web.80#10.244.0.5:8080",
+        "address": "10.244.0.5:8080",
+        "weight": null
+      },
+      {
+        "cluster_id": "demo.web.80",
+        "backend_id": "demo.web.80#10.244.0.6:8080",
+        "address": "10.244.0.6:8080",
+        "weight": null
+      }
+    ],
+    "certificates": [
+      {
+        "listener": "0.0.0.0:443",
+        "certificate": "-----BEGIN CERTIFICATE-----\nMIIBpTCCAUugAwIBAgIUblpeGr9XPTD3zeWWYEbu7sgjXmcwCgYIKoZIzj0EAwIw\nGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMB4XDTI2MDYyMjE0MDUwNVoXDTM2\nMDYxOTE0MDUwNVowGjEYMBYGA1UEAwwPYXBwLmV4YW1wbGUuY29tMFkwEwYHKoZI\nzj0CAQYIKoZIzj0DAQcDQgAEBaLuu0lVhUXnh/SamgpEpAGfxr27/9FWrR0p9stl\nnSZemaqqSkQEok1z+P0eZQr/x7iomhVmPmt6+ZVFs1EkoaNvMG0wHQYDVR0OBBYE\nFP3kqoLsEYsh7+Vd4ri4jzL3ed2bMB8GA1UdIwQYMBaAFP3kqoLsEYsh7+Vd4ri4\njzL3ed2bMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIPYXBwLmV4YW1wbGUu\nY29tMAoGCCqGSM49BAMCA0gAMEUCIQDIFfl1wLYPICltOZ8OWVWsjmH2h0zOiXYU\naPKjr9jyPwIgXp854lfa4ccn6OAmdanaiutMxYV8CuWsGKycTOy2K6s=\n-----END CERTIFICATE-----",
+        "chain": [],
+        "key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg02uAvP3KOMuLqXiP\nxZGEZUK0+ggXy1aAIBM2L366tsmhRANCAAQFou67SVWFReeH9JqaCkSkAZ/Gvbv/\n0VatHSn2y2WdJl6ZqqpKRASiTXP4/R5lCv/HuKiaFWY+a3r5lUWzUSSh\n-----END PRIVATE KEY-----\n",
+        "names": [
+          "app.example.com"
+        ]
+      }
+    ]
+  },
+  "results": [
+    {
+      "namespace": "demo",
+      "name": "web",
+      "accepted": true,
+      "problems": []
+    }
+  ]
+}

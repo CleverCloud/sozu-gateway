@@ -1,0 +1,26 @@
+---
+source: crates/builder/tests/build.rs
+expression: out.ir.frontends
+---
+[
+  {
+    "hostname": "app.example.com",
+    "path": {
+      "Exact": "/exact"
+    },
+    "method": null,
+    "cluster_id": "demo.web.80",
+    "tls": false,
+    "listener": "0.0.0.0:80"
+  },
+  {
+    "hostname": "app.example.com",
+    "path": {
+      "Regex": "/regex.*"
+    },
+    "method": null,
+    "cluster_id": "demo.web.80",
+    "tls": false,
+    "listener": "0.0.0.0:80"
+  }
+]

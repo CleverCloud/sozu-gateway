@@ -2325,6 +2325,7 @@ dependencies = [
  "k8s-openapi",
  "serde",
  "serde_json",
+ "sozu-command-lib",
  "sozu-gw-ir",
  "thiserror 2.0.18",
 ]
