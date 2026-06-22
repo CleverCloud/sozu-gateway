@@ -12,12 +12,23 @@ publish.workspace = true
 sozu-command-lib = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Async handle: oneshot replies from the dedicated blocking worker thread.
+tokio = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+tokio = { workspace = true }
+# End-to-end smoke example dogfoods the pure pipeline (IR -> Translator -> Agent).
+sozu-gw-ir = { workspace = true }
+sozu-gw-translator = { workspace = true }
 
 # Throwaway protocol probe (Étape 1): connect to a live Sōzu, exercise
 # AddCluster/AddBackend/AddHttpFrontend/AddCertificate, verify with curl.
 [[example]]
 name = "probe"
 path = "examples/probe.rs"
+
+# End-to-end smoke (Étape 3): IR -> Translator -> Agent against a live Sōzu.
+[[example]]
+name = "agent_smoke"
+path = "examples/agent_smoke.rs"
