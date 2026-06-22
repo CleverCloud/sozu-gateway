@@ -87,8 +87,14 @@ where
                 }
                 Some(Err(e)) => warn!(watch = kind, error = %e, "watch error (will retry)"),
                 None => {
-                    warn!(watch = kind, "watch stream ended");
-                    break;
+                    // The watcher's own backoff means a healthy stream never
+                    // ends; if it does, fail fast so Kubernetes restarts us
+                    // rather than silently going blind to this resource.
+                    error!(
+                        watch = kind,
+                        "watch stream ended unexpectedly; exiting for restart"
+                    );
+                    std::process::exit(1);
                 }
             }
         }
@@ -160,10 +166,17 @@ async fn reconcile(
         requests = requests.len(),
         "applying changes to sozu"
     );
-    agent
-        .apply(requests)
+    // Bound the apply so a wedged Sōzu socket surfaces as a retryable error
+    // instead of stalling the reconcile loop indefinitely.
+    tokio::time::timeout(Duration::from_secs(60), agent.apply(requests))
         .await
+        .context("timed out applying requests to sozu")?
         .context("apply requests to sozu")?;
+    // Shadow advances only on full success. On failure it stays at the previous
+    // applied IR; because every emitted request is idempotent (Add* upsert,
+    // Remove* of an absent object is a no-op, ReplaceCertificate tolerates a
+    // missing old fingerprint once the listener bucket exists), re-diffing from
+    // the unchanged shadow on the next pass safely converges.
     *shadow = out.ir;
     Ok(())
 }
@@ -207,12 +220,22 @@ async fn main() -> Result<()> {
     };
 
     // Wait for the caches to fill so the first reconcile sees a complete picture.
+    // Bounded so a wedged/permission-denied watcher surfaces as a clear failure
+    // (CrashLoopBackOff) instead of hanging forever.
     info!("waiting for informer caches to sync...");
-    stores.ingresses.wait_until_ready().await?;
-    stores.ingress_classes.wait_until_ready().await?;
-    stores.services.wait_until_ready().await?;
-    stores.endpointslices.wait_until_ready().await?;
-    stores.secrets.wait_until_ready().await?;
+    let sync = async {
+        tokio::try_join!(
+            stores.ingresses.wait_until_ready(),
+            stores.ingress_classes.wait_until_ready(),
+            stores.services.wait_until_ready(),
+            stores.endpointslices.wait_until_ready(),
+            stores.secrets.wait_until_ready(),
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(120), sync)
+        .await
+        .context("timed out waiting for informer caches to sync (check RBAC)")?
+        .context("informer cache writer dropped before becoming ready")?;
     info!("caches synced");
 
     // Shadow of the last successfully-applied IR. Starts empty: the first

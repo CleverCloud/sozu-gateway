@@ -16,7 +16,7 @@
 //! makes the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::{
@@ -103,6 +103,27 @@ fn frontend_request(f: &ir::Frontend) -> Request {
     }
 }
 
+/// Frontends deduplicated by their Sōzu route key (tls + listener + hostname +
+/// path + method). Sōzu rejects a duplicate AddHttpFrontend, so a benign
+/// duplicate produced by overlapping Ingresses must not become a hard reconcile
+/// failure. First occurrence wins.
+fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
+    let mut seen: BTreeSet<(bool, SocketAddr, &str, &ir::PathMatch, Option<&str>)> =
+        BTreeSet::new();
+    ir.frontends
+        .iter()
+        .filter(|f| {
+            seen.insert((
+                f.tls,
+                f.listener,
+                f.hostname.as_str(),
+                &f.path,
+                f.method.as_deref(),
+            ))
+        })
+        .collect()
+}
+
 fn certificate_and_key(c: &ir::Certificate) -> CertificateAndKey {
     CertificateAndKey {
         certificate: c.certificate.clone(),
@@ -130,9 +151,48 @@ fn fingerprint(c: &ir::Certificate) -> Result<String, TranslatorError> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Identity for rotation detection: same listener + same SNI name set.
-fn cert_key(c: &ir::Certificate) -> (SocketAddr, BTreeSet<String>) {
-    (c.listener, c.names.iter().cloned().collect())
+/// SNI name set (order-insensitive) for rotation pairing.
+fn names_set(c: &ir::Certificate) -> BTreeSet<&str> {
+    c.names.iter().map(String::as_str).collect()
+}
+
+fn remove_certificate_request(listener: SocketAddr, fingerprint: String) -> Request {
+    RequestType::RemoveCertificate(RemoveCertificate {
+        address: listener.into(),
+        fingerprint,
+    })
+    .into()
+}
+
+fn replace_certificate_request(new: &ir::Certificate, old_fingerprint: String) -> Request {
+    RequestType::ReplaceCertificate(ReplaceCertificate {
+        address: new.listener.into(),
+        new_certificate: certificate_and_key(new),
+        old_fingerprint,
+        new_expired_at: None,
+    })
+    .into()
+}
+
+/// A certificate keyed by (listener, fingerprint) — Sōzu's own identity for a
+/// loaded cert (`HashMap<SocketAddr, HashMap<Fingerprint, _>>`).
+struct KeyedCert<'a> {
+    listener: SocketAddr,
+    fingerprint: String,
+    cert: &'a ir::Certificate,
+}
+
+fn keyed_certs(certs: &[ir::Certificate]) -> Result<Vec<KeyedCert<'_>>, TranslatorError> {
+    certs
+        .iter()
+        .map(|c| {
+            Ok(KeyedCert {
+                listener: c.listener,
+                fingerprint: fingerprint(c)?,
+                cert: c,
+            })
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -179,7 +239,7 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     let mut requests: Vec<Request> = Vec::new();
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
-    requests.extend(ir.frontends.iter().map(frontend_request));
+    requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
     let mut state = ConfigState::new();
     for req in canonicalize(requests) {
         state
@@ -189,69 +249,73 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     Ok(state)
 }
 
-/// Minimal certificate requests to converge `previous` → `desired`, pairing a
-/// removed+added cert that share (listener, names) into a single
-/// `ReplaceCertificate` (zero-gap rotation).
+/// Minimal certificate requests to converge `previous` → `desired`. Identity is
+/// (listener, fingerprint) — matching Sōzu's own cert store — so the same cert on
+/// two listeners is tracked independently. Handles:
+///  - new cert at (listener, fp)        -> AddCertificate
+///  - cert gone from (listener, fp)     -> RemoveCertificate
+///  - same (listener, fp), names differ -> ReplaceCertificate (same fp; Sōzu
+///    skips a plain AddCertificate whose fp already exists, so a Replace is the
+///    only way to update SNI names in place)
+///  - rotation (a removed + an added at the same listener sharing the SNI name
+///    set) -> a single ReplaceCertificate (zero-gap)
 fn certificate_requests(
     previous: &[ir::Certificate],
     desired: &[ir::Certificate],
 ) -> Result<Vec<Request>, TranslatorError> {
-    let prev: Vec<(String, &ir::Certificate)> = previous
-        .iter()
-        .map(|c| Ok((fingerprint(c)?, c)))
-        .collect::<Result<_, TranslatorError>>()?;
-    let des: Vec<(String, &ir::Certificate)> = desired
-        .iter()
-        .map(|c| Ok((fingerprint(c)?, c)))
-        .collect::<Result<_, TranslatorError>>()?;
+    let prev = keyed_certs(previous)?;
+    let des = keyed_certs(desired)?;
 
-    let prev_fps: HashSet<&str> = prev.iter().map(|(f, _)| f.as_str()).collect();
-    let des_fps: HashSet<&str> = des.iter().map(|(f, _)| f.as_str()).collect();
-
-    let removed: Vec<(String, &ir::Certificate)> = prev
+    let prev_by_key: HashMap<(SocketAddr, &str), &KeyedCert> = prev
         .iter()
-        .filter(|(f, _)| !des_fps.contains(f.as_str()))
-        .map(|(f, c)| (f.clone(), *c))
+        .map(|k| ((k.listener, k.fingerprint.as_str()), k))
         .collect();
-    let added: Vec<(String, &ir::Certificate)> = des
+    let des_keys: BTreeSet<(SocketAddr, &str)> = des
         .iter()
-        .filter(|(f, _)| !prev_fps.contains(f.as_str()))
-        .map(|(f, c)| (f.clone(), *c))
+        .map(|k| (k.listener, k.fingerprint.as_str()))
         .collect();
 
     let mut out = Vec::new();
-    let mut used = vec![false; removed.len()];
+    let mut truly_added: Vec<&KeyedCert> = Vec::new();
 
-    for (_new_fp, new_cert) in &added {
-        // Rotation: a removed cert with the same (listener, names) -> Replace.
-        if let Some(idx) = removed
-            .iter()
-            .enumerate()
-            .position(|(i, (_, old))| !used[i] && cert_key(old) == cert_key(new_cert))
-        {
-            used[idx] = true;
-            out.push(
-                RequestType::ReplaceCertificate(ReplaceCertificate {
-                    address: new_cert.listener.into(),
-                    new_certificate: certificate_and_key(new_cert),
-                    old_fingerprint: removed[idx].0.clone(),
-                    new_expired_at: None,
-                })
-                .into(),
-            );
-        } else {
-            out.push(add_certificate_request(new_cert));
+    for d in &des {
+        match prev_by_key.get(&(d.listener, d.fingerprint.as_str())) {
+            // Same (listener, fp): in place. Only a name change needs a request.
+            Some(p) => {
+                if names_set(p.cert) != names_set(d.cert) {
+                    out.push(replace_certificate_request(d.cert, d.fingerprint.clone()));
+                }
+            }
+            None => truly_added.push(d),
         }
     }
-    for (i, (old_fp, old_cert)) in removed.iter().enumerate() {
+
+    let mut truly_removed: Vec<&KeyedCert> = prev
+        .iter()
+        .filter(|p| !des_keys.contains(&(p.listener, p.fingerprint.as_str())))
+        .collect();
+
+    // Pair an add with a removal at the same listener + same SNI names -> rotate.
+    let mut used = vec![false; truly_removed.len()];
+    for new in &truly_added {
+        if let Some(idx) = truly_removed.iter().enumerate().position(|(i, old)| {
+            !used[i] && old.listener == new.listener && names_set(old.cert) == names_set(new.cert)
+        }) {
+            used[idx] = true;
+            out.push(replace_certificate_request(
+                new.cert,
+                truly_removed[idx].fingerprint.clone(),
+            ));
+        } else {
+            out.push(add_certificate_request(new.cert));
+        }
+    }
+    for (i, old) in truly_removed.iter_mut().enumerate() {
         if !used[i] {
-            out.push(
-                RequestType::RemoveCertificate(RemoveCertificate {
-                    address: old_cert.listener.into(),
-                    fingerprint: old_fp.clone(),
-                })
-                .into(),
-            );
+            out.push(remove_certificate_request(
+                old.listener,
+                old.fingerprint.clone(),
+            ));
         }
     }
     Ok(out)
@@ -268,7 +332,7 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     let mut requests = Vec::new();
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
-    requests.extend(ir.frontends.iter().map(frontend_request));
+    requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
     requests.extend(ir.certificates.iter().map(add_certificate_request));
     canonicalize(requests)
 }

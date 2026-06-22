@@ -170,6 +170,50 @@ fn reconcile_remove_all_includes_remove_certificate() {
 }
 
 #[test]
+fn reconcile_same_cert_on_two_listeners_adds_both() {
+    // Identity is (listener, fingerprint): the same PEM on two listeners must
+    // produce two AddCertificate, not be deduped to one by fingerprint alone.
+    let mut c2 = cert(CERT_A, KEY_A);
+    c2.listener = addr("0.0.0.0:8443");
+    let desired = ir::Ir {
+        certificates: vec![cert(CERT_A, KEY_A), c2],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &desired).expect("reconcile");
+    let adds = reqs
+        .iter()
+        .filter(|r| matches!(r.request_type, Some(RequestType::AddCertificate(_))))
+        .count();
+    assert_eq!(adds, 2, "same cert on two listeners must be added on each");
+}
+
+#[test]
+fn reconcile_cert_name_change_replaces_in_place() {
+    // Same PEM (same fingerprint), different SNI names -> ReplaceCertificate
+    // (a plain AddCertificate would be skipped by Sōzu as the fp already exists).
+    let before = ir::Ir {
+        certificates: vec![cert(CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let mut renamed = cert(CERT_A, KEY_A);
+    renamed.names = vec!["app.example.com".into(), "www.example.com".into()];
+    let after = ir::Ir {
+        certificates: vec![renamed],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(reqs.len(), 1);
+    assert!(
+        matches!(
+            reqs[0].request_type,
+            Some(RequestType::ReplaceCertificate(_))
+        ),
+        "a name-only change must Replace in place, got {:?}",
+        reqs[0].request_type
+    );
+}
+
+#[test]
 fn reconcile_add_new_route() {
     let small = ir::Ir {
         clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],

@@ -14,7 +14,7 @@
 
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
@@ -27,8 +27,12 @@ use tracing::{debug, warn};
 /// Client-side socket buffer sizes (server bounds come from `config.toml`).
 const DEFAULT_BUFFER_SIZE: u64 = 1024 * 1024;
 const DEFAULT_MAX_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
-/// Upper bound on a single response read, so a wedged Sōzu can't hang us forever.
+/// Upper bound on a whole request's ack sequence, so a wedged Sōzu can't hang
+/// us forever (applies across the Processing→Ok replies, not per read).
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Small backoff before a reconnect-and-retry, so an unhealthy Sōzu is not
+/// hammered with reconnect storms across reconcile cycles.
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Error)]
 pub enum SozuError {
@@ -93,9 +97,17 @@ impl SozuAgent {
         channel
             .write_message(request)
             .map_err(|e| SozuError::Channel(format!("write: {e:?}")))?;
+        // One deadline for the whole Processing→Ok sequence.
+        let deadline = Instant::now() + read_timeout;
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SozuError::Channel(
+                    "timed out waiting for a terminal response".to_string(),
+                ));
+            }
             let response = channel
-                .read_message_blocking_timeout(Some(read_timeout))
+                .read_message_blocking_timeout(Some(remaining))
                 .map_err(|e| SozuError::Channel(format!("read: {e:?}")))?;
             let status = response.status;
             if status == ResponseStatus::Processing as i32 {
@@ -122,6 +134,7 @@ impl SozuAgent {
             Err(channel_error) => {
                 warn!(error = %channel_error, "sozu channel error, reconnecting and retrying");
                 self.channel = None;
+                thread::sleep(RECONNECT_BACKOFF);
                 let channel = self.channel_mut()?;
                 Self::send_one(channel, read_timeout, request).map(|_| ())
             }

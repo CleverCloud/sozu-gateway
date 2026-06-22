@@ -128,10 +128,14 @@ fn tls_covers(tls_hosts: &BTreeSet<String>, host: &str) -> bool {
     if tls_hosts.contains(host) {
         return true;
     }
+    // A `*.example.com` wildcard covers exactly one extra label: `a.example.com`
+    // but NOT `a.b.example.com` and not the bare apex `example.com`.
     tls_hosts.iter().any(|pattern| {
-        pattern
-            .strip_prefix("*.")
-            .is_some_and(|suffix| host.strip_suffix(suffix).is_some_and(|p| p.ends_with('.')))
+        pattern.strip_prefix("*.").is_some_and(|suffix| {
+            host.strip_suffix(suffix)
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+        })
     })
 }
 
@@ -247,10 +251,17 @@ fn resolve_backends(
                 .ports
                 .as_ref()
                 .and_then(|ports| {
-                    ports
-                        .iter()
-                        .find(|p| p.name == want_port_name)
-                        .or_else(|| ports.first())
+                    // Match the EndpointSlice port by name (the Service port name).
+                    // Only fall back to the sole port when there is exactly one —
+                    // never guess `first()` on a multi-port slice (would route to
+                    // the wrong container port).
+                    ports.iter().find(|p| p.name == want_port_name).or_else(|| {
+                        if ports.len() == 1 {
+                            ports.first()
+                        } else {
+                            None
+                        }
+                    })
                 })
                 .and_then(|p| p.port);
             let Some(pod_port) = pod_port else { continue };
@@ -424,6 +435,14 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     // Deterministic frontend ordering (the Translator re-canonicalises anyway).
     frontends.sort_by(|a, b| {
         (a.tls, &a.hostname, &a.cluster_id).cmp(&(b.tls, &b.hostname, &b.cluster_id))
+    });
+
+    // Dedup certificates referenced by multiple Ingresses / TLS entries.
+    certificates.sort_by(|a, b| {
+        (&a.listener, &a.names, &a.certificate).cmp(&(&b.listener, &b.names, &b.certificate))
+    });
+    certificates.dedup_by(|a, b| {
+        a.listener == b.listener && a.names == b.names && a.certificate == b.certificate
     });
 
     BuildOutput {
