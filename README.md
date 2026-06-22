@@ -42,8 +42,8 @@ so we run it via the `clevercloud/sozu:2.1.0` image.)
 make build          # cargo build --workspace
 make test           # unit + golden tests (Translator, Builder, Agent)
 make lint           # cargo fmt --check + clippy -D warnings
-make docker-build   # build the controller image
-make helm-lint      # helm lint + template
+make image          # build the controller image
+make chart-lint     # helm lint + template
 ```
 
 ## End-to-end on a Kubernetes cluster
