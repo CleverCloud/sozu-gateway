@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local probe / e2e scratch
+/.scratch
+/tmp
+*.sock
+
+# Editor
+.idea/
+*.swp

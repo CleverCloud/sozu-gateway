@@ -1,0 +1,22 @@
+[package]
+name = "sozu-gw-builder"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Builder = Kubernetes objects -> IR (+ per-object status results).
+# Resolves Service->EndpointSlice and TLS Secrets, validates references.
+# Uses k8s-openapi *types* but performs no live API I/O itself.
+[dependencies]
+sozu-gw-ir = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dependencies.k8s-openapi]
+version = "0.28"
+features = ["v1_36"]
+
+[dev-dependencies]
+insta = { version = "1", features = ["json", "redactions"] }
+serde_json = { workspace = true }

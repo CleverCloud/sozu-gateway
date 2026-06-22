@@ -1,0 +1,54 @@
+# Cargo workspace for the Sōzu-based Ingress + Gateway API controller.
+#
+# Layering (control plane / data plane separation):
+#   K8s objects ─▶ cache/watch ─▶ builder ─▶ ir ─▶ translator ─▶ protobuf cmds ─▶ Sōzu socket
+#
+# `ir`, `builder` and `translator` are kept free of any I/O (no kube client, no
+# socket) so they remain pure and unit-testable in isolation.
+[workspace]
+resolver = "2"
+members = [
+    "crates/ir",
+    "crates/translator",
+    "crates/builder",
+    "crates/sozu-agent",
+    "crates/controller",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+# Data-plane protocol: official LGPL-3.0 crate. We reuse its protobuf types and
+# socket framing — we never reimplement the wire format or invent fields.
+sozu-command-lib = "2.1.0"
+
+# Errors: typed per-crate with thiserror; anyhow only in the binary.
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async runtime (controller + sozu-agent only)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+# CLI / config
+clap = { version = "4", features = ["derive", "env"] }
+
+# Internal crates
+sozu-gw-ir = { path = "crates/ir" }
+sozu-gw-translator = { path = "crates/translator" }
+sozu-gw-builder = { path = "crates/builder" }
+sozu-gw-agent = { path = "crates/sozu-agent" }
+
+[profile.release]
+strip = true
+lto = "thin"

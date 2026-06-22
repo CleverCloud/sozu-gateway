@@ -1,0 +1,23 @@
+[package]
+name = "sozu-gw-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# sozu-agent = thin wrapper around sozu-command-lib: connect to the command
+# socket, send requests idempotently, LoadState, handle reconnection/errors.
+# This is the ONLY place the socket I/O lives.
+[dependencies]
+sozu-command-lib = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+
+# Throwaway protocol probe (Étape 1): connect to a live Sōzu, exercise
+# AddCluster/AddBackend/AddHttpFrontend/AddCertificate, verify with curl.
+[[example]]
+name = "probe"
+path = "examples/probe.rs"

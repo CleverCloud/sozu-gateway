@@ -1,0 +1,16 @@
+[package]
+name = "sozu-gw-translator"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Translator = pure function IR -> Sōzu commands, diffing against last-applied
+# state. No side effects. Depends on the IR and on sozu-command-lib *types only*
+# (no socket I/O lives here).
+[dependencies]
+sozu-gw-ir = { workspace = true }
+sozu-command-lib = { workspace = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json", "redactions"] }

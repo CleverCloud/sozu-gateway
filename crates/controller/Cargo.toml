@@ -1,0 +1,36 @@
+[package]
+name = "sozu-gw-controller"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# controller = the binary: kube-rs Controller runtime (watchers, reconcile,
+# error_policy), wiring builder -> translator -> sozu-agent.
+[dependencies]
+sozu-gw-ir = { workspace = true }
+sozu-gw-builder = { workspace = true }
+sozu-gw-translator = { workspace = true }
+sozu-gw-agent = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = "0.3"
+
+[dependencies.kube]
+version = "4"
+features = ["runtime", "derive", "client"]
+
+[dependencies.k8s-openapi]
+version = "0.28"
+features = ["v1_36"]
+
+[[bin]]
+name = "sozu-gw-controller"
+path = "src/main.rs"
