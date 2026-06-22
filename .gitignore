@@ -10,3 +10,6 @@
 # Editor
 .idea/
 *.swp
+
+# Local dev container config (kept out of the repo)
+/.devcontainer
