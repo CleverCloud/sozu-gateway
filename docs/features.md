@@ -25,7 +25,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
 | TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
-| TLS | HTTP → HTTPS redirect | 🟡 | Sōzu supports it; not wired yet |
+| TLS | HTTP → HTTPS redirect | ✅ | automatic for TLS-enabled Ingress hosts (301); opt out with `sozu.io/ssl-redirect: "false"` |
 | Routing | Backends = pod IPs from EndpointSlice | ✅ | never the Service ClusterIP |
 | Routing | Multi-port Service (match by port name) | ✅ | |
 | Routing | Ready-endpoint filtering | ✅ | excludes not-ready endpoints |
@@ -85,3 +85,9 @@ Service, so both an Ingress and a Gateway route to that Service share one config
 | `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via a Sōzu sticky cookie. |
 | `sozu.io/max-connections-per-ip` | integer | global default | Cap simultaneous connections from one source IP to this cluster. Over the cap → `429`. A non-numeric value is ignored. |
 | `sozu.io/retry-after` | integer (seconds) | unset | `Retry-After` header sent on that `429`. |
+
+One annotation is read from the **Ingress** instead (it depends on that Ingress's TLS, not the Service):
+
+| Annotation | Values | Default | Effect |
+| ---------- | ------ | ------- | ------ |
+| `sozu.io/ssl-redirect` | `"true"` / `"false"` | `"true"` | Redirect HTTP→HTTPS (`301`) for hosts that have a loaded cert. Auto-on; set `"false"` to keep serving plain HTTP. (Gateway API uses an explicit `RequestRedirect` filter instead.) |

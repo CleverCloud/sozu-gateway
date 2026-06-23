@@ -26,7 +26,10 @@ expression: out
         "listener": "0.0.0.0:80",
         "filters": {
           "header_mods": [],
-          "redirect": null,
+          "redirect": {
+            "scheme": "Https",
+            "status": "MovedPermanently"
+          },
           "rewrite": null
         }
       },

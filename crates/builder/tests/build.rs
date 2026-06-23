@@ -337,3 +337,72 @@ fn non_numeric_connection_limit_is_ignored() {
     assert_eq!(out.ir.clusters[0].max_connections_per_ip, None);
     assert_eq!(out.ir.clusters[0].retry_after, None);
 }
+
+#[test]
+fn tls_ingress_redirects_http_to_https_by_default() {
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    // Sorted (tls, host, cluster): [0] = HTTP frontend, [1] = HTTPS frontend.
+    let http = &out.ir.frontends[0];
+    let https = &out.ir.frontends[1];
+    assert!(!http.tls);
+    assert!(https.tls);
+    let r = http
+        .filters
+        .redirect
+        .as_ref()
+        .expect("HTTP frontend redirects");
+    assert!(matches!(r.scheme, Some(ir::Scheme::Https)));
+    assert!(matches!(r.status, ir::RedirectStatus::MovedPermanently));
+    assert!(
+        https.filters.redirect.is_none(),
+        "the HTTPS frontend must serve, not redirect"
+    );
+}
+
+#[test]
+fn ssl_redirect_can_be_opted_out() {
+    let mut ing = ingress_tls();
+    ing.metadata.annotations = Some(
+        [("sozu.io/ssl-redirect".to_string(), "false".to_string())]
+            .into_iter()
+            .collect(),
+    );
+    let inputs = Inputs {
+        ingresses: vec![ing],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(
+        out.ir
+            .frontends
+            .iter()
+            .all(|f| f.filters.redirect.is_none()),
+        "opt-out disables the auto HTTP→HTTPS redirect"
+    );
+}
+
+#[test]
+fn http_only_ingress_is_not_redirected() {
+    // No TLS on this Ingress -> nothing to redirect to, so it keeps serving HTTP.
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()], // reuse, but omit the secret below
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![], // cert never loads -> host is not TLS-ready
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.frontends.len(), 1, "only the HTTP frontend");
+    assert!(out.ir.frontends[0].filters.redirect.is_none());
+}

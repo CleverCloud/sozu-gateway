@@ -31,6 +31,10 @@ const STICKY_ANNOTATION: &str = "sozu.io/sticky-sessions";
 const MAX_CONN_PER_IP_ANNOTATION: &str = "sozu.io/max-connections-per-ip";
 /// Service annotation setting the `Retry-After` seconds on the cap's `429` (u32).
 const RETRY_AFTER_ANNOTATION: &str = "sozu.io/retry-after";
+/// Ingress annotation to opt out of the automatic HTTP→HTTPS redirect. The
+/// redirect is on by default for any host that has a loaded TLS cert; set this
+/// to `"false"` to keep serving plain HTTP.
+const SSL_REDIRECT_ANNOTATION: &str = "sozu.io/ssl-redirect";
 
 /// Listener addresses and class identity the build is parameterised over.
 #[derive(Debug, Clone)]
@@ -430,6 +434,15 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             continue;
         };
 
+        // Automatic HTTP→HTTPS redirect: on by default, opt out per Ingress.
+        let ssl_redirect = ingress
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(SSL_REDIRECT_ANNOTATION))
+            .map(|v| !v.trim().eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+
         // ---- TLS: load certs; only hosts with a *successfully loaded* cert
         // become HTTPS-enabled (a frontend without a cert can't handshake) ----
         let mut tls_ready_hosts: BTreeSet<String> = BTreeSet::new();
@@ -507,6 +520,22 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         }
 
                         let pm = path_match(&path.path_type, path.path.as_deref());
+                        let host_has_tls = tls_covers(&tls_ready_hosts, host);
+                        // The plain-HTTP frontend redirects to HTTPS when the host
+                        // has a cert and the redirect isn't opted out; otherwise it
+                        // proxies. The redirect wins over the cluster, so keeping
+                        // `cluster_id` set is harmless.
+                        let http_filters = if host_has_tls && ssl_redirect {
+                            ir::FrontendFilters {
+                                redirect: Some(ir::Redirect {
+                                    scheme: Some(ir::Scheme::Https),
+                                    status: ir::RedirectStatus::MovedPermanently,
+                                }),
+                                ..Default::default()
+                            }
+                        } else {
+                            ir::FrontendFilters::default()
+                        };
                         frontends.push(ir::Frontend {
                             hostname: host.clone(),
                             path: pm.clone(),
@@ -514,9 +543,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                             cluster_id: Some(cluster_id.clone()),
                             tls: false,
                             listener: cfg.http_listener,
-                            filters: ir::FrontendFilters::default(),
+                            filters: http_filters,
                         });
-                        if tls_covers(&tls_ready_hosts, host) {
+                        if host_has_tls {
                             frontends.push(ir::Frontend {
                                 hostname: host.clone(),
                                 path: pm,
