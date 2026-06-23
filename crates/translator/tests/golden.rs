@@ -349,3 +349,24 @@ fn reconcile_add_new_route() {
     };
     insta::assert_json_snapshot!(tr::reconcile(&small, &sample_ir()).expect("reconcile"));
 }
+
+#[test]
+fn reconcile_redirect_only_frontend_folds() {
+    let mut f = frontend(
+        "app.example.com",
+        ir::PathMatch::Prefix("/".into()),
+        "x",
+        false,
+    );
+    f.cluster_id = None;
+    f.filters.redirect = Some(ir::Redirect {
+        scheme: Some(ir::Scheme::Https),
+        status: ir::RedirectStatus::Found,
+    });
+    let model = ir::Ir {
+        frontends: vec![f],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("redirect-only frontend must fold");
+    assert_eq!(reqs.len(), 1);
+}

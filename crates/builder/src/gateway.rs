@@ -3,18 +3,21 @@
 //! Gateway API objects compile into the **same** IR as Ingress, reusing the
 //! shared cluster/backend resolver, so both APIs converge on one Sōzu state.
 //!
-//! Phase-2 MVP scope (anything else is reported as a [`Problem`] and skipped, so
-//! a feature gap never silently mis-routes):
+//! Scope (anything else is reported as a [`Problem`] and skipped, so a feature
+//! gap never silently mis-routes):
 //!  - `GatewayClass` selected by `controllerName`;
 //!  - `Gateway` HTTP/HTTPS listeners mapped to the static `:80`/`:443` listeners
 //!    by protocol; HTTPS loads its `certificateRefs` (Terminate only);
 //!  - `HTTPRoute` attached by `parentRef` (optional `sectionName`), with path
-//!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and exactly
-//!    one Service `backendRef` per rule;
+//!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
+//!    one Service `backendRef` or a redirect-only rule (no backend);
+//!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
+//!    RequestRedirect (scheme + status), URLRewrite (hostname + replaceFullPath);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
-//! Not yet: header/query matches, route filters, weighted multi-backend split,
-//! TLS Passthrough (header/query match and weighted split are Sōzu hard limits).
+//! Not yet: header/query matches, weighted multi-backend split, TLS Passthrough,
+//! RequestMirror, redirect host/path/port, URLRewrite replacePrefixMatch
+//! (header/query match and weighted split are Sōzu hard limits).
 
 use std::collections::{BTreeMap, BTreeSet};
 

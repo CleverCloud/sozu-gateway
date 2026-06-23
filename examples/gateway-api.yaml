@@ -1,5 +1,6 @@
-# Demo app exposed via the Gateway API (Phase 2): a GatewayClass owned by this
-# controller, a Gateway with HTTP + HTTPS listeners, and an HTTPRoute. The TLS
+# Demo app exposed via the Gateway API: a GatewayClass owned by this controller,
+# a Gateway with HTTP + HTTPS listeners, an HTTPRoute that also exercises Phase 3
+# filters (header edits), and a redirect-only HTTPRoute (HTTP -> HTTPS). The TLS
 # Secret `app-tls` must exist in the gateway namespace (the e2e creates it from a
 # self-signed cert). Requires the Gateway API CRDs to be installed in the cluster.
 apiVersion: v1
@@ -87,6 +88,38 @@ spec:
         - path:
             type: PathPrefix
             value: /
+      # Phase 3 filters: inject a request header (echoed back by whoami) and a
+      # response header. Sōzu has no header "append", so `add` is applied as set.
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: X-Env
+                value: prod
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: X-Served-By
+                value: sozu
       backendRefs:
         - name: whoami
           port: 80
+---
+# A redirect-only route: HTTP -> HTTPS, 301. RequestRedirect must NOT carry a
+# backendRef (the Gateway API forbids it); Sōzu answers the redirect itself.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web-redirect
+  namespace: sozu-demo
+spec:
+  parentRefs:
+    - name: gw
+      sectionName: http
+  hostnames: ["legacy.example.com"]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

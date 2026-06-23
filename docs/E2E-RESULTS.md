@@ -87,6 +87,21 @@ Installing the Gateway API CRDs (v1.2.1 standard channel), then a `GatewayClass`
 A Gateway route and an Ingress to the same Service share one Sōzu cluster, confirming both APIs
 compile to the same IR.
 
+## 5. HTTPRoute filters (Phase 3)
+
+Two HTTPRoutes on the HTTP listener — one carrying header modifiers, one a redirect — exercised
+against the `whoami` demo (which echoes the request it received):
+
+| Check | Result |
+| ----- | ------ |
+| `RequestHeaderModifier` (`set X-Env: prod`) | whoami echoes `X-Env: prod` in the request it sees |
+| `ResponseHeaderModifier` (`set X-Served-By: sozu`) | response carries `X-Served-By: sozu` |
+| `RequestRedirect` (`scheme: https`, `statusCode: 301`) | **301 Moved Permanently**, `Location: https://redirect.example.com/` |
+| Redirect-only route (no `backendRef`) | accepted and programmed as a cluster-less Sōzu frontend |
+
+The redirect route has no `backendRef` (the Gateway API forbids combining `RequestRedirect` with
+backends), so it maps to a frontend with no cluster — Sōzu answers the 301 itself.
+
 ## Reproduce
 
 ```sh
@@ -94,8 +109,8 @@ make e2e          # functional path: install + demo app + HTTP/HTTPS checks + ho
 ```
 
 The load/churn harnesses used for sections 2–3 live under `.scratch/` (developer scaffolding, not
-shipped): `hot-reload-test2.sh` (config hot reload) and `dataplane-upgrade-test.sh` (Sōzu Pod
-replacement).
+shipped): `hot-reload-test2.sh` (config hot reload), `dataplane-upgrade-test.sh` (Sōzu Pod
+replacement) and `phase3-e2e.sh` (HTTPRoute filters, section 5).
 
 ## Known limitations
 
