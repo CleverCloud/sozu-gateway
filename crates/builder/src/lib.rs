@@ -27,6 +27,10 @@ const LEGACY_CLASS_ANNOTATION: &str = "kubernetes.io/ingress.class";
 const LB_ANNOTATION: &str = "sozu.io/load-balancing";
 /// Service annotation enabling sticky sessions when set to `"true"`.
 const STICKY_ANNOTATION: &str = "sozu.io/sticky-sessions";
+/// Service annotation capping simultaneous connections per source IP (u64).
+const MAX_CONN_PER_IP_ANNOTATION: &str = "sozu.io/max-connections-per-ip";
+/// Service annotation setting the `Retry-After` seconds on the cap's `429` (u32).
+const RETRY_AFTER_ANNOTATION: &str = "sozu.io/retry-after";
 
 /// Listener addresses and class identity the build is parameterised over.
 #[derive(Debug, Clone)]
@@ -336,20 +340,31 @@ fn parse_lb_algorithm(value: &str) -> ir::LbAlgorithm {
     }
 }
 
-/// Cluster-level settings read from the backing Service's annotations:
-/// `(load_balancing, sticky_session)`. The cluster is 1:1 with a Service, so
-/// these live on the Service (not the route) — both Ingress and Gateway refs to
-/// one Service then agree on one cluster config, with no cross-route conflict.
-fn cluster_settings(service: Option<&Service>) -> (ir::LbAlgorithm, bool) {
+/// Cluster-level settings read from the backing Service's annotations. The
+/// cluster is 1:1 with a Service, so these live on the Service (not the route) —
+/// both Ingress and Gateway refs to one Service then agree on one cluster
+/// config, with no cross-route conflict.
+#[derive(Default)]
+struct ClusterSettings {
+    load_balancing: ir::LbAlgorithm,
+    sticky_session: bool,
+    max_connections_per_ip: Option<u64>,
+    retry_after: Option<u32>,
+}
+
+fn cluster_settings(service: Option<&Service>) -> ClusterSettings {
     let annotations = service.and_then(|s| s.metadata.annotations.as_ref());
-    let load_balancing = annotations
-        .and_then(|a| a.get(LB_ANNOTATION))
-        .map(|v| parse_lb_algorithm(v))
-        .unwrap_or(ir::LbAlgorithm::RoundRobin);
-    let sticky_session = annotations
-        .and_then(|a| a.get(STICKY_ANNOTATION))
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
-    (load_balancing, sticky_session)
+    let get = |key: &str| annotations.and_then(|a| a.get(key)).map(|v| v.trim());
+    ClusterSettings {
+        load_balancing: get(LB_ANNOTATION)
+            .map(parse_lb_algorithm)
+            .unwrap_or_default(),
+        sticky_session: get(STICKY_ANNOTATION).is_some_and(|v| v.eq_ignore_ascii_case("true")),
+        // A non-numeric value is ignored (falls back to the global default)
+        // rather than failing the Service.
+        max_connections_per_ip: get(MAX_CONN_PER_IP_ANNOTATION).and_then(|v| v.parse().ok()),
+        retry_after: get(RETRY_AFTER_ANNOTATION).and_then(|v| v.parse().ok()),
+    }
 }
 
 /// Resolve a Service+port and upsert its cluster + pod-IP backends into the
@@ -368,12 +383,14 @@ pub(crate) fn add_service_route(
         .services
         .get(&(namespace.to_string(), service.to_string()))
         .copied();
-    let (load_balancing, sticky_session) = cluster_settings(svc);
+    let s = cluster_settings(svc);
     clusters.entry(cluster_id.clone()).or_insert(ir::Cluster {
         id: cluster_id.clone(),
-        load_balancing,
-        sticky_session,
+        load_balancing: s.load_balancing,
+        sticky_session: s.sticky_session,
         https_redirect: false,
+        max_connections_per_ip: s.max_connections_per_ip,
+        retry_after: s.retry_after,
     });
     for addr in &addrs {
         let backend_id = format!("{cluster_id}#{addr}");

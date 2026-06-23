@@ -38,7 +38,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | URL rewrite (host + full path) | ✅ | `URLRewrite`; `replacePrefixMatch` not yet |
 | API gateway | Redirects (scheme + status) | ✅ | `RequestRedirect` (HTTP→HTTPS, 301/302); host/path/port target not yet |
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
-| API gateway | Rate limiting (per source IP) | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
+| API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
 | API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
@@ -68,8 +68,8 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   full path) are exposed through the IR and Gateway API HTTPRoute filters (Phase 3). Sōzu has no
   header *append*, so a Gateway `add` is applied as a set; redirect host/path/port targets and
   `URLRewrite.replacePrefixMatch` are not expressible yet and are reported rather than half-applied.
-  Basic auth and per-IP rate limiting exist in Sōzu's data plane but have no core Gateway API
-  filter, so they remain unwired.
+  The per-source-IP connection limit is wired through Service annotations (see below). HTTP Basic
+  auth exists in Sōzu's data plane but has no core Gateway API filter, so it remains unwired.
 - **Hard limits.** Matching on header values or query parameters, weighted traffic split across
   several Services, and request mirroring are not expressible in Sōzu today, so they are out of
   scope rather than merely deferred.
@@ -83,3 +83,5 @@ Service, so both an Ingress and a Gateway route to that Service share one config
 | ---------- | ------ | ------- | ------ |
 | `sozu.io/load-balancing` | `round-robin`, `random`, `least-loaded`, `power-of-two` | `round-robin` | Sōzu load-balancing algorithm for the cluster. Unknown values fall back to the default. |
 | `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via a Sōzu sticky cookie. |
+| `sozu.io/max-connections-per-ip` | integer | global default | Cap simultaneous connections from one source IP to this cluster. Over the cap → `429`. A non-numeric value is ignored. |
+| `sozu.io/retry-after` | integer (seconds) | unset | `Retry-After` header sent on that `429`. |

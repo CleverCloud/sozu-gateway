@@ -25,6 +25,8 @@ fn cluster(id: &str, lb: ir::LbAlgorithm, sticky: bool) -> ir::Cluster {
         load_balancing: lb,
         sticky_session: sticky,
         https_redirect: false,
+        max_connections_per_ip: None,
+        retry_after: None,
     }
 }
 
@@ -369,4 +371,16 @@ fn reconcile_redirect_only_frontend_folds() {
     };
     let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("redirect-only frontend must fold");
     assert_eq!(reqs.len(), 1);
+}
+
+#[test]
+fn cluster_connection_limit_maps_to_request() {
+    let mut c = cluster("app", ir::LbAlgorithm::RoundRobin, false);
+    c.max_connections_per_ip = Some(100);
+    c.retry_after = Some(30);
+    let model = ir::Ir {
+        clusters: vec![c],
+        ..Default::default()
+    };
+    insta::assert_json_snapshot!(tr::ir_to_requests(&model));
 }

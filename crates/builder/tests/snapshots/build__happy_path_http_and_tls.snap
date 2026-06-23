@@ -9,7 +9,9 @@ expression: out
         "id": "demo.web.80",
         "load_balancing": "RoundRobin",
         "sticky_session": false,
-        "https_redirect": false
+        "https_redirect": false,
+        "max_connections_per_ip": null,
+        "retry_after": null
       }
     ],
     "frontends": [

@@ -1,0 +1,28 @@
+---
+source: crates/translator/tests/golden.rs
+expression: "tr::ir_to_requests(&model)"
+---
+[
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "app",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": 100,
+        "retry_after": 30,
+        "health_check": null,
+        "udp": null
+      }
+    }
+  }
+]

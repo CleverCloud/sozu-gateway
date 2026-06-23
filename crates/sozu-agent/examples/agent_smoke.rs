@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
             load_balancing: ir::LbAlgorithm::RoundRobin,
             sticky_session: false,
             https_redirect: false,
+            max_connections_per_ip: None,
+            retry_after: None,
         }],
         backends: vec![ir::Backend {
             cluster_id: cluster_id.clone(),

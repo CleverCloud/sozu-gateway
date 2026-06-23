@@ -72,6 +72,8 @@ fn cluster_request(c: &ir::Cluster) -> Request {
         sticky_session: c.sticky_session,
         https_redirect: c.https_redirect,
         load_balancing: lb_algorithm(c.load_balancing),
+        max_connections_per_ip: c.max_connections_per_ip,
+        retry_after: c.retry_after,
         ..Default::default()
     })
     .into()

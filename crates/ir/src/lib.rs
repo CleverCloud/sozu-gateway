@@ -42,6 +42,13 @@ pub struct Cluster {
     pub load_balancing: LbAlgorithm,
     pub sticky_session: bool,
     pub https_redirect: bool,
+    /// Max simultaneous connections from one source IP to this cluster; `None`
+    /// uses Sōzu's global default. This is a connection cap, not an RPS quota.
+    #[serde(default)]
+    pub max_connections_per_ip: Option<u64>,
+    /// `Retry-After` header (seconds) sent on the `429` when the cap is hit.
+    #[serde(default)]
+    pub retry_after: Option<u32>,
 }
 
 /// One backend endpoint: a **pod IP:port** (never a ClusterIP).

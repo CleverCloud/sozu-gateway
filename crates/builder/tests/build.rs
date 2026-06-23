@@ -293,3 +293,47 @@ fn no_annotations_keep_round_robin_no_sticky() {
     ));
     assert!(!out.ir.clusters[0].sticky_session);
 }
+
+#[test]
+fn service_annotations_set_connection_limit_per_ip() {
+    let svc: Service = from_json(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": "web", "namespace": "demo",
+            "annotations": {
+                "sozu.io/max-connections-per-ip": "100",
+                "sozu.io/retry-after": "30",
+            } },
+        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![svc],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.clusters[0].max_connections_per_ip, Some(100));
+    assert_eq!(out.ir.clusters[0].retry_after, Some(30));
+}
+
+#[test]
+fn non_numeric_connection_limit_is_ignored() {
+    // A typo'd value falls back to the global default rather than failing.
+    let svc: Service = from_json(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": "web", "namespace": "demo",
+            "annotations": { "sozu.io/max-connections-per-ip": "lots" } },
+        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![svc],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.clusters[0].max_connections_per_ip, None);
+    assert_eq!(out.ir.clusters[0].retry_after, None);
+}
