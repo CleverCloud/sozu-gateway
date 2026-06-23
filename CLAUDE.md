@@ -9,7 +9,8 @@ A Kubernetes Ingress controller / API gateway built on the [Sōzu](https://githu
 reverse proxy. The controller watches Kubernetes objects, compiles them into a neutral
 intermediate representation (IR), diffs that IR against the last-applied state, and pushes the
 minimal set of mutations to a co-located Sōzu instance over its protobuf **command socket** —
-hot, with no proxy restarts. **Phase 1 (Ingress + TLS) is complete**; see [PROGRESS.md](PROGRESS.md).
+hot, with no proxy restarts. **Phase 1 (Ingress + TLS) is complete** and validated end-to-end; see
+[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
 
 ## Commands
 
@@ -129,4 +130,4 @@ Releases (`v*` tags) publish the controller image and the Helm chart (OCI) to
 - `.scratch/` is research/probe scaffolding (live-Sōzu protocol probes, recon notes), not part of
   the shipped product.
 - Errors: typed per-crate with `thiserror`; `anyhow` only in the controller binary.
-- `PROGRESS.md` (the dev journal) is in French; code, comments, and docs are in English.
+- Code, comments, and docs are in English.
