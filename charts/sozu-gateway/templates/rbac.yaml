@@ -21,6 +21,15 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]
     verbs: ["get", "list", "watch"]
+  # Gateway API (Phase 2). Read the objects + report their status. The controller
+  # tolerates these CRDs being absent (Ingress-only mode), so the grant is inert
+  # on clusters without Gateway API installed.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways", "httproutes", "referencegrants"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
+    verbs: ["update", "patch"]
 {{- if .Values.rbac.allowStatusWrites }}
   # Ingress status reporting (Phase 2). Off by default for least-privilege.
   - apiGroups: ["networking.k8s.io"]

@@ -12,6 +12,7 @@ sozu-gw-ir = { workspace = true }
 sozu-gw-builder = { workspace = true }
 sozu-gw-translator = { workspace = true }
 sozu-gw-agent = { workspace = true }
+sozu-gw-gateway-api = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }

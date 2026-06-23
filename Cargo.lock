@@ -2344,6 +2344,7 @@ dependencies = [
  "serde_json",
  "sozu-gw-agent",
  "sozu-gw-builder",
+ "sozu-gw-gateway-api",
  "sozu-gw-ir",
  "sozu-gw-translator",
  "thiserror 2.0.18",

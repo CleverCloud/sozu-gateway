@@ -68,6 +68,8 @@ spec:
           env:
             - name: SOZU_GW_CLASS
               value: {{ .Values.ingressClass.name | quote }}
+            - name: SOZU_GW_CONTROLLER
+              value: {{ .Values.ingressClass.controllerValue | quote }}
             - name: SOZU_GW_SOCKET
               value: /run/sozu/sozu.sock
             - name: SOZU_GW_HTTP_LISTENER

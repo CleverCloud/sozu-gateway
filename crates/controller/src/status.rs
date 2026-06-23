@@ -1,0 +1,233 @@
+//! Gateway API status reporting (Phase 2).
+//!
+//! Writes Accepted/Programmed (Gateway, GatewayClass) and Accepted/ResolvedRefs
+//! (HTTPRoute, per parent) conditions back to the objects.
+//!
+//! **Loop-safe:** it reads the current status, reuses `lastTransitionTime` for
+//! conditions whose (status, reason, message) are unchanged, and skips the PATCH
+//! entirely when nothing changed — so the controller's own status writes never
+//! re-trigger a reconcile. **Best-effort:** every failure is logged, never
+//! propagated, so status reporting can never break routing.
+
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+use kube::api::{Patch, PatchParams};
+use kube::{Api, Client};
+use serde_json::json;
+use tracing::{debug, warn};
+
+use sozu_gw_builder::{GatewayClassResult, GatewayResult, RouteResult};
+use sozu_gw_gateway_api::httproute::{HttpRouteStatusParents, HttpRouteStatusParentsParentRef};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
+
+const GW_GROUP: &str = "gateway.networking.k8s.io";
+
+/// One desired condition before timestamping.
+struct Desired {
+    type_: &'static str,
+    status: bool,
+    reason: &'static str,
+    message: String,
+}
+
+pub async fn write_status(
+    client: &Client,
+    controller_name: &str,
+    gateway_classes: &[GatewayClassResult],
+    gateways: &[GatewayResult],
+    routes: &[RouteResult],
+) {
+    for gc in gateway_classes.iter().filter(|gc| gc.accepted) {
+        if let Err(e) = write_gatewayclass(client, gc).await {
+            warn!(name = %gc.name, error = %e, "failed to write GatewayClass status");
+        }
+    }
+    for gw in gateways {
+        if let Err(e) = write_gateway(client, gw).await {
+            warn!(namespace = %gw.namespace, name = %gw.name, error = %e, "failed to write Gateway status");
+        }
+    }
+    for route in routes {
+        if let Err(e) = write_route(client, controller_name, route).await {
+            warn!(namespace = %route.namespace, name = %route.name, error = %e, "failed to write HTTPRoute status");
+        }
+    }
+}
+
+fn now() -> Time {
+    Time(k8s_openapi::jiff::Timestamp::now())
+}
+
+/// Build conditions, reusing the previous `lastTransitionTime` when a condition's
+/// observable fields are unchanged (so repeated writes are byte-identical).
+fn build_conditions(desired: &[Desired], current: Option<&[Condition]>) -> Vec<Condition> {
+    desired
+        .iter()
+        .map(|d| {
+            let status = if d.status { "True" } else { "False" }.to_string();
+            let previous = current.and_then(|cs| cs.iter().find(|c| c.type_ == d.type_));
+            let last_transition_time = match previous {
+                Some(p) if p.status == status && p.reason == d.reason && p.message == d.message => {
+                    p.last_transition_time.clone()
+                }
+                _ => now(),
+            };
+            Condition {
+                type_: d.type_.to_string(),
+                status,
+                reason: d.reason.to_string(),
+                message: d.message.clone(),
+                last_transition_time,
+                observed_generation: None,
+            }
+        })
+        .collect()
+}
+
+fn conditions_equal(a: &[Condition], b: &[Condition]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y)
+}
+
+async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<(), kube::Error> {
+    let api: Api<GatewayClass> = Api::all(client.clone());
+    let current = api.get(&gc.name).await?;
+    let cur = current
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref());
+    let desired = build_conditions(
+        &[Desired {
+            type_: "Accepted",
+            status: true,
+            reason: "Accepted",
+            message: "Accepted by sozu-gateway".to_string(),
+        }],
+        cur,
+    );
+    if cur.is_some_and(|c| conditions_equal(&desired, c)) {
+        return Ok(());
+    }
+    let patch = json!({ "status": { "conditions": desired } });
+    api.patch_status(&gc.name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    debug!(name = %gc.name, "GatewayClass status updated");
+    Ok(())
+}
+
+async fn write_gateway(client: &Client, gw: &GatewayResult) -> Result<(), kube::Error> {
+    let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
+    let current = api.get(&gw.name).await?;
+    let cur = current
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref());
+    let desired = build_conditions(
+        &[
+            Desired {
+                type_: "Accepted",
+                status: gw.accepted,
+                reason: if gw.accepted { "Accepted" } else { "Invalid" },
+                message: "Accepted by sozu-gateway".to_string(),
+            },
+            Desired {
+                type_: "Programmed",
+                status: gw.programmed,
+                reason: if gw.programmed {
+                    "Programmed"
+                } else {
+                    "Invalid"
+                },
+                message: if gw.programmed {
+                    "Listeners programmed into Sōzu".to_string()
+                } else {
+                    "No listeners could be programmed".to_string()
+                },
+            },
+        ],
+        cur,
+    );
+    if cur.is_some_and(|c| conditions_equal(&desired, c)) {
+        return Ok(());
+    }
+    let patch = json!({ "status": { "conditions": desired } });
+    api.patch_status(&gw.name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    debug!(namespace = %gw.namespace, name = %gw.name, "Gateway status updated");
+    Ok(())
+}
+
+async fn write_route(
+    client: &Client,
+    controller_name: &str,
+    route: &RouteResult,
+) -> Result<(), kube::Error> {
+    let api: Api<HttpRoute> = Api::namespaced(client.clone(), &route.namespace);
+    let current = api.get(&route.name).await?;
+    let current_parents: Vec<HttpRouteStatusParents> =
+        current.status.map(|s| s.parents).unwrap_or_default();
+
+    // Keep parent entries owned by other controllers untouched.
+    let mut parents: Vec<HttpRouteStatusParents> = current_parents
+        .iter()
+        .filter(|p| p.controller_name != controller_name)
+        .cloned()
+        .collect();
+
+    for parent in &route.parents {
+        let existing = current_parents.iter().find(|p| {
+            p.controller_name == controller_name
+                && p.parent_ref.name == parent.gateway_name
+                && p.parent_ref.namespace.as_deref() == Some(parent.gateway_namespace.as_str())
+        });
+        let conditions = build_conditions(
+            &[
+                Desired {
+                    type_: "Accepted",
+                    status: parent.accepted,
+                    reason: if parent.accepted {
+                        "Accepted"
+                    } else {
+                        "NotAllowedByListeners"
+                    },
+                    message: "Route accepted by sozu-gateway".to_string(),
+                },
+                Desired {
+                    type_: "ResolvedRefs",
+                    status: parent.resolved_refs,
+                    reason: if parent.resolved_refs {
+                        "ResolvedRefs"
+                    } else {
+                        "BackendNotFound"
+                    },
+                    message: if parent.resolved_refs {
+                        "All backend references resolved".to_string()
+                    } else {
+                        "One or more backend references could not be resolved".to_string()
+                    },
+                },
+            ],
+            existing.and_then(|p| p.conditions.as_deref()),
+        );
+        parents.push(HttpRouteStatusParents {
+            conditions: Some(conditions),
+            controller_name: controller_name.to_string(),
+            parent_ref: HttpRouteStatusParentsParentRef {
+                group: Some(GW_GROUP.to_string()),
+                kind: Some("Gateway".to_string()),
+                name: parent.gateway_name.clone(),
+                namespace: Some(parent.gateway_namespace.clone()),
+                port: None,
+                section_name: None,
+            },
+        });
+    }
+
+    // Skip the write when the full parents list is unchanged (loop-safety).
+    if serde_json::to_value(&current_parents).ok() == serde_json::to_value(&parents).ok() {
+        return Ok(());
+    }
+    let patch = json!({ "status": { "parents": parents } });
+    api.patch_status(&route.name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    debug!(namespace = %route.namespace, name = %route.name, "HTTPRoute status updated");
+    Ok(())
+}

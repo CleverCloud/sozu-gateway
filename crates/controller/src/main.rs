@@ -20,6 +20,7 @@ use futures::StreamExt;
 use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
+use kube::api::ListParams;
 use kube::runtime::reflector::{store::Writer, Store};
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client, Resource};
@@ -31,16 +32,29 @@ use tracing_subscriber::EnvFilter;
 
 use sozu_gw_agent::SozuAgentHandle;
 use sozu_gw_builder::{build, BuildConfig, Inputs};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
+
+mod status;
 
 const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-class";
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "sozu-gw-controller", about = "Sōzu-based Ingress controller")]
+#[command(
+    name = "sozu-gw-controller",
+    about = "Sōzu-based Ingress + Gateway API controller"
+)]
 struct Args {
     /// IngressClass name we own.
     #[arg(long, env = "SOZU_GW_CLASS", default_value = "sozu")]
     class_name: String,
+    /// GatewayClass controllerName we own (Gateway API).
+    #[arg(
+        long,
+        env = "SOZU_GW_CONTROLLER",
+        default_value = "sozu.io/gateway-controller"
+    )]
+    controller_name: String,
     /// Path to the Sōzu command socket.
     #[arg(long, env = "SOZU_GW_SOCKET", default_value = "/run/sozu/sozu.sock")]
     socket: String,
@@ -65,6 +79,11 @@ struct Stores {
     services: Store<Service>,
     endpointslices: Store<EndpointSlice>,
     secrets: Store<Secret>,
+    // Gateway API (Phase 2).
+    gateway_classes: Store<GatewayClass>,
+    gateways: Store<Gateway>,
+    http_routes: Store<HttpRoute>,
+    reference_grants: Store<ReferenceGrant>,
 }
 
 /// Spawn a watcher+reflector that keeps `writer`'s store fresh and pings `tx`
@@ -123,11 +142,25 @@ where
     store.state().iter().map(|a| (**a).clone()).collect()
 }
 
+/// Are the Gateway API CRDs installed? Probed by a tiny list against
+/// `GatewayClass`; a `NotFound`/discovery error means the CRDs are absent.
+async fn gateway_api_available(client: &Client) -> bool {
+    let api: Api<GatewayClass> = Api::all(client.clone());
+    match api.list(&ListParams::default().limit(1)).await {
+        Ok(_) => true,
+        Err(e) => {
+            debug!(error = %e, "Gateway API not available");
+            false
+        }
+    }
+}
+
 /// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
 /// last-applied IR) only on a successful apply, so a failed push is retried from
 /// the same baseline.
 async fn reconcile(
     args: &Args,
+    client: &Client,
     stores: &Stores,
     agent: &SozuAgentHandle,
     shadow: &mut Ir,
@@ -135,6 +168,7 @@ async fn reconcile(
     let cfg = BuildConfig {
         class_name: args.class_name.clone(),
         class_is_default: class_is_default(stores, &args.class_name),
+        controller_name: args.controller_name.clone(),
         http_listener: args.http_listener,
         https_listener: args.https_listener,
     };
@@ -143,6 +177,10 @@ async fn reconcile(
         services: collect(&stores.services),
         endpointslices: collect(&stores.endpointslices),
         secrets: collect(&stores.secrets),
+        gateway_classes: collect(&stores.gateway_classes),
+        gateways: collect(&stores.gateways),
+        http_routes: collect(&stores.http_routes),
+        reference_grants: collect(&stores.reference_grants),
     };
 
     let out = build(&cfg, &inputs);
@@ -151,33 +189,58 @@ async fn reconcile(
             warn!(namespace = %r.namespace, name = %r.name, problems = ?r.problems, "ingress has problems");
         }
     }
-
-    let requests = tr::reconcile(shadow, &out.ir).context("translate IR to commands")?;
-    if requests.is_empty() {
-        debug!("reconcile: no changes");
-        return Ok(());
+    for g in &out.gateways {
+        if !g.problems.is_empty() {
+            warn!(namespace = %g.namespace, name = %g.name, problems = ?g.problems, "gateway has problems");
+        }
+    }
+    for route in &out.routes {
+        for parent in &route.parents {
+            if !parent.problems.is_empty() {
+                warn!(namespace = %route.namespace, name = %route.name, gateway = %parent.gateway_name, problems = ?parent.problems, "httproute has problems");
+            }
+        }
     }
 
-    info!(
-        clusters = out.ir.clusters.len(),
-        backends = out.ir.backends.len(),
-        frontends = out.ir.frontends.len(),
-        certificates = out.ir.certificates.len(),
-        requests = requests.len(),
-        "applying changes to sozu"
-    );
-    // Bound the apply so a wedged Sōzu socket surfaces as a retryable error
-    // instead of stalling the reconcile loop indefinitely.
-    tokio::time::timeout(Duration::from_secs(60), agent.apply(requests))
-        .await
-        .context("timed out applying requests to sozu")?
-        .context("apply requests to sozu")?;
-    // Shadow advances only on full success. On failure it stays at the previous
-    // applied IR; because every emitted request is idempotent (Add* upsert,
-    // Remove* of an absent object is a no-op, ReplaceCertificate tolerates a
-    // missing old fingerprint once the listener bucket exists), re-diffing from
-    // the unchanged shadow on the next pass safely converges.
-    *shadow = out.ir;
+    let requests = tr::reconcile(shadow, &out.ir).context("translate IR to commands")?;
+    let mut applied = false;
+    if requests.is_empty() {
+        debug!("reconcile: no socket changes");
+    } else {
+        info!(
+            clusters = out.ir.clusters.len(),
+            backends = out.ir.backends.len(),
+            frontends = out.ir.frontends.len(),
+            certificates = out.ir.certificates.len(),
+            requests = requests.len(),
+            "applying changes to sozu"
+        );
+        // Bound the apply so a wedged Sōzu socket surfaces as a retryable error
+        // instead of stalling the reconcile loop indefinitely.
+        tokio::time::timeout(Duration::from_secs(60), agent.apply(requests))
+            .await
+            .context("timed out applying requests to sozu")?
+            .context("apply requests to sozu")?;
+        applied = true;
+    }
+
+    // Report Gateway API status (best-effort; never fails the reconcile). It is
+    // loop-safe: a no-op patch is skipped, so our own writes don't re-trigger.
+    status::write_status(
+        client,
+        &args.controller_name,
+        &out.gateway_classes,
+        &out.gateways,
+        &out.routes,
+    )
+    .await;
+
+    // Shadow advances only on a successful socket apply. On failure it stays at
+    // the previous applied IR; because every emitted request is idempotent,
+    // re-diffing from the unchanged shadow on the next pass safely converges.
+    if applied {
+        *shadow = out.ir;
+    }
     Ok(())
 }
 
@@ -211,12 +274,33 @@ async fn main() -> Result<()> {
     let (secrets, w) = reflector::store();
     spawn_watch::<Secret>(Api::all(client.clone()), w, tx.clone(), "secret");
 
+    // Gateway API CRDs are optional. Only watch them when they are installed, so
+    // an Ingress-only cluster runs cleanly instead of logging watch errors.
+    let (gateway_classes, gc_w) = reflector::store();
+    let (gateways, gw_w) = reflector::store();
+    let (http_routes, hr_w) = reflector::store();
+    let (reference_grants, rg_w) = reflector::store();
+    if gateway_api_available(&client).await {
+        info!("Gateway API detected; watching gateway.networking.k8s.io resources");
+        spawn_watch::<GatewayClass>(Api::all(client.clone()), gc_w, tx.clone(), "gatewayclass");
+        spawn_watch::<Gateway>(Api::all(client.clone()), gw_w, tx.clone(), "gateway");
+        spawn_watch::<HttpRoute>(Api::all(client.clone()), hr_w, tx.clone(), "httproute");
+        spawn_watch::<ReferenceGrant>(Api::all(client.clone()), rg_w, tx.clone(), "referencegrant");
+    } else {
+        info!("Gateway API CRDs not found; running in Ingress-only mode");
+        drop((gc_w, gw_w, hr_w, rg_w));
+    }
+
     let stores = Stores {
         ingresses,
         ingress_classes,
         services,
         endpointslices,
         secrets,
+        gateway_classes,
+        gateways,
+        http_routes,
+        reference_grants,
     };
 
     // Wait for the caches to fill so the first reconcile sees a complete picture.
@@ -247,7 +331,7 @@ async fn main() -> Result<()> {
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Initial reconcile (full apply).
-    if let Err(e) = reconcile(&args, &stores, &agent, &mut shadow).await {
+    if let Err(e) = reconcile(&args, &client, &stores, &agent, &mut shadow).await {
         error!(error = ?e, "initial reconcile failed; will retry");
     }
 
@@ -265,7 +349,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        if let Err(e) = reconcile(&args, &stores, &agent, &mut shadow).await {
+        if let Err(e) = reconcile(&args, &client, &stores, &agent, &mut shadow).await {
             error!(error = ?e, "reconcile failed; will retry on next event/resync");
         }
     }
