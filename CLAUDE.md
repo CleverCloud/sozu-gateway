@@ -68,9 +68,11 @@ A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
   emitted request is idempotent, re-diffing from the unchanged shadow converges.
 - **Fail-fast philosophy:** if a watch stream ends or caches don't sync within the timeout, the
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
-- Known Phase-1 limitation: restarting *only* the controller container resets the shadow to empty,
-  so it re-applies everything (idempotent) but won't prune residual Sōzu state until a later change
-  removes it.
+- The shadow is **persisted** to the shared volume (`--shadow-file`, default `/run/sozu/shadow.json`)
+  on every successful apply and reloaded at startup, so restarting *only* the controller resumes from
+  the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**
+  (probed via `save_state`): if Sōzu itself restarted (empty), the stale shadow is ignored and the
+  full state is re-applied, so a fresh Sōzu is never left unprogrammed.
 
 ### Translator diff strategy — the subtle part
 

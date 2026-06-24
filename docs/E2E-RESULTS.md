@@ -114,5 +114,7 @@ replacement) and `phase3-e2e.sh` (HTTPRoute filters, section 5).
 
 ## Known limitations
 
-- Restarting only the controller container resets its in-memory shadow to empty; it re-applies
-  everything (idempotent) but will not prune residual Sōzu state until a later change removes it.
+- A Sōzu-only restart at runtime (the controller staying up) is not yet detected: the controller's
+  in-memory shadow still reflects the pre-restart state, so it won't re-push until the next change.
+  Restart the whole Pod, or run `replicaCount >= 2`. (A controller-only restart is handled — the
+  shadow is persisted and resumed; see CLAUDE.md.)

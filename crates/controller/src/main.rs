@@ -38,6 +38,7 @@ use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
 
 mod health;
+mod shadow;
 mod status;
 
 const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-class";
@@ -81,6 +82,15 @@ struct Args {
     /// Bind address for the health endpoints (`/healthz`, `/readyz`).
     #[arg(long, env = "SOZU_GW_HEALTH_LISTEN", default_value = "0.0.0.0:8081")]
     health_listen: SocketAddr,
+    /// File on the shared volume where the last-applied state is persisted, so a
+    /// controller-only restart resumes from it (and prunes orphaned Sōzu state)
+    /// instead of re-applying everything. Empty disables persistence.
+    #[arg(
+        long,
+        env = "SOZU_GW_SHADOW_FILE",
+        default_value = "/run/sozu/shadow.json"
+    )]
+    shadow_file: String,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -280,6 +290,8 @@ async fn reconcile(
     // re-diffing from the unchanged shadow on the next pass safely converges.
     if applied {
         *shadow = out.ir;
+        // Persist the new baseline so a controller-only restart resumes from it.
+        shadow::persist(&args.shadow_file, shadow);
     }
     Ok(())
 }
@@ -377,9 +389,12 @@ async fn main() -> Result<()> {
         .context("informer cache writer dropped before becoming ready")?;
     info!("caches synced");
 
-    // Shadow of the last successfully-applied IR. Starts empty: the first
-    // reconcile diffs empty→desired, i.e. pushes the full state at startup.
-    let mut shadow = Ir::default();
+    // Shadow of the last successfully-applied IR. Resumed from the shared volume
+    // when Sōzu still holds its state (a controller-only restart), so the first
+    // reconcile prunes orphans instead of re-adding everything; otherwise empty,
+    // so a fresh/just-restarted Sōzu gets the full state.
+    let probe_file = format!("{}.probe", args.shadow_file);
+    let mut shadow = shadow::load_initial(&agent, &args.shadow_file, &probe_file).await;
 
     let debounce = Duration::from_millis(args.debounce_ms);
     let mut resync = tokio::time::interval(Duration::from_secs(args.resync_secs));

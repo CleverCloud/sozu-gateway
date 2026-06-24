@@ -172,6 +172,7 @@ impl SozuAgent {
 
 enum Job {
     Apply(Vec<Request>, oneshot::Sender<Result<(), SozuError>>),
+    SaveState(String, oneshot::Sender<Result<(), SozuError>>),
 }
 
 /// Cloneable async handle to a single Sōzu command socket. All work runs on one
@@ -198,6 +199,9 @@ impl SozuAgentHandle {
                         Job::Apply(requests, reply) => {
                             let _ = reply.send(agent.apply(&requests));
                         }
+                        Job::SaveState(path, reply) => {
+                            let _ = reply.send(agent.save_state(path));
+                        }
                     }
                 }
                 debug!("sozu-agent worker thread exiting");
@@ -210,6 +214,16 @@ impl SozuAgentHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Job::Apply(requests, reply_tx))
+            .map_err(|_| SozuError::WorkerGone)?;
+        reply_rx.await.map_err(|_| SozuError::WorkerGone)?
+    }
+
+    /// Ask Sōzu to dump its full routing state to `path` (a file both the
+    /// controller and Sōzu can see via the shared volume).
+    pub async fn save_state(&self, path: String) -> Result<(), SozuError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Job::SaveState(path, reply_tx))
             .map_err(|_| SozuError::WorkerGone)?;
         reply_rx.await.map_err(|_| SozuError::WorkerGone)?
     }
