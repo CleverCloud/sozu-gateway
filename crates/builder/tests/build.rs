@@ -406,3 +406,48 @@ fn http_only_ingress_is_not_redirected() {
     assert_eq!(out.ir.frontends.len(), 1, "only the HTTP frontend");
     assert!(out.ir.frontends[0].filters.redirect.is_none());
 }
+
+#[test]
+fn certs_sharing_a_secret_are_merged_with_unioned_names() {
+    // One TLS Secret backing two hosts (here two TLS entries on one Ingress, the
+    // same shape as an Ingress + a Gateway listener sharing a Secret) must yield
+    // ONE certificate with both names — Sōzu keys a cert by (listener, fp), so a
+    // second entry would make the translator ReplaceCertificate forever.
+    let ing: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "tls": [
+                { "hosts": ["b.example.com"], "secretName": "app-tls" },
+                { "hosts": ["a.example.com"], "secretName": "app-tls" }
+            ],
+            "rules": [
+                { "host": "a.example.com", "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } } ] } },
+                { "host": "b.example.com", "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } } ] } }
+            ]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ing],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(
+        out.ir.certificates.len(),
+        1,
+        "one cert per (listener, fingerprint)"
+    );
+    assert_eq!(
+        out.ir.certificates[0].names,
+        vec!["a.example.com".to_string(), "b.example.com".to_string()],
+        "names unioned and sorted"
+    );
+}

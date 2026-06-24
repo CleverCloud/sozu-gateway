@@ -408,6 +408,31 @@ pub(crate) fn add_service_route(
     Ok((cluster_id, !addrs.is_empty()))
 }
 
+/// Merge certificates that share Sōzu's identity at a listener — same leaf PEM
+/// (hence same fingerprint) on the same listener — into one entry, unioning
+/// their SNI names. The same TLS Secret routinely backs several routes with
+/// different hostnames (e.g. an Ingress and a Gateway listener); Sōzu stores
+/// exactly one certificate per `(listener, fingerprint)`, so the IR must present
+/// one too. Otherwise the translator would emit a `ReplaceCertificate` on every
+/// reconcile, forever flipping between the conflicting name sets.
+fn merge_certificates(certs: Vec<ir::Certificate>) -> Vec<ir::Certificate> {
+    let mut merged: Vec<ir::Certificate> = Vec::new();
+    for c in certs {
+        match merged
+            .iter_mut()
+            .find(|e| e.listener == c.listener && e.certificate == c.certificate)
+        {
+            Some(existing) => existing.names.extend(c.names),
+            None => merged.push(c),
+        }
+    }
+    for c in &mut merged {
+        c.names.sort();
+        c.names.dedup();
+    }
+    merged
+}
+
 /// Compile all our-class Ingresses (+ resolved deps) into the IR.
 pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let index = Index::build(inputs);
@@ -585,12 +610,12 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         (a.tls, &a.hostname, &a.cluster_id).cmp(&(b.tls, &b.hostname, &b.cluster_id))
     });
 
-    // Dedup certificates referenced by multiple Ingresses / TLS entries.
+    // Merge certs that share Sōzu's (listener, fingerprint) identity, unioning
+    // their names, then order deterministically. This subsumes exact-duplicate
+    // dedup and prevents a perpetual ReplaceCertificate diff.
+    let mut certificates = merge_certificates(certificates);
     certificates.sort_by(|a, b| {
         (&a.listener, &a.names, &a.certificate).cmp(&(&b.listener, &b.names, &b.certificate))
-    });
-    certificates.dedup_by(|a, b| {
-        a.listener == b.listener && a.names == b.names && a.certificate == b.certificate
     });
 
     BuildOutput {
