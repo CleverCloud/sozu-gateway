@@ -63,7 +63,17 @@ fn now() -> Time {
 
 /// Build conditions, reusing the previous `lastTransitionTime` when a condition's
 /// observable fields are unchanged (so repeated writes are byte-identical).
-fn build_conditions(desired: &[Desired], current: Option<&[Condition]>) -> Vec<Condition> {
+///
+/// `observed_generation` is set to the object's `metadata.generation`: the Gateway
+/// API requires every condition to carry it, and conformance checks that it tracks
+/// the latest generation. `lastTransitionTime` still only moves when `status`
+/// flips — a generation bump alone updates `observedGeneration` without resetting
+/// the transition time.
+fn build_conditions(
+    desired: &[Desired],
+    current: Option<&[Condition]>,
+    generation: Option<i64>,
+) -> Vec<Condition> {
     desired
         .iter()
         .map(|d| {
@@ -81,7 +91,7 @@ fn build_conditions(desired: &[Desired], current: Option<&[Condition]>) -> Vec<C
                 reason: d.reason.to_string(),
                 message: d.message.clone(),
                 last_transition_time,
-                observed_generation: None,
+                observed_generation: generation,
             }
         })
         .collect()
@@ -106,6 +116,7 @@ async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<
             message: "Accepted by sozu-gateway".to_string(),
         }],
         cur,
+        current.metadata.generation,
     );
     if cur.is_some_and(|c| conditions_equal(&desired, c)) {
         return Ok(());
@@ -152,6 +163,7 @@ async fn write_gateway(
             },
         ],
         cur,
+        current.metadata.generation,
     );
     // Publish the LoadBalancer address into the Gateway's status (what
     // external-dns's gateway-httproute source reads). Skipped when there is no
@@ -206,6 +218,7 @@ async fn write_route(
 ) -> Result<(), kube::Error> {
     let api: Api<HttpRoute> = Api::namespaced(client.clone(), &route.namespace);
     let current = api.get(&route.name).await?;
+    let generation = current.metadata.generation;
     let current_parents: Vec<HttpRouteStatusParents> =
         current.status.map(|s| s.parents).unwrap_or_default();
 
@@ -250,6 +263,7 @@ async fn write_route(
                 },
             ],
             existing.and_then(|p| p.conditions.as_deref()),
+            generation,
         );
         parents.push(HttpRouteStatusParents {
             conditions: Some(conditions),
