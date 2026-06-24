@@ -105,12 +105,19 @@ backends), so it maps to a frontend with no cluster — Sōzu answers the 301 it
 ## Reproduce
 
 ```sh
-just e2e          # functional path: install + demo app + HTTP/HTTPS checks + hot removal
+just e2e          # section 1: Ingress + TLS — install + demo app + HTTP/HTTPS + hot removal
+just e2e-gateway  # sections 4–5: Gateway API routing + header/redirect filters
+just e2e-l4       # raw TCP (L4) forwarding through Sōzu
+just e2e-all      # all three, sharing one freshly-built image
 ```
 
+Each suite builds + pushes the controller image to the anonymous `ttl.sh` registry by default (no
+credentials needed) and installs the add-on on the current kube-context; the scripts live under
+[scripts/](../scripts/).
+
 The load/churn harnesses used for sections 2–3 live under `.scratch/` (developer scaffolding, not
-shipped): `hot-reload-test2.sh` (config hot reload), `dataplane-upgrade-test.sh` (Sōzu Pod
-replacement) and `phase3-e2e.sh` (HTTPRoute filters, section 5).
+shipped): `hot-reload-test2.sh` (config hot reload) and `dataplane-upgrade-test.sh` (Sōzu Pod
+replacement).
 
 ## Known limitations
 
