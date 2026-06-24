@@ -14,6 +14,7 @@ members = [
     "crates/sozu-agent",
     "crates/controller",
     "crates/gateway-api",
+    "crates/prometheus",
 ]
 
 [workspace.package]
@@ -51,6 +52,7 @@ sozu-gw-gateway-api = { path = "crates/gateway-api" }
 sozu-gw-translator = { path = "crates/translator" }
 sozu-gw-builder = { path = "crates/builder" }
 sozu-gw-agent = { path = "crates/sozu-agent" }
+sozu-gw-prometheus = { path = "crates/prometheus" }
 
 [profile.release]
 strip = true

@@ -38,6 +38,7 @@ use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
 
 mod health;
+mod metrics;
 mod shadow;
 mod status;
 
@@ -82,6 +83,10 @@ struct Args {
     /// Bind address for the health endpoints (`/healthz`, `/readyz`).
     #[arg(long, env = "SOZU_GW_HEALTH_LISTEN", default_value = "0.0.0.0:8081")]
     health_listen: SocketAddr,
+    /// Bind address for the Prometheus `/metrics` endpoint (pulls Sōzu's
+    /// metrics over the command socket on each scrape). Unset disables it.
+    #[arg(long, env = "SOZU_GW_METRICS_LISTEN")]
+    metrics_listen: Option<SocketAddr>,
     /// File on the shared volume where the last-applied state is persisted, so a
     /// controller-only restart resumes from it (and prunes orphaned Sōzu state)
     /// instead of re-applying everything. Empty disables persistence.
@@ -356,6 +361,13 @@ async fn main() -> Result<()> {
         .await
         .context("create kube client (in-cluster or kubeconfig)")?;
     let agent = SozuAgentHandle::spawn(&args.socket).context("spawn sozu-agent")?;
+
+    // Optional Prometheus `/metrics`: each scrape pulls Sōzu's aggregated
+    // metrics over the same command socket and renders them. Best-effort and
+    // independent of routing — a bind failure never affects reconciliation.
+    if let Some(addr) = args.metrics_listen {
+        metrics::spawn(addr, agent.clone());
+    }
 
     // One signal channel fed by every watcher.
     let (tx, mut rx) = mpsc::channel::<()>(64);

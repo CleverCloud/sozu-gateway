@@ -55,6 +55,7 @@ all socket/kube-client I/O lives in `sozu-agent` and `controller`.
 | [`crates/gateway-api`](crates/gateway-api) | Gateway API CRD types, kopium-generated (types only) | none |
 | [`crates/builder`](crates/builder) | typed Ingress **+ Gateway API** objects → IR (+ `Problem`s/results) | none |
 | [`crates/translator`](crates/translator) | pure IR → Sōzu commands, diff vs last-applied | none |
+| [`crates/prometheus`](crates/prometheus) | pure `AggregatedMetrics` → Prometheus text exposition | none |
 | [`crates/sozu-agent`](crates/sozu-agent) | wrapper around `sozu-command-lib` (socket, ack loop) | **socket** |
 | [`crates/controller`](crates/controller) | kube-rs watch/reconcile loop, wires it together | **kube + socket** |
 
@@ -134,6 +135,13 @@ patches, so the controller's own status writes never re-trigger it. Status write
   when there is exactly one (don't guess `first()`).
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
+- **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
+  (opt-in, `--metrics-listen` / Helm `metrics.enabled`) by issuing a `QueryMetrics` over the command
+  socket on each scrape and rendering the returned `AggregatedMetrics` with the pure
+  [`prometheus` crate](crates/prometheus). It is best-effort and orthogonal to routing: a socket
+  error returns `503`, never a panic. Sōzu's histogram buckets are already cumulative (`le`), so they
+  map straight onto Prometheus `_bucket`; `Percentiles` become a `summary` (Sōzu only max-merges them
+  across workers — the companion `*_histogram` is the accurate aggregate).
 - The Sōzu command socket takes a **bare length-prefixed `Request`**; replies come back as
   `Processing` → `Ok`/`Failure`, so every send loops until a terminal status. This protocol is
   **verified against a live Sōzu**, documented in [PROTOCOL.md](PROTOCOL.md) (the source of truth

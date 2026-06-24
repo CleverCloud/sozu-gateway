@@ -2346,6 +2346,7 @@ dependencies = [
  "sozu-gw-builder",
  "sozu-gw-gateway-api",
  "sozu-gw-ir",
+ "sozu-gw-prometheus",
  "sozu-gw-translator",
  "thiserror 2.0.18",
  "tokio",
@@ -2368,6 +2369,14 @@ name = "sozu-gw-ir"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "sozu-gw-prometheus"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "sozu-command-lib",
 ]
 
 [[package]]

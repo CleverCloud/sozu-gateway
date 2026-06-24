@@ -1,0 +1,20 @@
+{{- if .Values.metrics.enabled }}
+# Internal ClusterIP Service for the controller's Prometheus /metrics endpoint.
+# Kept separate from the data-plane LoadBalancer Service so the metrics port is
+# never externally routable; it is the scrape target for the ServiceMonitor.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}-metrics
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "sozu-gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

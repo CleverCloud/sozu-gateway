@@ -148,6 +148,7 @@ The controller is configured through environment variables, all set by the Helm 
 | `SOZU_GW_HTTPS_LISTENER`| `Address` | `0.0.0.0:8443`        | HTTPS listener address; **must match** Sōzu's `config.toml`        |
 | `SOZU_GW_DEBOUNCE_MS`   | `Integer` | `500`                 | Coalesce bursts of watch events before reconciling                 |
 | `SOZU_GW_RESYNC_SECS`   | `Integer` | `60`                  | Periodic full resync interval (self-heals drift)                   |
+| `SOZU_GW_METRICS_LISTEN`| `Address` | _(unset)_             | Bind address for Prometheus `/metrics`; unset disables it          |
 | `RUST_LOG`              | `String`  | `info`                | Log filter, e.g. `info,sozu_gw_controller=debug`                   |
 
 The most useful Helm values (see [values.yaml](charts/sozu-gateway/values.yaml) for the full list):
@@ -161,6 +162,20 @@ The most useful Helm values (see [values.yaml](charts/sozu-gateway/values.yaml) 
 | `sozu.workerCount`             | `2`                                | Sōzu worker processes                                  |
 | `service.type`                 | `LoadBalancer`                     | How the proxy is exposed                               |
 | `rbac.allowStatusWrites`       | `false`                            | Grant `ingresses/status` + `events` (Phase 2)          |
+| `metrics.enabled`              | `false`                            | Serve Prometheus `/metrics` (pulled from Sōzu)         |
+| `metrics.port`                 | `9100`                             | Container + ClusterIP Service port for `/metrics`      |
+| `metrics.serviceMonitor.enabled` | `false`                          | Create a `ServiceMonitor` (needs the Prometheus Operator) |
+
+### Metrics
+
+Sōzu has no built-in `/metrics` endpoint. With `metrics.enabled=true` the controller serves one:
+each Prometheus scrape issues a `QueryMetrics` over the Sōzu command socket and renders the
+returned aggregate (per-cluster/backend request counts, bytes, HTTP status classes, latency
+histograms) as Prometheus text. Metrics are best-effort and independent of routing — a socket hiccup
+returns `503`, never a panic. A dedicated `ClusterIP` Service (`<release>-metrics`, not the
+data-plane LoadBalancer) exposes the port; set `metrics.serviceMonitor.enabled=true` to also create
+a `ServiceMonitor` (use `metrics.serviceMonitor.additionalLabels` to match your Prometheus
+Operator's selector). Without the operator, scrape the Pod directly on `metrics.port`.
 
 ### IngressClass
 

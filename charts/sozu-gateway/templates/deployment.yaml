@@ -82,6 +82,10 @@ spec:
               value: {{ .Values.controller.resyncSecs | quote }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
+            {{- if .Values.metrics.enabled }}
+            - name: SOZU_GW_METRICS_LISTEN
+              value: "0.0.0.0:{{ .Values.metrics.port }}"
+            {{- end }}
             {{- if .Values.rbac.allowStatusWrites }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'
             # .status (needs the ingresses/status grant gated by the same flag).
@@ -101,6 +105,10 @@ spec:
           ports:
             - name: health
               containerPort: {{ .Values.controller.healthPort | default 8081 }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           # Readiness only goes green once the controller has programmed Sōzu, so
           # a fresh Pod (start, rolling update, scale-out) takes no traffic until
           # its routes exist. Liveness is independent: it is up from boot.

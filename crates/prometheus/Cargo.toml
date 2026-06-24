@@ -1,0 +1,18 @@
+[package]
+name = "sozu-gw-prometheus"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# prometheus = pure formatter: Sōzu `AggregatedMetrics` -> Prometheus text
+# exposition format. No socket/kube I/O (like `translator`, depends on
+# sozu-command-lib *types only*); the controller pulls the metrics and calls
+# `render` to serve `/metrics`.
+[dependencies]
+sozu-command-lib = { workspace = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["redactions"] }
+sozu-command-lib = { workspace = true }

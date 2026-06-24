@@ -18,11 +18,16 @@ use std::time::{Duration, Instant};
 
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
-    request::RequestType, Request, Response, ResponseStatus, Status,
+    request::RequestType, response_content::ContentType, Request, Response, ResponseContent,
+    ResponseStatus, Status,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
+
+// Re-exported so callers (the controller) can drive `query_metrics` without
+// taking a direct dependency on `sozu-command-lib`.
+pub use sozu_command_lib::proto::command::{AggregatedMetrics, QueryMetricsOptions};
 
 /// Client-side socket buffer sizes (server bounds come from `config.toml`).
 const DEFAULT_BUFFER_SIZE: u64 = 1024 * 1024;
@@ -40,6 +45,8 @@ pub enum SozuError {
     Channel(String),
     #[error("sozu rejected the request: {0}")]
     Failure(String),
+    #[error("sozu returned an unexpected response (no metrics content)")]
+    UnexpectedResponse,
     #[error("sozu-agent worker thread is gone")]
     WorkerGone,
 }
@@ -120,25 +127,32 @@ impl SozuAgent {
         }
     }
 
-    /// Apply one request; on a *channel* error (broken pipe, etc.) reconnect once
-    /// and retry. Application-level `Failure` is returned without retrying.
-    fn apply_one(&mut self, request: &Request) -> Result<(), SozuError> {
+    /// Send one request and return its terminal `Response`; on a *channel* error
+    /// (broken pipe, etc.) reconnect once and retry. Application-level `Failure`
+    /// is returned without retrying.
+    fn send_with_retry(&mut self, request: &Request) -> Result<Response, SozuError> {
         let read_timeout = self.read_timeout;
         let first = {
             let channel = self.channel_mut()?;
             Self::send_one(channel, read_timeout, request)
         };
         match first {
-            Ok(_) => Ok(()),
+            Ok(response) => Ok(response),
             Err(failure @ SozuError::Failure(_)) => Err(failure),
             Err(channel_error) => {
                 warn!(error = %channel_error, "sozu channel error, reconnecting and retrying");
                 self.channel = None;
                 thread::sleep(RECONNECT_BACKOFF);
                 let channel = self.channel_mut()?;
-                Self::send_one(channel, read_timeout, request).map(|_| ())
+                Self::send_one(channel, read_timeout, request)
             }
         }
+    }
+
+    /// Apply one request, discarding the response body (mutations only care about
+    /// success/failure).
+    fn apply_one(&mut self, request: &Request) -> Result<(), SozuError> {
+        self.send_with_retry(request).map(|_| ())
     }
 
     /// Apply a batch of requests in order (the caller supplies a dependency-safe
@@ -164,6 +178,23 @@ impl SozuAgent {
     pub fn save_state(&mut self, path: impl Into<String>) -> Result<(), SozuError> {
         self.apply_one(&RequestType::SaveState(path.into()).into())
     }
+
+    /// Pull Sōzu's aggregated metrics over the command socket (a `QueryMetrics`
+    /// round-trip). Unlike a mutation, this keeps the response body and extracts
+    /// the `AggregatedMetrics` from it.
+    pub fn query_metrics(
+        &mut self,
+        options: QueryMetricsOptions,
+    ) -> Result<AggregatedMetrics, SozuError> {
+        let request: Request = RequestType::QueryMetrics(options).into();
+        let response = self.send_with_retry(&request)?;
+        match response.content {
+            Some(ResponseContent {
+                content_type: Some(ContentType::Metrics(metrics)),
+            }) => Ok(metrics),
+            _ => Err(SozuError::UnexpectedResponse),
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -173,6 +204,10 @@ impl SozuAgent {
 enum Job {
     Apply(Vec<Request>, oneshot::Sender<Result<(), SozuError>>),
     SaveState(String, oneshot::Sender<Result<(), SozuError>>),
+    QueryMetrics(
+        QueryMetricsOptions,
+        oneshot::Sender<Result<AggregatedMetrics, SozuError>>,
+    ),
 }
 
 /// Cloneable async handle to a single Sōzu command socket. All work runs on one
@@ -202,6 +237,9 @@ impl SozuAgentHandle {
                         Job::SaveState(path, reply) => {
                             let _ = reply.send(agent.save_state(path));
                         }
+                        Job::QueryMetrics(options, reply) => {
+                            let _ = reply.send(agent.query_metrics(options));
+                        }
                     }
                 }
                 debug!("sozu-agent worker thread exiting");
@@ -227,6 +265,18 @@ impl SozuAgentHandle {
             .map_err(|_| SozuError::WorkerGone)?;
         reply_rx.await.map_err(|_| SozuError::WorkerGone)?
     }
+
+    /// Pull Sōzu's aggregated metrics over the command socket.
+    pub async fn query_metrics(
+        &self,
+        options: QueryMetricsOptions,
+    ) -> Result<AggregatedMetrics, SozuError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Job::QueryMetrics(options, reply_tx))
+            .map_err(|_| SozuError::WorkerGone)?;
+        reply_rx.await.map_err(|_| SozuError::WorkerGone)?
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +295,15 @@ mod tests {
     fn apply_to_missing_socket_is_channel_error() {
         let mut agent = SozuAgent::new("/nonexistent/sozu.sock");
         let err = agent.status().unwrap_err();
+        assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn query_metrics_to_missing_socket_is_channel_error() {
+        let mut agent = SozuAgent::new("/nonexistent/sozu.sock");
+        let err = agent
+            .query_metrics(QueryMetricsOptions::default())
+            .unwrap_err();
         assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
     }
 

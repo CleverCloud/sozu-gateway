@@ -69,8 +69,9 @@ async fn serve_one(sock: &mut TcpStream, ready: &AtomicBool) -> std::io::Result<
 }
 
 /// Extract the request-target path from an HTTP request line
-/// (`GET /readyz HTTP/1.1`), stripping any query string.
-fn request_path(head: &[u8]) -> Option<&str> {
+/// (`GET /readyz HTTP/1.1`), stripping any query string. Shared with the
+/// `metrics` module's identical hand-rolled server.
+pub(crate) fn request_path(head: &[u8]) -> Option<&str> {
     let end = head
         .iter()
         .position(|&b| b == b'\r' || b == b'\n')

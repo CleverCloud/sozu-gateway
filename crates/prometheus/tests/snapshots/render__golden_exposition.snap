@@ -1,0 +1,40 @@
+---
+source: crates/prometheus/tests/render.rs
+expression: "sozu_gw_prometheus::render(&sample_metrics())"
+---
+# HELP sozu_bytes_out Sozu data-plane metric.
+# TYPE sozu_bytes_out counter
+sozu_bytes_out{cluster_id="demo/app",backend_id="demo-backend-0"} 2048
+# HELP sozu_config_reloads Sozu data-plane metric.
+# TYPE sozu_config_reloads counter
+sozu_config_reloads{process="main"} 3
+# HELP sozu_connections Sozu data-plane metric.
+# TYPE sozu_connections gauge
+sozu_connections{cluster_id="demo/app",backend_id="demo-backend-0"} 2
+# HELP sozu_connections_active Sozu data-plane metric.
+# TYPE sozu_connections_active gauge
+sozu_connections_active 7
+# HELP sozu_requests Sozu data-plane metric.
+# TYPE sozu_requests counter
+sozu_requests 1000
+sozu_requests{cluster_id="demo/app"} 500
+# HELP sozu_response_time Sozu data-plane metric.
+# TYPE sozu_response_time summary
+sozu_response_time{cluster_id="demo/app",quantile="0.5"} 5
+sozu_response_time{cluster_id="demo/app",quantile="0.9"} 9
+sozu_response_time{cluster_id="demo/app",quantile="0.99"} 20
+sozu_response_time{cluster_id="demo/app",quantile="0.999"} 30
+sozu_response_time{cluster_id="demo/app",quantile="0.9999"} 40
+sozu_response_time{cluster_id="demo/app",quantile="0.99999"} 50
+sozu_response_time{cluster_id="demo/app",quantile="1"} 60
+sozu_response_time_sum{cluster_id="demo/app"} 800
+sozu_response_time_count{cluster_id="demo/app"} 100
+# HELP sozu_response_time_histogram Sozu data-plane metric.
+# TYPE sozu_response_time_histogram histogram
+sozu_response_time_histogram_bucket{cluster_id="demo/app",le="0"} 10
+sozu_response_time_histogram_bucket{cluster_id="demo/app",le="1"} 25
+sozu_response_time_histogram_bucket{cluster_id="demo/app",le="3"} 40
+sozu_response_time_histogram_bucket{cluster_id="demo/app",le="7"} 48
+sozu_response_time_histogram_bucket{cluster_id="demo/app",le="+Inf"} 50
+sozu_response_time_histogram_sum{cluster_id="demo/app"} 1234
+sozu_response_time_histogram_count{cluster_id="demo/app"} 50
