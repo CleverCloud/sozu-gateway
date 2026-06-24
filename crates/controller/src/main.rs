@@ -400,6 +400,12 @@ async fn main() -> Result<()> {
     let mut resync = tokio::time::interval(Duration::from_secs(args.resync_secs));
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Graceful shutdown on the signals Kubernetes uses on Pod termination, so we
+    // stop cleanly within the grace period instead of being SIGKILLed.
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+
     // Initial reconcile (full apply). Readiness latches once this succeeds.
     match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
         Ok(()) => mark_ready(&ready),
@@ -418,6 +424,8 @@ async fn main() -> Result<()> {
             _ = resync.tick() => {
                 debug!("periodic resync");
             }
+            _ = sigterm.recv() => { info!("SIGTERM received; shutting down"); break; }
+            _ = sigint.recv() => { info!("SIGINT received; shutting down"); break; }
         }
 
         match reconcile(&args, &client, &stores, &agent, &mut shadow).await {
