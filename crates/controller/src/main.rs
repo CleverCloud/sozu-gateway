@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use kube::api::ListParams;
@@ -91,6 +91,13 @@ struct Args {
         default_value = "/run/sozu/shadow.json"
     )]
     shadow_file: String,
+    /// ConfigMap (`namespace/name`) mapping TCP ports to Services, ingress-nginx
+    /// style (`"<port>": "<ns>/<svc>:<port>"`). Unset disables TCP L4.
+    #[arg(long, env = "SOZU_GW_TCP_SERVICES")]
+    tcp_services_configmap: Option<String>,
+    /// Same as `--tcp-services-configmap`, for UDP.
+    #[arg(long, env = "SOZU_GW_UDP_SERVICES")]
+    udp_services_configmap: Option<String>,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -100,6 +107,8 @@ struct Stores {
     services: Store<Service>,
     endpointslices: Store<EndpointSlice>,
     secrets: Store<Secret>,
+    /// ConfigMaps (only watched when L4 tcp/udp-services are configured).
+    config_maps: Store<ConfigMap>,
     // Gateway API (Phase 2).
     gateway_classes: Store<GatewayClass>,
     gateways: Store<Gateway>,
@@ -163,6 +172,19 @@ where
     store.state().iter().map(|a| (**a).clone()).collect()
 }
 
+/// Find a `namespace/name` ConfigMap in the cache (L4 tcp/udp-services).
+fn lookup_configmap(store: &Store<ConfigMap>, spec: &Option<String>) -> Option<ConfigMap> {
+    let (ns, name) = spec.as_ref()?.split_once('/')?;
+    store
+        .state()
+        .iter()
+        .find(|cm| {
+            cm.metadata.namespace.as_deref() == Some(ns)
+                && cm.metadata.name.as_deref() == Some(name)
+        })
+        .map(|cm| (**cm).clone())
+}
+
 /// Latch readiness on the first successful reconcile (logging the transition).
 /// Never unset: a later transient failure must not pull a serving Pod out of the
 /// Service's endpoints.
@@ -211,6 +233,8 @@ async fn reconcile(
         gateways: collect(&stores.gateways),
         http_routes: collect(&stores.http_routes),
         reference_grants: collect(&stores.reference_grants),
+        tcp_services: lookup_configmap(&stores.config_maps, &args.tcp_services_configmap),
+        udp_services: lookup_configmap(&stores.config_maps, &args.udp_services_configmap),
     };
 
     let out = build(&cfg, &inputs);
@@ -229,6 +253,11 @@ async fn reconcile(
             if !parent.problems.is_empty() {
                 warn!(namespace = %route.namespace, name = %route.name, gateway = %parent.gateway_name, problems = ?parent.problems, "httproute has problems");
             }
+        }
+    }
+    for r in &out.l4_results {
+        if !r.problems.is_empty() {
+            warn!(protocol = %r.protocol, port = r.listen_port, target = %r.target, problems = ?r.problems, "l4 service has problems");
         }
     }
 
@@ -341,6 +370,16 @@ async fn main() -> Result<()> {
     let (secrets, w) = reflector::store();
     spawn_watch::<Secret>(Api::all(client.clone()), w, tx.clone(), "secret");
 
+    // ConfigMaps are only watched when L4 (tcp/udp-services) is configured, so a
+    // cluster not using L4 pays no ConfigMap-watch cost.
+    let (config_maps, cm_w) = reflector::store();
+    if args.tcp_services_configmap.is_some() || args.udp_services_configmap.is_some() {
+        info!("L4 services configured; watching ConfigMaps");
+        spawn_watch::<ConfigMap>(Api::all(client.clone()), cm_w, tx.clone(), "configmap");
+    } else {
+        drop(cm_w);
+    }
+
     // Gateway API CRDs are optional. Only watch them when they are installed, so
     // an Ingress-only cluster runs cleanly instead of logging watch errors.
     let (gateway_classes, gc_w) = reflector::store();
@@ -364,6 +403,7 @@ async fn main() -> Result<()> {
         services,
         endpointslices,
         secrets,
+        config_maps,
         gateway_classes,
         gateways,
         http_routes,

@@ -1,0 +1,115 @@
+---
+source: crates/translator/tests/golden.rs
+expression: add
+---
+[
+  {
+    "request_type": {
+      "ADD_TCP_LISTENER": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 5432
+        },
+        "public_address": null,
+        "expect_proxy": false,
+        "front_timeout": 60,
+        "back_timeout": 30,
+        "connect_timeout": 3,
+        "active": true
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ACTIVATE_LISTENER": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 5432
+        },
+        "proxy": 2,
+        "from_scm": false
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ACTIVATE_LISTENER": {
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 5432
+        },
+        "proxy": 2,
+        "from_scm": false
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "pg",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": null,
+        "udp": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_BACKEND": {
+        "cluster_id": "pg",
+        "backend_id": "pg-10-0-0-1-5432",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 167772161
+            }
+          },
+          "port": 5432
+        },
+        "sticky_id": null,
+        "load_balancing_parameters": null,
+        "backup": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_TCP_FRONTEND": {
+        "cluster_id": "pg",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 5432
+        },
+        "tags": {}
+      }
+    }
+  }
+]

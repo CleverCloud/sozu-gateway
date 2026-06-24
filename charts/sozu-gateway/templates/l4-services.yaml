@@ -1,0 +1,27 @@
+{{- if .Values.l4.tcpServices }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}-tcp-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+data:
+  {{- range $port, $svc := .Values.l4.tcpServices }}
+  {{ $port | quote }}: {{ $svc | quote }}
+  {{- end }}
+{{- end }}
+{{- if .Values.l4.udpServices }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sozu-gateway.fullname" . }}-udp-services
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+data:
+  {{- range $port, $svc := .Values.l4.udpServices }}
+  {{ $port | quote }}: {{ $svc | quote }}
+  {{- end }}
+{{- end }}

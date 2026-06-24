@@ -24,3 +24,15 @@ spec:
       port: {{ .Values.service.httpsPort }}
       targetPort: https
       protocol: TCP
+    {{- range $port, $svc := .Values.l4.tcpServices }}
+    - name: tcp-{{ $port }}
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: TCP
+    {{- end }}
+    {{- range $port, $svc := .Values.l4.udpServices }}
+    - name: udp-{{ $port }}
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: UDP
+    {{- end }}

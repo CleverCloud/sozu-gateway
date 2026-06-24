@@ -52,6 +52,15 @@ service:
   httpsPort: 443
   annotations: {}
 
+# Layer-4 (TCP/UDP) passthrough. Each entry maps a gateway port to a Service;
+# the port is exposed on the LoadBalancer and routed by Sōzu (one port → one
+# Service, no host routing). Ports must be > 1024 (the data plane runs
+# unprivileged). Enabling either map grants the controller ConfigMap read access
+# and points it at the rendered map(s).
+l4:
+  tcpServices: {}   # "5432": "demo/postgres:5432"
+  udpServices: {}   # "5353": "demo/coredns:53"
+
 # Both containers run as this uid so they can share the command socket on the
 # emptyDir volume.
 runAsUser: 1000

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -450,4 +450,42 @@ fn certs_sharing_a_secret_are_merged_with_unioned_names() {
         vec!["a.example.com".to_string(), "b.example.com".to_string()],
         "names unioned and sorted"
     );
+}
+
+#[test]
+fn tcp_services_configmap_maps_to_l4_frontend() {
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": {
+            "5432": "demo/web:80",   // valid -> one L4 frontend + pod-IP backends
+            "80": "demo/web:80",     // reserved (HTTP listener) -> reported
+            "oops": "not-a-mapping"  // unparseable -> reported
+        }
+    }));
+    let inputs = Inputs {
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.l4_frontends.len(),
+        1,
+        "only the valid mapping yields a route"
+    );
+    let f = &out.ir.l4_frontends[0];
+    assert!(matches!(f.protocol, ir::L4Protocol::Tcp));
+    assert_eq!(f.listener.to_string(), "0.0.0.0:5432");
+    assert_eq!(out.ir.backends.len(), 2, "L4 service resolved to pod IPs");
+
+    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
+    assert!(problems
+        .iter()
+        .any(|p| matches!(p, Problem::L4PortReserved { port: 80 })));
+    assert!(problems
+        .iter()
+        .any(|p| matches!(p, Problem::InvalidL4Mapping { .. })));
 }

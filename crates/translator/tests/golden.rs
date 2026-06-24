@@ -95,6 +95,7 @@ fn sample_ir() -> ir::Ir {
             ),
         ],
         certificates: vec![cert(CERT_A, KEY_A)],
+        l4_frontends: vec![],
     }
 }
 
@@ -233,6 +234,7 @@ fn reconcile_retarget_route_removes_before_adds() {
             false,
         )],
         certificates: vec![],
+        l4_frontends: vec![],
     };
     let after = ir::Ir {
         clusters: vec![cluster("new", ir::LbAlgorithm::RoundRobin, false)],
@@ -244,6 +246,7 @@ fn reconcile_retarget_route_removes_before_adds() {
             false,
         )],
         certificates: vec![],
+        l4_frontends: vec![],
     };
     let reqs = tr::reconcile(&before, &after).expect("reconcile");
 
@@ -277,6 +280,7 @@ fn reconcile_retarget_https_route_removes_before_adds() {
             true,
         )],
         certificates: vec![cert(CERT_A, KEY_A)],
+        l4_frontends: vec![],
     };
     let before = ir_for("old", "10.0.0.1:8080");
     let after = ir_for("new", "10.0.0.2:8080");
@@ -332,6 +336,7 @@ fn ir_to_requests_with_filters() {
         backends: vec![backend("app", "10.0.0.1:8080", None)],
         frontends: vec![f],
         certificates: vec![],
+        l4_frontends: vec![],
     };
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
 }
@@ -348,6 +353,7 @@ fn reconcile_add_new_route() {
             false,
         )],
         certificates: vec![],
+        l4_frontends: vec![],
     };
     insta::assert_json_snapshot!(tr::reconcile(&small, &sample_ir()).expect("reconcile"));
 }
@@ -383,4 +389,57 @@ fn cluster_connection_limit_maps_to_request() {
         ..Default::default()
     };
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+#[test]
+fn ir_to_requests_with_l4_tcp() {
+    let model = ir::Ir {
+        clusters: vec![cluster("pg", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("pg", "10.0.0.1:5432", None)],
+        l4_frontends: vec![ir::L4Frontend {
+            protocol: ir::L4Protocol::Tcp,
+            listener: addr("0.0.0.0:5432"),
+            cluster_id: "pg".into(),
+        }],
+        ..Default::default()
+    };
+    insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+#[test]
+fn reconcile_adds_then_removes_l4_route() {
+    let model = ir::Ir {
+        clusters: vec![cluster("pg", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("pg", "10.0.0.1:5432", None)],
+        l4_frontends: vec![ir::L4Frontend {
+            protocol: ir::L4Protocol::Tcp,
+            listener: addr("0.0.0.0:5432"),
+            cluster_id: "pg".into(),
+        }],
+        ..Default::default()
+    };
+    // empty -> model: listener added + activated, plus the TCP frontend.
+    let add = tr::reconcile(&ir::Ir::default(), &model).expect("reconcile add");
+    assert!(add
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::AddTcpListener(_)))));
+    assert!(add
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::ActivateListener(_)))));
+    assert!(add
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::AddTcpFrontend(_)))));
+    insta::assert_json_snapshot!(add);
+
+    // Re-applying the same state is a no-op.
+    assert!(tr::reconcile(&model, &model).expect("idem").is_empty());
+
+    // model -> empty: the frontend and listener are torn down.
+    let rm = tr::reconcile(&model, &ir::Ir::default()).expect("reconcile rm");
+    assert!(rm
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::RemoveTcpFrontend(_)))));
+    assert!(rm
+        .iter()
+        .any(|r| matches!(r.request_type, Some(RequestType::RemoveListener(_)))));
 }

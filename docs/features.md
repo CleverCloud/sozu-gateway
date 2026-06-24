@@ -53,7 +53,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
 | Gateway API | `GRPCRoute` / `TCPRoute` / `TLSRoute` | ❌ | HTTPRoute only |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
-| Protocols | TCP / UDP ingress (L4) | ❌ | Sōzu supports it; not wired |
+| Protocols | TCP / UDP ingress (L4) | ✅ | `tcp/udp-services` ConfigMaps (ingress-nginx style); one port → one Service, no host routing; ports > 1024 (unprivileged) |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
@@ -91,3 +91,22 @@ One annotation is read from the **Ingress** instead (it depends on that Ingress'
 | Annotation | Values | Default | Effect |
 | ---------- | ------ | ------- | ------ |
 | `sozu.io/ssl-redirect` | `"true"` / `"false"` | `"true"` | Redirect HTTP→HTTPS (`301`) for hosts that have a loaded cert. Auto-on; set `"false"` to keep serving plain HTTP. (Gateway API uses an explicit `RequestRedirect` filter instead.) |
+
+## L4 (TCP/UDP)
+
+Raw TCP/UDP forwarding is configured by ConfigMaps (the ingress-nginx convention),
+pointed to by `--tcp-services-configmap` / `--udp-services-configmap` (Helm
+`l4.tcpServices` / `l4.udpServices`). Each entry maps a gateway port to a Service;
+the Helm chart also opens that port on the LoadBalancer Service. There is **no host
+multiplexing at L4** — one port forwards to exactly one Service.
+
+```yaml
+# ConfigMap data — "<gateway-port>": "<namespace>/<service>:<service-port>"
+data:
+  "5432": "demo/postgres:5432"   # TCP :5432 -> the postgres Service
+```
+
+Notes: listen ports must be **> 1024** (the data plane runs unprivileged); a port
+already used by the HTTP/HTTPS listeners is rejected; an unparseable entry is
+reported and skipped. The cluster + backends are resolved to pod IPs exactly like
+HTTP, so hot reload and pruning work the same way.

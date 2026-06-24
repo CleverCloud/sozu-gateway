@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use serde::Serialize;
@@ -72,6 +72,9 @@ pub struct Inputs {
     pub gateways: Vec<Gateway>,
     pub http_routes: Vec<HttpRoute>,
     pub reference_grants: Vec<ReferenceGrant>,
+    // L4 (TCP/UDP) port→service maps, ingress-nginx style (`"<port>": "ns/svc:port"`).
+    pub tcp_services: Option<ConfigMap>,
+    pub udp_services: Option<ConfigMap>,
 }
 
 /// A problem found while building one Ingress. Surfaced for status + logging;
@@ -93,6 +96,18 @@ pub enum Problem {
     HeaderOrQueryMatchUnsupported,
     FilterUnsupported { kind: String },
     BackendRefNotPermitted { reference: String },
+    // L4 (TCP/UDP) services.
+    InvalidL4Mapping { entry: String },
+    L4PortReserved { port: u16 },
+}
+
+/// Result of one L4 (TCP/UDP) port mapping, for status/logging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct L4Result {
+    pub protocol: String,
+    pub listen_port: u16,
+    pub target: String,
+    pub problems: Vec<Problem>,
 }
 
 /// Per-Ingress build result for status reporting.
@@ -113,6 +128,8 @@ pub struct BuildOutput {
     pub gateway_classes: Vec<GatewayClassResult>,
     pub gateways: Vec<GatewayResult>,
     pub routes: Vec<RouteResult>,
+    /// L4 (TCP/UDP) port-mapping results.
+    pub l4_results: Vec<L4Result>,
 }
 
 /// A reference to a Service port from an Ingress backend: by number or by name.
@@ -433,6 +450,86 @@ fn merge_certificates(certs: Vec<ir::Certificate>) -> Vec<ir::Certificate> {
     merged
 }
 
+/// Parse one `tcp/udp-services` entry: key `"<listen-port>"`, value
+/// `"<namespace>/<service>:<service-port>"` (a `service-port` may be a number or
+/// a name; any extra `:`-suffix like ingress-nginx's `:PROXY` is ignored).
+fn parse_l4_entry(key: &str, value: &str) -> Option<(u16, String, String, PortRef)> {
+    let listen_port: u16 = key.trim().parse().ok()?;
+    let (namespace, rest) = value.trim().split_once('/')?;
+    let mut parts = rest.split(':');
+    let service = parts.next()?;
+    let svc_port = parts.next()?;
+    if namespace.is_empty() || service.is_empty() || svc_port.is_empty() {
+        return None;
+    }
+    let port_ref = match svc_port.parse::<i32>() {
+        Ok(n) => PortRef::Number(n),
+        Err(_) => PortRef::Name(svc_port.to_string()),
+    };
+    Some((
+        listen_port,
+        namespace.to_string(),
+        service.to_string(),
+        port_ref,
+    ))
+}
+
+/// Compile the `tcp/udp-services` ConfigMaps into L4 frontends (+ per-port
+/// results), resolving each target Service to pod-IP backends via the same path
+/// as HTTP. L4 has no host multiplexing: one listen port → one Service.
+fn build_l4(
+    cfg: &BuildConfig,
+    index: &Index,
+    clusters: &mut BTreeMap<String, ir::Cluster>,
+    backends: &mut BTreeMap<String, ir::Backend>,
+    inputs: &Inputs,
+) -> (Vec<ir::L4Frontend>, Vec<L4Result>) {
+    let mut l4_frontends = Vec::new();
+    let mut results = Vec::new();
+    // Ports already bound by the static HTTP/HTTPS listeners can't be reused.
+    let reserved = [cfg.http_listener.port(), cfg.https_listener.port()];
+
+    for (protocol, label, cm) in [
+        (ir::L4Protocol::Tcp, "TCP", inputs.tcp_services.as_ref()),
+        (ir::L4Protocol::Udp, "UDP", inputs.udp_services.as_ref()),
+    ] {
+        let Some(cm) = cm else { continue };
+        for (key, value) in cm.data.iter().flatten() {
+            let mut problems = Vec::new();
+            match parse_l4_entry(key, value) {
+                None => problems.push(Problem::InvalidL4Mapping {
+                    entry: format!("{key}: {value}"),
+                }),
+                Some((port, _, _, _)) if reserved.contains(&port) => {
+                    problems.push(Problem::L4PortReserved { port })
+                }
+                Some((port, ns, svc, port_ref)) => {
+                    match add_service_route(index, clusters, backends, &ns, &svc, &port_ref) {
+                        Ok((cluster_id, has_endpoints)) => {
+                            if !has_endpoints {
+                                problems.push(Problem::NoReadyEndpoints { service: svc });
+                            }
+                            l4_frontends.push(ir::L4Frontend {
+                                protocol,
+                                listener: SocketAddr::new(cfg.http_listener.ip(), port),
+                                cluster_id,
+                            });
+                        }
+                        Err(problem) => problems.push(problem),
+                    }
+                }
+            }
+            results.push(L4Result {
+                protocol: label.to_string(),
+                listen_port: key.trim().parse().unwrap_or(0),
+                target: value.clone(),
+                problems,
+            });
+        }
+    }
+    (l4_frontends, results)
+}
+
 /// Compile all our-class Ingresses (+ resolved deps) into the IR.
 pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let index = Index::build(inputs);
@@ -618,16 +715,23 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         (&a.listener, &a.names, &a.certificate).cmp(&(&b.listener, &b.names, &b.certificate))
     });
 
+    // L4 (TCP/UDP): same Service→pod-IP resolver, into the same clusters/backends.
+    let (mut l4_frontends, l4_results) =
+        build_l4(cfg, &index, &mut clusters, &mut backends, inputs);
+    l4_frontends.sort_by_key(|f| (f.protocol, f.listener));
+
     BuildOutput {
         ir: ir::Ir {
             clusters: clusters.into_values().collect(),
             backends: backends.into_values().collect(),
             frontends,
             certificates,
+            l4_frontends,
         },
         results,
         gateway_classes: gw.classes,
         gateways: gw.gateways,
         routes: gw.routes,
+        l4_results,
     }
 }

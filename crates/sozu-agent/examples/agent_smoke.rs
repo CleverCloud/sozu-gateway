@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             key,
             names: vec![host.clone()],
         }],
+        l4_frontends: vec![],
     };
 
     let handle = SozuAgentHandle::spawn(&sock).context("spawn agent")?;

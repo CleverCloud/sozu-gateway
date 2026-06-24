@@ -23,10 +23,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::{
-    request::RequestType, AddBackend, AddCertificate, CertificateAndKey, Cluster, Header,
-    HeaderPosition, LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind,
-    RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
-    RequestHttpFrontend, RulePosition,
+    request::RequestType, ActivateListener, AddBackend, AddCertificate, CertificateAndKey, Cluster,
+    Header, HeaderPosition, ListenerType, LoadBalancingAlgorithms, LoadBalancingParams, PathRule,
+    PathRuleKind, RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
+    RequestHttpFrontend, RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig,
+    UdpListenerConfig,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -238,19 +239,106 @@ fn keyed_certs(certs: &[ir::Certificate]) -> Result<Vec<KeyedCert<'_>>, Translat
 }
 
 // ----------------------------------------------------------------------------
+// Layer 4 (TCP/UDP)
+// ----------------------------------------------------------------------------
+
+fn tcp_listener_add(addr: SocketAddr) -> Request {
+    RequestType::AddTcpListener(TcpListenerConfig {
+        address: addr.into(),
+        public_address: None,
+        expect_proxy: false,
+        front_timeout: 60,
+        back_timeout: 30,
+        connect_timeout: 3,
+        active: true,
+    })
+    .into()
+}
+
+fn udp_listener_add(addr: SocketAddr) -> Request {
+    RequestType::AddUdpListener(UdpListenerConfig {
+        address: addr.into(),
+        public_address: None,
+        front_timeout: 30,
+        back_timeout: 30,
+        max_rx_datagram_size: 1500,
+        max_flows: 0,
+        active: true,
+    })
+    .into()
+}
+
+fn activate_listener(addr: SocketAddr, proxy: ListenerType) -> Request {
+    RequestType::ActivateListener(ActivateListener {
+        address: addr.into(),
+        proxy: proxy as i32,
+        from_scm: false,
+    })
+    .into()
+}
+
+fn l4_frontend_request(f: &ir::L4Frontend) -> Request {
+    match f.protocol {
+        ir::L4Protocol::Tcp => RequestType::AddTcpFrontend(RequestTcpFrontend {
+            cluster_id: f.cluster_id.clone(),
+            address: f.listener.into(),
+            tags: Default::default(),
+        })
+        .into(),
+        ir::L4Protocol::Udp => RequestType::AddUdpFrontend(RequestUdpFrontend {
+            cluster_id: f.cluster_id.clone(),
+            address: f.listener.into(),
+            tags: Default::default(),
+        })
+        .into(),
+    }
+}
+
+/// `AddTcpListener`/`AddUdpListener` for each distinct L4 listen address (active,
+/// so `ConfigState::diff` derives the matching `ActivateListener`).
+fn l4_listener_adds(l4: &[ir::L4Frontend]) -> Vec<Request> {
+    let mut seen: BTreeSet<(ir::L4Protocol, SocketAddr)> = BTreeSet::new();
+    l4.iter()
+        .filter(|f| seen.insert((f.protocol, f.listener)))
+        .map(|f| match f.protocol {
+            ir::L4Protocol::Tcp => tcp_listener_add(f.listener),
+            ir::L4Protocol::Udp => udp_listener_add(f.listener),
+        })
+        .collect()
+}
+
+/// Explicit `ActivateListener` for each distinct L4 listen address — needed on
+/// the full-apply path (no diff to derive activation from `active = true`).
+fn l4_listener_activations(l4: &[ir::L4Frontend]) -> Vec<Request> {
+    let mut seen: BTreeSet<(ir::L4Protocol, SocketAddr)> = BTreeSet::new();
+    l4.iter()
+        .filter(|f| seen.insert((f.protocol, f.listener)))
+        .map(|f| {
+            let proxy = match f.protocol {
+                ir::L4Protocol::Tcp => ListenerType::Tcp,
+                ir::L4Protocol::Udp => ListenerType::Udp,
+            };
+            activate_listener(f.listener, proxy)
+        })
+        .collect()
+}
+
+// ----------------------------------------------------------------------------
 // Dependency-safe canonical ordering
 // ----------------------------------------------------------------------------
 
 fn tier(req: &Request) -> u8 {
     match &req.request_type {
+        // Listeners must exist before they can be activated, and both before any
+        // cluster/frontend can attach to them.
         Some(RequestType::AddHttpListener(_))
         | Some(RequestType::AddHttpsListener(_))
         | Some(RequestType::AddTcpListener(_))
-        | Some(RequestType::AddUdpListener(_))
-        | Some(RequestType::ActivateListener(_)) => 0,
-        Some(RequestType::AddCluster(_)) => 1,
-        Some(RequestType::AddBackend(_)) => 2,
-        Some(RequestType::AddCertificate(_)) | Some(RequestType::ReplaceCertificate(_)) => 3,
+        | Some(RequestType::AddUdpListener(_)) => 0,
+        Some(RequestType::ActivateListener(_)) => 1,
+        Some(RequestType::AddCluster(_)) => 2,
+        Some(RequestType::AddBackend(_)) => 3,
+        Some(RequestType::AddCertificate(_)) | Some(RequestType::ReplaceCertificate(_)) => 4,
         // Frontend removes precede frontend adds. Sōzu keys a route by
         // `address;hostname;path[;method]` (cluster_id is NOT part of the key),
         // so re-pointing a host+path at a different cluster yields a Remove(old)
@@ -259,12 +347,18 @@ fn tier(req: &Request) -> u8 {
         // the trailing Remove would then delete the route outright. Removing
         // first leaves the entry Vacant for the re-add (a tiny, unavoidable gap
         // since Sōzu 2.1.0 has no atomic frontend replace).
-        Some(RequestType::RemoveHttpFrontend(_)) | Some(RequestType::RemoveHttpsFrontend(_)) => 4,
-        Some(RequestType::AddHttpFrontend(_)) | Some(RequestType::AddHttpsFrontend(_)) => 5,
-        Some(RequestType::RemoveBackend(_)) => 6,
-        Some(RequestType::RemoveCluster(_)) => 7,
-        Some(RequestType::RemoveCertificate(_)) => 8,
-        Some(RequestType::DeactivateListener(_)) | Some(RequestType::RemoveListener(_)) => 9,
+        Some(RequestType::RemoveHttpFrontend(_))
+        | Some(RequestType::RemoveHttpsFrontend(_))
+        | Some(RequestType::RemoveTcpFrontend(_))
+        | Some(RequestType::RemoveUdpFrontend(_)) => 5,
+        Some(RequestType::AddHttpFrontend(_))
+        | Some(RequestType::AddHttpsFrontend(_))
+        | Some(RequestType::AddTcpFrontend(_))
+        | Some(RequestType::AddUdpFrontend(_)) => 6,
+        Some(RequestType::RemoveBackend(_)) => 7,
+        Some(RequestType::RemoveCluster(_)) => 8,
+        Some(RequestType::RemoveCertificate(_)) => 9,
+        Some(RequestType::DeactivateListener(_)) | Some(RequestType::RemoveListener(_)) => 10,
         _ => 100,
     }
 }
@@ -290,6 +384,11 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
     requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
+    // L4: listeners (active=true, so diff derives ActivateListener) + frontends.
+    // No explicit ActivateListener here — dispatching it would need the listener
+    // to already exist in this transient state, and the diff handles activation.
+    requests.extend(l4_listener_adds(&ir.l4_frontends));
+    requests.extend(ir.l4_frontends.iter().map(l4_frontend_request));
     let mut state = ConfigState::new();
     for req in canonicalize(requests) {
         state
@@ -384,6 +483,10 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     requests.extend(ir.backends.iter().map(backend_request));
     requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
     requests.extend(ir.certificates.iter().map(add_certificate_request));
+    // L4: add the listener, activate it, then attach the frontend (tiered).
+    requests.extend(l4_listener_adds(&ir.l4_frontends));
+    requests.extend(l4_listener_activations(&ir.l4_frontends));
+    requests.extend(ir.l4_frontends.iter().map(l4_frontend_request));
     canonicalize(requests)
 }
 

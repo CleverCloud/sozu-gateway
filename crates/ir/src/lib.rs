@@ -147,6 +147,25 @@ pub struct Certificate {
     pub names: Vec<String>,
 }
 
+/// Layer-4 protocol for a raw TCP/UDP passthrough route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum L4Protocol {
+    Tcp,
+    Udp,
+}
+
+/// A raw layer-4 route: a listen address forwarded to a cluster's backends with
+/// no HTTP parsing. One listen address maps to exactly one cluster — there is no
+/// SNI/host multiplexing at L4. The cluster and backends are the same kind as
+/// for HTTP (a Service resolved to pod IPs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L4Frontend {
+    pub protocol: L4Protocol,
+    /// Address Sōzu listens on for this route (e.g. `0.0.0.0:5432`).
+    pub listener: SocketAddr,
+    pub cluster_id: String,
+}
+
 /// The complete desired routing state compiled from all our Ingress objects.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Ir {
@@ -154,4 +173,7 @@ pub struct Ir {
     pub frontends: Vec<Frontend>,
     pub backends: Vec<Backend>,
     pub certificates: Vec<Certificate>,
+    /// Raw TCP/UDP routes (L4). Empty unless tcp/udp-services are configured.
+    #[serde(default)]
+    pub l4_frontends: Vec<L4Frontend>,
 }

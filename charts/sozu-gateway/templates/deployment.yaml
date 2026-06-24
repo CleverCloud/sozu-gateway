@@ -88,6 +88,14 @@ spec:
             - name: SOZU_GW_PUBLISH_SERVICE
               value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
             {{- end }}
+            {{- if .Values.l4.tcpServices }}
+            - name: SOZU_GW_TCP_SERVICES
+              value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}-tcp-services"
+            {{- end }}
+            {{- if .Values.l4.udpServices }}
+            - name: SOZU_GW_UDP_SERVICES
+              value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}-udp-services"
+            {{- end }}
             - name: RUST_LOG
               value: {{ .Values.controller.logLevel | quote }}
           ports:

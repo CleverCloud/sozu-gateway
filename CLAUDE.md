@@ -119,11 +119,13 @@ patches, so the controller's own status writes never re-trigger it. Status write
 
 ### Conventions that matter
 
-- **Listeners are NOT modelled in the IR.** The HTTP/HTTPS listeners are declared
+- **HTTP/HTTPS listeners are NOT modelled in the IR.** They are declared
   statically in Sōzu's `config.toml` ([deploy/sozu/config.toml](deploy/sozu/config.toml)) and
-  activated at boot. The controller only manages clusters/frontends/backends/certificates; their
-  listener addresses come from CLI flags (`--http-listener` / `--https-listener`) and must match
-  `config.toml`.
+  activated at boot; their addresses come from CLI flags (`--http-listener` / `--https-listener`)
+  and must match `config.toml`. **L4 (TCP/UDP) listeners are the exception**: their ports are
+  user-defined (`tcp/udp-services` ConfigMaps), so the IR carries `ir::L4Frontend`s and the
+  translator adds + activates the listeners dynamically over the socket — `ConfigState::diff`
+  emits `Add{Tcp,Udp}Listener` + `ActivateListener` (and the reverse on removal) for free.
 - **Backends are pod IP:port resolved from EndpointSlices — never the Service ClusterIP.** When a
   Service has multiple ports, match the EndpointSlice port by name; only fall back to the sole port
   when there is exactly one (don't guess `first()`).
