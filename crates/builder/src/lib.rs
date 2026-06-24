@@ -88,7 +88,6 @@ pub enum Problem {
     ServiceNotFound { service: String },
     ServicePortNotFound { service: String, port: String },
     NoReadyEndpoints { service: String },
-    HostlessRuleSkipped,
     // Gateway API (Phase 2) — features Sōzu or this phase does not cover yet.
     UnsupportedTlsMode { mode: String },
     UnsupportedProtocol { protocol: String },
@@ -602,10 +601,10 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         // ---- Rules: clusters + backends + frontends ----
         for rule in spec.rules.iter().flatten() {
             let Some(http) = &rule.http else { continue };
-            let Some(host) = &rule.host else {
-                problems.push(Problem::HostlessRuleSkipped);
-                continue;
-            };
+            // A hostless rule becomes a catch-all (`*`) frontend, which Sōzu
+            // routes as DomainRule::Any. `tls_covers` returns false for `*`, so
+            // it stays plain-HTTP (no `*`-named cert frontend).
+            let host = rule.host.clone().unwrap_or_else(|| "*".to_string());
             for path in &http.paths {
                 let Some(svc_backend) = &path.backend.service else {
                     problems.push(Problem::NonServiceBackend);
@@ -642,7 +641,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         }
 
                         let pm = path_match(&path.path_type, path.path.as_deref());
-                        let host_has_tls = tls_covers(&tls_ready_hosts, host);
+                        let host_has_tls = tls_covers(&tls_ready_hosts, &host);
                         // The plain-HTTP frontend redirects to HTTPS when the host
                         // has a cert and the redirect isn't opted out; otherwise it
                         // proxies. The redirect wins over the cluster, so keeping

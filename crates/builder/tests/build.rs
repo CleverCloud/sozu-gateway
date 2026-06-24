@@ -489,3 +489,39 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
         .iter()
         .any(|p| matches!(p, Problem::InvalidL4Mapping { .. })));
 }
+
+#[test]
+fn ingress_hostless_rule_maps_to_catch_all() {
+    // An Ingress rule with no `host` is a catch-all: emit one plain-HTTP `*`
+    // frontend (Sōzu DomainRule::Any), no HTTPS frontend, no cert, no problem.
+    let ing: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: vec![ing],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.frontends.len(),
+        1,
+        "only the HTTP catch-all frontend"
+    );
+    assert_eq!(out.ir.frontends[0].hostname, "*");
+    assert!(!out.ir.frontends[0].tls);
+    assert_eq!(out.ir.certificates.len(), 0);
+    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+}

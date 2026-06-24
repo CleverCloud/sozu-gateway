@@ -105,6 +105,25 @@ fn ir_to_requests_full() {
 }
 
 #[test]
+fn catch_all_frontend_uses_post_position() {
+    // A hostname-less ("*") frontend must use Sōzu's POST rule position (1) so it
+    // is a fallback and never shadows specific-host (TREE) frontends.
+    let model = ir::Ir {
+        clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("app", "10.0.0.1:8080", None)],
+        frontends: vec![frontend(
+            "*",
+            ir::PathMatch::Prefix("/".into()),
+            "app",
+            false,
+        )],
+        certificates: vec![],
+        l4_frontends: vec![],
+    };
+    insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+#[test]
 fn reconcile_from_empty_equals_full_adds() {
     let reqs = tr::reconcile(&ir::Ir::default(), &sample_ir()).expect("reconcile");
     insta::assert_json_snapshot!(reqs);

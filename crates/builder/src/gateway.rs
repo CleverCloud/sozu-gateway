@@ -422,7 +422,8 @@ fn attach_rule(
         for l in candidates {
             let hosts = effective_hostnames(route_hostnames, l.hostname.as_deref());
             if hosts.is_empty() {
-                problems.push(Problem::HostlessRuleSkipped);
+                // The route's hostnames don't intersect this listener's hostname:
+                // the route attaches on a different listener, not a problem.
                 continue;
             }
             for hostname in hosts {
@@ -585,8 +586,8 @@ fn hosts_compatible(a: &str, b: &str) -> bool {
 
 /// The hostnames a route serves on a listener: the route's hostnames intersected
 /// with the listener's hostname constraint (a missing listener hostname matches
-/// any; a route with no hostnames inherits the listener's; both missing is an
-/// unsupported catch-all).
+/// any; a route with no hostnames inherits the listener's; both missing is a
+/// catch-all `*`, which Sōzu routes as `DomainRule::Any`).
 fn effective_hostnames(route: Option<&[String]>, listener: Option<&str>) -> Vec<String> {
     match (route, listener) {
         (Some(routes), Some(l)) => routes
@@ -596,7 +597,7 @@ fn effective_hostnames(route: Option<&[String]>, listener: Option<&str>) -> Vec<
             .collect(),
         (Some(routes), None) => routes.to_vec(),
         (None, Some(l)) => vec![l.to_string()],
-        (None, None) => Vec::new(),
+        (None, None) => vec!["*".to_string()],
     }
 }
 

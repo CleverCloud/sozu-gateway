@@ -328,3 +328,70 @@ fn gateway_and_ingress_share_one_cluster() {
     // Two HTTP frontends: one per host (ingress + gateway route).
     assert_eq!(out.ir.frontends.len(), 2);
 }
+
+#[test]
+fn gateway_hostless_route_maps_to_catch_all() {
+    // A route with no hostnames on a listener with no hostname is a catch-all:
+    // it must produce a single `*` frontend (Sōzu DomainRule::Any), not be skipped.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "rules": [{
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                "backendRefs": [{ "name": "web", "port": 80 }]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.frontends[0].hostname, "*");
+    assert!(!out.ir.frontends[0].tls);
+    assert!(out.routes[0].parents[0].resolved_refs);
+    assert!(out.routes[0].parents[0].problems.is_empty());
+}
+
+#[test]
+fn route_hostname_not_matching_listener_is_silently_skipped() {
+    // Listener constrained to a.example.com; route serves only b.example.com.
+    // The route attaches elsewhere, so emit no frontend here AND no problem
+    // (this is not a hostless rule).
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80, "hostname": "a.example.com" }
+        ]}
+    }));
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["b.example.com"],
+            "rules": [{
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                "backendRefs": [{ "name": "web", "port": 80 }]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.frontends.is_empty());
+    assert!(out.routes[0].parents[0].problems.is_empty());
+}

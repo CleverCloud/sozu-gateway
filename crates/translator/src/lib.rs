@@ -94,13 +94,20 @@ fn backend_request(b: &ir::Backend) -> Request {
 }
 
 fn frontend_request(f: &ir::Frontend) -> Request {
+    // A bare "*" catch-all goes in POST so it is a fallback and never shadows
+    // specific-host (TREE) frontends. Sōzu parses "*" as DomainRule::Any.
+    let position = if f.hostname == "*" {
+        RulePosition::Post
+    } else {
+        RulePosition::Tree
+    } as i32;
     let mut payload = RequestHttpFrontend {
         cluster_id: f.cluster_id.clone(),
         address: f.listener.into(),
         hostname: f.hostname.clone(),
         path: path_rule(&f.path),
         method: f.method.clone(),
-        position: RulePosition::Tree as i32,
+        position,
         ..Default::default()
     };
     apply_filters(&mut payload, &f.filters);
