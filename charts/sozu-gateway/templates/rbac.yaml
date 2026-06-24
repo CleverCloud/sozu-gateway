@@ -31,13 +31,10 @@ rules:
     resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
     verbs: ["update", "patch"]
 {{- if .Values.rbac.allowStatusWrites }}
-  # Ingress status reporting (Phase 2). Off by default for least-privilege.
+  # Ingress status reporting. Off by default for least-privilege.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses/status"]
     verbs: ["update", "patch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

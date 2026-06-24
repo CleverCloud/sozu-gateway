@@ -31,7 +31,7 @@ controller:
   resyncSecs: 60          # periodic full resync
 
 rbac:
-  # Grant ingresses/status + events so the controller can publish the gateway's
+  # Grant ingresses/status so the controller can publish the gateway's
   # LoadBalancer address into each Ingress's .status (the ADDRESS column, read by
   # external-dns &co). When on, the chart also points the controller at its own
   # Service via SOZU_GW_PUBLISH_SERVICE. Off by default for least-privilege.

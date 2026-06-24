@@ -238,8 +238,14 @@ async fn write_route(
 
 /// Map the publish Service's load-balancer address(es) into the shape an Ingress
 /// status expects. Pure, so it is unit-tested without a cluster.
+///
+/// The result is sorted by `(ip, hostname)` so the order is independent of the
+/// Service status's array order. The loop-safety guard in [`write_one_ingress`]
+/// compares element-wise, so without this a provider that re-orders its
+/// `loadBalancer.ingress` between reads would cause endless no-op re-patches.
 pub(crate) fn lb_points(svc: &Service) -> Vec<IngressLoadBalancerIngress> {
-    svc.status
+    let mut points: Vec<IngressLoadBalancerIngress> = svc
+        .status
         .as_ref()
         .and_then(|s| s.load_balancer.as_ref())
         .and_then(|lb| lb.ingress.as_ref())
@@ -253,7 +259,9 @@ pub(crate) fn lb_points(svc: &Service) -> Vec<IngressLoadBalancerIngress> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    points.sort_by(|a, b| (&a.ip, &a.hostname).cmp(&(&b.ip, &b.hostname)));
+    points
 }
 
 /// Publish the gateway's external address into each managed Ingress's
@@ -303,6 +311,15 @@ async fn write_one_ingress(
 mod tests {
     use super::*;
 
+    fn svc_with_ips(ips: &[&str]) -> Service {
+        let ingress: Vec<_> = ips.iter().map(|ip| json!({ "ip": ip })).collect();
+        serde_json::from_value(json!({
+            "metadata": { "name": "gw", "namespace": "sozu-system" },
+            "status": { "loadBalancer": { "ingress": ingress } }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn lb_points_extracts_ip_and_hostname() {
         let svc: Service = serde_json::from_value(json!({
@@ -315,8 +332,20 @@ mod tests {
         .unwrap();
         let pts = lb_points(&svc);
         assert_eq!(pts.len(), 2);
-        assert_eq!(pts[0].ip.as_deref(), Some("1.2.3.4"));
-        assert_eq!(pts[1].hostname.as_deref(), Some("lb.example.com"));
+        assert!(pts.iter().any(|p| p.ip.as_deref() == Some("1.2.3.4")));
+        assert!(pts
+            .iter()
+            .any(|p| p.hostname.as_deref() == Some("lb.example.com")));
+    }
+
+    #[test]
+    fn lb_points_order_is_canonical() {
+        // Same address set in two different Service orders must map to the same
+        // (sorted) Vec, so the loop-safety comparison never flips on reorder.
+        let a = lb_points(&svc_with_ips(&["10.0.0.2", "10.0.0.1"]));
+        let b = lb_points(&svc_with_ips(&["10.0.0.1", "10.0.0.2"]));
+        assert_eq!(a, b);
+        assert_eq!(a[0].ip.as_deref(), Some("10.0.0.1"));
     }
 
     #[test]

@@ -281,7 +281,10 @@ async fn main() -> Result<()> {
     info!(?args, "starting sozu gateway controller");
 
     if let Some(ps) = &args.publish_service {
-        if ps.split_once('/').is_none() {
+        let valid = ps
+            .split_once('/')
+            .is_some_and(|(ns, name)| !ns.is_empty() && !name.is_empty() && !name.contains('/'));
+        if !valid {
             warn!(publish_service = %ps, "--publish-service must be namespace/name; Ingress status will not be written");
         }
     }
