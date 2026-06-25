@@ -169,8 +169,9 @@ sharing the command socket via an `emptyDir` volume. Both run as the **same unpr
 ships both containers, an `IngressClass`, RBAC, and Sōzu's `ConfigMap`. The Sōzu image is used
 as-is (`clevercloud/sozu:2.1.0`) because the release binary is musl-linked.
 
-Releases (`v*` tags) publish the controller image and the Helm chart (OCI) to
-`ghcr.io/clevercloud/sozu-gateway` via [.github/workflows/release.yml](.github/workflows/release.yml).
+Releases (`v*` tags) publish the controller image (`ghcr.io/clevercloud/sozu-gateway-controller`)
+and the Helm chart (`oci://ghcr.io/clevercloud/sozu-gateway`) via
+[.github/workflows/release.yml](.github/workflows/release.yml).
 
 ## Working notes
 
