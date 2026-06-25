@@ -586,3 +586,28 @@ fn gateway_listener_invalid_route_kind() {
     assert_eq!(l.resolved_refs_reason, "InvalidRouteKinds");
     assert_eq!(l.attached_routes, 0);
 }
+
+#[test]
+fn cross_namespace_cert_without_grant_is_ref_not_permitted() {
+    // HTTPS listener whose certificateRef is in another namespace, with no
+    // ReferenceGrant -> listener ResolvedRefs=False / RefNotPermitted, unprogrammed.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [{
+            "name": "https", "protocol": "HTTPS", "port": 443,
+            "hostname": "app.example.com",
+            "tls": { "mode": "Terminate",
+                     "certificateRefs": [{ "name": "app-tls", "namespace": "certs" }] }
+        }]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![gw],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.programmed);
+    assert!(!l.resolved_refs);
+    assert_eq!(l.resolved_refs_reason, "RefNotPermitted");
+}

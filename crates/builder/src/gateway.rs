@@ -183,13 +183,15 @@ fn build_listener(
     match l.protocol.as_str() {
         "HTTP" => info.programmed = true,
         "HTTPS" => {
-            if load_listener_certs(cfg, inputs, index, gw_ns, l, certificates, problems) {
+            let (loaded, reason) =
+                load_listener_certs(cfg, inputs, index, gw_ns, l, certificates, problems);
+            if loaded {
                 info.programmed = true;
             } else {
                 info.programmed = false;
                 info.programmed_reason = "Invalid";
                 info.resolved_refs = false;
-                info.resolved_refs_reason = "InvalidCertificateRef";
+                info.resolved_refs_reason = reason;
             }
         }
         other => {
@@ -436,16 +438,16 @@ fn load_listener_certs(
     listener: &sozu_gw_gateway_api::gateway::GatewayListeners,
     certificates: &mut Vec<ir::Certificate>,
     problems: &mut Vec<Problem>,
-) -> bool {
+) -> (bool, &'static str) {
     let Some(tls) = &listener.tls else {
         problems.push(Problem::TlsEntryWithoutSecret);
-        return false;
+        return (false, "InvalidCertificateRef");
     };
     if !matches!(tls.mode, None | Some(GatewayListenersTlsMode::Terminate)) {
         problems.push(Problem::UnsupportedTlsMode {
             mode: "Passthrough".to_string(),
         });
-        return false;
+        return (false, "InvalidCertificateRef");
     }
 
     let names = listener
@@ -454,6 +456,7 @@ fn load_listener_certs(
         .map(|h| vec![h])
         .unwrap_or_default();
     let mut loaded = false;
+    let mut ref_not_permitted = false;
     for cref in tls.certificate_refs.iter().flatten() {
         let is_secret = cref.group.as_deref().unwrap_or("").is_empty()
             && cref.kind.as_deref().unwrap_or("Secret") == "Secret";
@@ -476,6 +479,7 @@ fn load_listener_certs(
             problems.push(Problem::BackendRefNotPermitted {
                 reference: format!("Secret {secret_ns}/{}", cref.name),
             });
+            ref_not_permitted = true;
             continue;
         }
         match index.secrets.get(&(secret_ns, cref.name.clone())) {
@@ -500,7 +504,16 @@ fn load_listener_certs(
             },
         }
     }
-    loaded
+    let reason = if loaded {
+        "ResolvedRefs"
+    } else if ref_not_permitted {
+        // A forbidden cross-namespace certificateRef is the listener's headline
+        // failure (Gateway API ListenerReasonRefNotPermitted).
+        "RefNotPermitted"
+    } else {
+        "InvalidCertificateRef"
+    };
+    (loaded, reason)
 }
 
 /// Resolve one HTTPRoute rule into frontends on the candidate listeners.
