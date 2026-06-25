@@ -240,21 +240,17 @@ async fn write_route(
                 Desired {
                     type_: "Accepted",
                     status: parent.accepted,
-                    reason: if parent.accepted {
-                        "Accepted"
+                    reason: parent.accepted_reason,
+                    message: if parent.accepted {
+                        "Route accepted by sozu-gateway".to_string()
                     } else {
-                        "NotAllowedByListeners"
+                        "Route does not bind to this parent".to_string()
                     },
-                    message: "Route accepted by sozu-gateway".to_string(),
                 },
                 Desired {
                     type_: "ResolvedRefs",
                     status: parent.resolved_refs,
-                    reason: if parent.resolved_refs {
-                        "ResolvedRefs"
-                    } else {
-                        "BackendNotFound"
-                    },
+                    reason: parent.resolved_refs_reason,
                     message: if parent.resolved_refs {
                         "All backend references resolved".to_string()
                     } else {

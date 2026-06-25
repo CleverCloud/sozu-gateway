@@ -60,7 +60,12 @@ pub struct RouteParentResult {
     pub gateway_namespace: String,
     pub gateway_name: String,
     pub accepted: bool,
+    /// Gateway API `Accepted` condition reason (e.g. `Accepted`, `NoMatchingParent`).
+    pub accepted_reason: &'static str,
     pub resolved_refs: bool,
+    /// Gateway API `ResolvedRefs` condition reason (e.g. `ResolvedRefs`,
+    /// `BackendNotFound`, `InvalidKind`, `RefNotPermitted`).
+    pub resolved_refs_reason: &'static str,
     pub problems: Vec<Problem>,
 }
 
@@ -83,6 +88,8 @@ struct ListenerInfo {
     name: String,
     hostname: Option<String>,
     https: bool,
+    /// The listener's declared port, matched against a parentRef's optional port.
+    port: i32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +133,7 @@ pub(crate) fn build_gateway(
                     name: l.name.clone(),
                     hostname: l.hostname.clone(),
                     https: false,
+                    port: l.port,
                 }),
                 "HTTPS" => {
                     if load_listener_certs(cfg, inputs, index, &ns, l, certificates, &mut problems)
@@ -134,6 +142,7 @@ pub(crate) fn build_gateway(
                             name: l.name.clone(),
                             hostname: l.hostname.clone(),
                             https: true,
+                            port: l.port,
                         });
                     }
                 }
@@ -173,32 +182,44 @@ pub(crate) fn build_gateway(
             let candidates: Vec<&ListenerInfo> = listeners
                 .iter()
                 .filter(|l| pref.section_name.as_ref().is_none_or(|sn| sn == &l.name))
+                .filter(|l| pref.port.is_none_or(|p| p == l.port))
                 .collect();
 
             let mut problems = Vec::new();
             let mut resolved_refs = true;
-            for rule in route.spec.rules.iter().flatten() {
-                attach_rule(
-                    cfg,
-                    inputs,
-                    index,
-                    clusters,
-                    backends,
-                    frontends,
-                    &rns,
-                    route.spec.hostnames.as_deref(),
-                    &candidates,
-                    rule,
-                    &mut problems,
-                    &mut resolved_refs,
-                );
-            }
+            let mut resolved_refs_reason = "ResolvedRefs";
+            // A parentRef whose sectionName/port matches no listener does not bind
+            // to this Gateway: Accepted=False / NoMatchingParent.
+            let (accepted, accepted_reason) = if candidates.is_empty() {
+                (false, "NoMatchingParent")
+            } else {
+                for rule in route.spec.rules.iter().flatten() {
+                    attach_rule(
+                        cfg,
+                        inputs,
+                        index,
+                        clusters,
+                        backends,
+                        frontends,
+                        &rns,
+                        route.spec.hostnames.as_deref(),
+                        &candidates,
+                        rule,
+                        &mut problems,
+                        &mut resolved_refs,
+                        &mut resolved_refs_reason,
+                    );
+                }
+                (true, "Accepted")
+            };
 
             parents.push(RouteParentResult {
                 gateway_namespace: gw_ns,
                 gateway_name: pref.name.clone(),
-                accepted: true,
+                accepted,
+                accepted_reason,
                 resolved_refs,
+                resolved_refs_reason,
                 problems,
             });
         }
@@ -297,6 +318,15 @@ fn load_listener_certs(
 }
 
 /// Resolve one HTTPRoute rule into frontends on the candidate listeners.
+/// Record a `ResolvedRefs` failure, keeping the first reason seen across a route's
+/// rules (the Gateway API reports a single reason per parent).
+fn fail_ref(resolved: &mut bool, reason: &mut &'static str, new_reason: &'static str) {
+    if *resolved {
+        *reason = new_reason;
+    }
+    *resolved = false;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn attach_rule(
     cfg: &BuildConfig,
@@ -311,6 +341,7 @@ fn attach_rule(
     rule: &sozu_gw_gateway_api::httproute::HttpRouteRules,
     problems: &mut Vec<Problem>,
     resolved_refs: &mut bool,
+    resolved_refs_reason: &mut &'static str,
 ) {
     // backendRefs: exactly one Service backend (Sōzu cannot weight-split).
     // Parse the route filters into IR filters (Phase 3). Unsupported filters /
@@ -329,12 +360,12 @@ fn attach_rule(
             problems.push(Problem::NoReadyEndpoints {
                 service: "<none>".to_string(),
             });
-            *resolved_refs = false;
+            fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
             return;
         }
     } else if refs.len() > 1 {
         problems.push(Problem::WeightedBackendsUnsupported);
-        *resolved_refs = false;
+        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
         return;
     } else {
         let br = refs[0];
@@ -342,7 +373,7 @@ fn attach_rule(
             && br.kind.as_deref().unwrap_or("Service") == "Service";
         if !is_service {
             problems.push(Problem::NonServiceBackend);
-            *resolved_refs = false;
+            fail_ref(resolved_refs, resolved_refs_reason, "InvalidKind");
             return;
         }
         let backend_ns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
@@ -359,7 +390,7 @@ fn attach_rule(
             problems.push(Problem::BackendRefNotPermitted {
                 reference: format!("Service {backend_ns}/{}", br.name),
             });
-            *resolved_refs = false;
+            fail_ref(resolved_refs, resolved_refs_reason, "RefNotPermitted");
             return;
         }
         let Some(port) = br.port else {
@@ -367,7 +398,7 @@ fn attach_rule(
                 service: br.name.clone(),
                 port: "<unspecified>".to_string(),
             });
-            *resolved_refs = false;
+            fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
             return;
         };
         match add_service_route(
@@ -380,7 +411,7 @@ fn attach_rule(
         ) {
             Err(problem) => {
                 problems.push(problem);
-                *resolved_refs = false;
+                fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
                 return;
             }
             Ok((cid, has_endpoints)) => {

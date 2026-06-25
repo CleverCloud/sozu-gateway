@@ -395,3 +395,80 @@ fn route_hostname_not_matching_listener_is_silently_skipped() {
     assert!(out.ir.frontends.is_empty());
     assert!(out.routes[0].parents[0].problems.is_empty());
 }
+
+fn inputs_with(route: HttpRoute) -> Inputs {
+    Inputs {
+        gateway_classes: vec![gateway_class("sozu.io/gateway-controller")],
+        gateways: vec![http_gateway()],
+        http_routes: vec![route],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn parentref_section_name_not_matching_listener_is_not_accepted() {
+    // sectionName matches no listener -> Accepted=False / NoMatchingParent.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw", "sectionName": "does-not-exist" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+    let p = &out.routes[0].parents[0];
+    assert!(!p.accepted);
+    assert_eq!(p.accepted_reason, "NoMatchingParent");
+    assert!(out.ir.frontends.is_empty());
+}
+
+#[test]
+fn non_service_backend_ref_is_invalid_kind() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "group": "x.io", "kind": "Foo", "name": "web", "port": 80 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+    let p = &out.routes[0].parents[0];
+    assert!(p.accepted);
+    assert!(!p.resolved_refs);
+    assert_eq!(p.resolved_refs_reason, "InvalidKind");
+}
+
+#[test]
+fn nonexistent_backend_ref_is_backend_not_found() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "name": "ghost", "port": 80 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+    let p = &out.routes[0].parents[0];
+    assert!(!p.resolved_refs);
+    assert_eq!(p.resolved_refs_reason, "BackendNotFound");
+}
+
+#[test]
+fn cross_namespace_backend_without_grant_is_ref_not_permitted() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{ "backendRefs": [{ "namespace": "other", "name": "web", "port": 80 }] }]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+    let p = &out.routes[0].parents[0];
+    assert!(!p.resolved_refs);
+    assert_eq!(p.resolved_refs_reason, "RefNotPermitted");
+}
