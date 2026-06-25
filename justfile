@@ -4,7 +4,7 @@
 # CleverCloud org (see .github/workflows/release.yml). Override variables on the
 # command line, e.g. `just IMAGE=my/repo TAG=v0.2.0 image`.
 
-IMAGE := "ghcr.io/clevercloud/sozu-gateway"
+IMAGE := "ghcr.io/clevercloud/sozu-gateway-controller"
 TAG := "dev"
 # Helm chart SemVer derived from TAG (v0.2.0 -> 0.2.0; dev -> dev).
 CHART_VERSION := trim_start_match(TAG, "v")

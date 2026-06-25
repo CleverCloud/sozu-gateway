@@ -31,7 +31,7 @@ helm upgrade --install sozu-gateway \
 ```
 
 No image settings are needed: the chart's `appVersion` pins the matching published image
-(`ghcr.io/clevercloud/sozu-gateway:v<version>`). See [the chart values](../../charts/sozu-gateway/values.yaml)
+(`ghcr.io/clevercloud/sozu-gateway-controller:v<version>`). See [the chart values](../../charts/sozu-gateway/values.yaml)
 for everything you can tune.
 
 ## Step 2 — Verify
@@ -92,12 +92,12 @@ You should get a `200` served by the backend pod. Deleting the Ingress hot-remov
 Build and push your own image, then install the local chart pointing at it:
 
 ```sh
-just IMAGE=<your-registry>/sozu-gateway TAG=v0.1.0 image
-docker push <your-registry>/sozu-gateway:v0.1.0
+just IMAGE=<your-registry>/sozu-gateway-controller TAG=v0.1.0 image
+docker push <your-registry>/sozu-gateway-controller:v0.1.0
 
 helm upgrade --install sozu-gateway charts/sozu-gateway \
   --namespace sozu-system --create-namespace \
-  --set image.controller.repository=<your-registry>/sozu-gateway \
+  --set image.controller.repository=<your-registry>/sozu-gateway-controller \
   --set image.controller.tag=v0.1.0 \
   --wait
 ```

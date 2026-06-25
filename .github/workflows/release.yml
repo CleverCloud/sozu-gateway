@@ -26,7 +26,7 @@ jobs:
       - name: Build and push controller image
         run: |
           # ghcr.io requires a lowercase repository name.
-          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sozu-gateway"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/sozu-gateway-controller"
           TAG="${GITHUB_REF_NAME}"
           just IMAGE="$IMAGE" TAG="$TAG" image
           docker push "$IMAGE:$TAG"

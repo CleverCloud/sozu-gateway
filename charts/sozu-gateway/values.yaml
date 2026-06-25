@@ -4,7 +4,7 @@ replicaCount: 1
 
 image:
   controller:
-    repository: ghcr.io/clevercloud/sozu-gateway
+    repository: ghcr.io/clevercloud/sozu-gateway-controller
     # Defaults to the chart appVersion when empty (set by the release workflow).
     tag: ""
     pullPolicy: IfNotPresent
