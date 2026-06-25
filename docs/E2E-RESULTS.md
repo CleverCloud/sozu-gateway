@@ -121,9 +121,14 @@ hostname-less routing (catch-all `*`), taking core from 3 → 7 passing.
 **Passing:** `GatewayClass/Gateway/HTTPRouteObservedGenerationBump`, `HTTPRouteSimpleSameNamespace`,
 `HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`.
 
+> The table above is the recorded baseline run; status-reason work landed after it (see gap 1).
+
 **Top remaining gaps** (priority order):
-1. **Invalid-route rejection** — negative tests expect `Accepted=False` (bad/cross-ns/non-existent
-   `backendRef`, wrong `sectionName`, disallowed kind); we report `Accepted=True`.
+1. **Invalid-route rejection** — *partly addressed*: HTTPRoute parents now report the spec status
+   reasons (`NoMatchingParent`, `InvalidKind`, `BackendNotFound`, `RefNotPermitted`), flipping
+   `HTTPRouteInvalidParentRefNotMatchingSectionName`. Still failing: the invalid-`backendRef` tests
+   also require the route to return **HTTP 500** on traffic (we 404), and
+   `InvalidCrossNamespaceParentRef` needs `allowedRoutes.namespaces` enforcement.
 2. **Header `set` semantics** — Gateway `set` must *replace* a header, but Sōzu *appends* (observed
    `original,header-set`); the request/response header-modifier mapping needs revisiting.
 3. **Catch-all collisions** — all Gateways map to the static `:80`, so two hostname-less routes on
