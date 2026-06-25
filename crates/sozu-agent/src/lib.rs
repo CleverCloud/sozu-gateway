@@ -39,6 +39,25 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// hammered with reconnect storms across reconcile cycles.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
 
+/// Whether a request is a `Remove*` verb. Sōzu rejects removing an object it no
+/// longer holds, so a failed remove is treated as an already-done no-op rather
+/// than wedging reconciliation (see [`Agent::apply`]).
+fn is_remove(request: &Request) -> bool {
+    matches!(
+        &request.request_type,
+        Some(
+            RequestType::RemoveCluster(_)
+                | RequestType::RemoveBackend(_)
+                | RequestType::RemoveHttpFrontend(_)
+                | RequestType::RemoveHttpsFrontend(_)
+                | RequestType::RemoveTcpFrontend(_)
+                | RequestType::RemoveUdpFrontend(_)
+                | RequestType::RemoveListener(_)
+                | RequestType::RemoveCertificate(_)
+        )
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum SozuError {
     #[error("sozu command channel error: {0}")]
@@ -156,10 +175,24 @@ impl SozuAgent {
     }
 
     /// Apply a batch of requests in order (the caller supplies a dependency-safe
-    /// order, e.g. from the Translator). Stops at the first error.
+    /// order, e.g. from the Translator). Stops at the first error — except a
+    /// failed *remove*, which is tolerated (see [`is_remove`]).
     pub fn apply(&mut self, requests: &[Request]) -> Result<(), SozuError> {
         for request in requests {
-            self.apply_one(request)?;
+            match self.apply_one(request) {
+                Ok(()) => {}
+                // Sōzu's `Remove*` verbs are NOT idempotent: removing an object it
+                // no longer holds (state diverged from our shadow — a partially
+                // applied batch, or a worker-side drop) is a hard `Failure`. Such a
+                // remove is effectively already done, so treat it as a no-op. This
+                // keeps the invariant that re-diffing from the shadow converges:
+                // without it, one un-removable object wedges *all* reconciliation
+                // forever (the same failing remove re-emitted every cycle).
+                Err(SozuError::Failure(msg)) if is_remove(request) => {
+                    warn!(error = %msg, "sozu rejected a remove; treating it as already-gone so reconciliation converges");
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -289,6 +322,17 @@ mod tests {
         let mut agent = SozuAgent::new("/nonexistent/sozu.sock");
         assert!(agent.apply(&[]).is_ok());
         assert!(agent.channel.is_none());
+    }
+
+    #[test]
+    fn removes_are_recognized_for_failure_tolerance() {
+        let remove: Request = RequestType::RemoveCluster("c".to_string()).into();
+        assert!(is_remove(&remove), "RemoveCluster must be a remove");
+        let status: Request = RequestType::Status(Status {}).into();
+        assert!(
+            !is_remove(&status),
+            "non-remove verbs must not be tolerated"
+        );
     }
 
     #[test]
