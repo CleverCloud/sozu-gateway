@@ -1,0 +1,83 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-06-25T09:27:35Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.2.1
+implementation:
+  contact:
+  - https://github.com/CleverCloud/sozu-gateway/issues
+  organization: clevercloud
+  project: sozu-gateway
+  url: https://github.com/CleverCloud/sozu-gateway
+  version: v0.1.0
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    failedTests:
+    - GatewayInvalidRouteKind
+    - GatewayInvalidTLSConfiguration
+    - GatewayModifyListeners
+    - GatewaySecretInvalidReferenceGrant
+    - GatewaySecretMissingReferenceGrant
+    - GatewaySecretReferenceGrantAllInNamespace
+    - GatewaySecretReferenceGrantSpecific
+    - GatewayWithAttachedRoutes
+    - HTTPRouteHTTPSListener
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidCrossNamespaceParentRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidParentRefNotMatchingSectionName
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMatchingAcrossRoutes
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteRedirectHostAndStatus
+    - HTTPRouteReferenceGrant
+    - HTTPRouteRequestHeaderModifier
+    - HTTPRouteWeight
+    result: failure
+    statistics:
+      Failed: 26
+      Passed: 7
+      Skipped: 0
+  extended:
+    failedTests:
+    - HTTPRouteMethodMatching
+    - HTTPRouteRedirectScheme
+    - HTTPRouteResponseHeaderModifier
+    result: failure
+    statistics:
+      Failed: 3
+      Passed: 0
+      Skipped: 0
+    supportedFeatures:
+    - HTTPRouteMethodMatching
+    - HTTPRouteResponseHeaderModification
+    - HTTPRouteSchemeRedirect
+    unsupportedFeatures:
+    - GatewayHTTPListenerIsolation
+    - GatewayInfrastructurePropagation
+    - GatewayPort8080
+    - GatewayStaticAddresses
+    - HTTPRouteBackendProtocolH2C
+    - HTTPRouteBackendProtocolWebSocket
+    - HTTPRouteBackendRequestHeaderModification
+    - HTTPRouteBackendTimeout
+    - HTTPRouteDestinationPortMatching
+    - HTTPRouteHostRewrite
+    - HTTPRouteParentRefPort
+    - HTTPRoutePathRedirect
+    - HTTPRoutePathRewrite
+    - HTTPRoutePortRedirect
+    - HTTPRouteQueryParamMatching
+    - HTTPRouteRequestMirror
+    - HTTPRouteRequestMultipleMirrors
+    - HTTPRouteRequestTimeout
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 26 test failures. Extended tests failed with 3 test
+    failures.

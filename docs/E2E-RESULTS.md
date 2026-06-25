@@ -102,6 +102,37 @@ against the `whoami` demo (which echoes the request it received):
 The redirect route has no `backendRef` (the Gateway API forbids combining `RequestRedirect` with
 backends), so it maps to a frontend with no cluster — Sōzu answers the 301 itself.
 
+## 6. Gateway API conformance (GATEWAY-HTTP, v1.2.1)
+
+The **official** `kubernetes-sigs/gateway-api` v1.2.1 conformance suite, `GATEWAY-HTTP` profile,
+run against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`). Report:
+[docs/conformance/gateway-http-v1.2.1-report.yaml](conformance/gateway-http-v1.2.1-report.yaml).
+
+| | Passed | Failed | Result |
+|---|---|---|---|
+| Core | **7** | 26 | failure |
+| Extended (declared: `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching`) | 0 | 3 | failure |
+
+The profile is **not passing** — we are **not (yet) conformant**. This is a baseline to improve
+against; running the suite surfaced and fixed two real bugs (`observedGeneration` on status
+conditions; a reconcile wedge when Sōzu rejects a non-idempotent `Remove*`) and unblocked
+hostname-less routing (catch-all `*`), taking core from 3 → 7 passing.
+
+**Passing:** `GatewayClass/Gateway/HTTPRouteObservedGenerationBump`, `HTTPRouteSimpleSameNamespace`,
+`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`.
+
+**Top remaining gaps** (priority order):
+1. **Invalid-route rejection** — negative tests expect `Accepted=False` (bad/cross-ns/non-existent
+   `backendRef`, wrong `sectionName`, disallowed kind); we report `Accepted=True`.
+2. **Header `set` semantics** — Gateway `set` must *replace* a header, but Sōzu *appends* (observed
+   `original,header-set`); the request/response header-modifier mapping needs revisiting.
+3. **Catch-all collisions** — all Gateways map to the static `:80`, so two hostname-less routes on
+   the same path share Sōzu key `(:8080,*,/path)`; `unique_frontends` keeps the first → the rest 404.
+4. **Header/query matching, hostname intersection, multiple-match precedence, `ReferenceGrant`
+   enforcement, per-Gateway HTTPS listeners.**
+
+Reproduce: see the harness + commands in `CONFORMANCE-HANDOFF.md`.
+
 ## Reproduce
 
 ```sh
