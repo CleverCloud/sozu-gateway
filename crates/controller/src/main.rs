@@ -23,7 +23,10 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use kube::api::ListParams;
-use kube::runtime::reflector::{store::Writer, Store};
+use kube::runtime::reflector::{
+    store::{Writer, WriterDropped},
+    Lookup, Store,
+};
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client, Resource};
 use serde::de::DeserializeOwned;
@@ -163,6 +166,26 @@ where
             }
         }
     });
+}
+
+/// Await a store's readiness only when its watcher was actually spawned.
+///
+/// Optional features (L4 ConfigMaps, Gateway API) drop their `Writer` when
+/// disabled, and `wait_until_ready` on such a store fails immediately; a store
+/// that is never watched is trivially "ready" instead. For a watched store this
+/// is the plain readiness wait, so the sync gate covers *every* cache the first
+/// reconcile will read — skipping one would let a resumed shadow diff against a
+/// half-built IR and tear down live routes.
+async fn ready_when<K>(watched: bool, store: &Store<K>) -> Result<(), WriterDropped>
+where
+    K: Lookup + Clone + 'static,
+    K::DynamicType: Eq + Hash + Clone,
+{
+    if watched {
+        store.wait_until_ready().await
+    } else {
+        Ok(())
+    }
 }
 
 /// Is our IngressClass marked as the cluster default?
@@ -400,8 +423,9 @@ async fn main() -> Result<()> {
 
     // ConfigMaps are only watched when L4 (tcp/udp-services) is configured, so a
     // cluster not using L4 pays no ConfigMap-watch cost.
+    let l4_enabled = args.tcp_services_configmap.is_some() || args.udp_services_configmap.is_some();
     let (config_maps, cm_w) = reflector::store();
-    if args.tcp_services_configmap.is_some() || args.udp_services_configmap.is_some() {
+    if l4_enabled {
         info!("L4 services configured; watching ConfigMaps");
         spawn_watch::<ConfigMap>(Api::all(client.clone()), cm_w, tx.clone(), "configmap");
     } else {
@@ -414,7 +438,8 @@ async fn main() -> Result<()> {
     let (gateways, gw_w) = reflector::store();
     let (http_routes, hr_w) = reflector::store();
     let (reference_grants, rg_w) = reflector::store();
-    if gateway_api_available(&client).await {
+    let gateway_api_enabled = gateway_api_available(&client).await;
+    if gateway_api_enabled {
         info!("Gateway API detected; watching gateway.networking.k8s.io resources");
         spawn_watch::<GatewayClass>(Api::all(client.clone()), gc_w, tx.clone(), "gatewayclass");
         spawn_watch::<Gateway>(Api::all(client.clone()), gw_w, tx.clone(), "gateway");
@@ -439,8 +464,12 @@ async fn main() -> Result<()> {
     };
 
     // Wait for the caches to fill so the first reconcile sees a complete picture.
-    // Bounded so a wedged/permission-denied watcher surfaces as a clear failure
-    // (CrashLoopBackOff) instead of hanging forever.
+    // Every spawned watcher is gated, including the optional ConfigMap and
+    // Gateway API ones: a resumed shadow holds Gateway routes and L4 listeners,
+    // so reconciling before those caches finish their initial LIST would diff
+    // them away (a live-traffic flap). Bounded so a wedged/permission-denied
+    // watcher surfaces as a clear failure (CrashLoopBackOff) instead of hanging
+    // forever.
     info!("waiting for informer caches to sync...");
     let sync = async {
         tokio::try_join!(
@@ -449,6 +478,11 @@ async fn main() -> Result<()> {
             stores.services.wait_until_ready(),
             stores.endpointslices.wait_until_ready(),
             stores.secrets.wait_until_ready(),
+            ready_when(l4_enabled, &stores.config_maps),
+            ready_when(gateway_api_enabled, &stores.gateway_classes),
+            ready_when(gateway_api_enabled, &stores.gateways),
+            ready_when(gateway_api_enabled, &stores.http_routes),
+            ready_when(gateway_api_enabled, &stores.reference_grants),
         )
     };
     tokio::time::timeout(Duration::from_secs(120), sync)
@@ -503,4 +537,45 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unwatched_store_is_trivially_ready() {
+        // A disabled feature (no L4, no Gateway API) drops the writer without
+        // spawning a watcher; the sync gate must not wait on (or fail for) it.
+        let (store, writer) = reflector::store::<ConfigMap>();
+        drop(writer);
+        ready_when(false, &store)
+            .await
+            .expect("an unwatched store must not gate the sync");
+    }
+
+    #[tokio::test]
+    async fn watched_store_gates_until_its_initial_list_lands() {
+        let (store, mut writer) = reflector::store::<ConfigMap>();
+        // Before the initial LIST completes, the gate must still be waiting —
+        // this is exactly the window where reconciling would flap live routes.
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(50), ready_when(true, &store)).await;
+        assert!(waiting.is_err(), "gate must hold until the cache syncs");
+
+        writer.apply_watcher_event(&watcher::Event::Init);
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        ready_when(true, &store)
+            .await
+            .expect("gate must open once the initial LIST is applied");
+    }
+
+    #[tokio::test]
+    async fn watched_store_with_dropped_writer_fails_fast() {
+        // If a watched store's writer is gone the gate must error (fail fast),
+        // never report ready.
+        let (store, writer) = reflector::store::<ConfigMap>();
+        drop(writer);
+        assert!(ready_when(true, &store).await.is_err());
+    }
 }
