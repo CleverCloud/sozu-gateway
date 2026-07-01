@@ -194,8 +194,23 @@ fn tls_covers(tls_hosts: &BTreeSet<String>, host: &str) -> bool {
     })
 }
 
-/// Extract leaf + chain + key PEM from a TLS Secret (`tls.crt` / `tls.key`).
-pub(crate) fn extract_cert(secret: &Secret) -> Result<(String, Vec<String>, String), String> {
+/// PEM labels we accept for `tls.key` (PKCS#8, PKCS#1 and SEC1).
+const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"];
+
+/// Extract **and validate** leaf + chain + key PEM from a TLS Secret
+/// (`tls.crt` / `tls.key`). Returns `(leaf, chain, key, leaf_fingerprint)`;
+/// the fingerprint is the SHA-256 of the leaf's DER — Sōzu's identity for the
+/// certificate.
+///
+/// `split_certificate_chain` is purely textual (it scans for the BEGIN/END
+/// markers) and never decodes the base64 body, so everything is parsed here,
+/// *before* it enters the IR: a corrupt certificate would otherwise abort the
+/// translator's whole diff (freezing convergence for every namespace), and a
+/// corrupt key would make Sōzu reject the `AddCertificate` at apply time —
+/// certificates tier before frontends, so that blocks every frontend add.
+pub(crate) fn extract_cert(
+    secret: &Secret,
+) -> Result<(String, Vec<String>, String, Vec<u8>), String> {
     let data = secret
         .data
         .as_ref()
@@ -214,7 +229,39 @@ pub(crate) fn extract_cert(secret: &Secret) -> Result<(String, Vec<String>, Stri
         return Err("tls.crt contains no PEM blocks".to_string());
     }
     let leaf = chain.remove(0);
-    Ok((leaf, chain, key))
+
+    // Fully parse the leaf — PEM framing, base64 body AND the decoded DER —
+    // with the same helpers Sōzu applies to an `AddCertificate` (`parse_pem` +
+    // `parse_x509`, its X509 parse for CN/SAN extraction). Hashing the decoded
+    // bytes alone would wave through valid-base64 garbage that Sōzu then
+    // rejects at apply time, aborting the whole batch on every cycle. The
+    // fingerprint is the SHA-256 of the DER, the translator's identity.
+    let leaf_pem = sozu_command_lib::certificate::parse_pem(leaf.as_bytes())
+        .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
+    sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
+        .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
+    let fingerprint =
+        sozu_command_lib::certificate::calculate_fingerprint_from_der(&leaf_pem.contents);
+    // The intermediates ride in the same AddCertificate, so a corrupt one
+    // would equally be rejected by Sōzu at apply time.
+    for (i, c) in chain.iter().enumerate() {
+        let pem = sozu_command_lib::certificate::parse_pem(c.as_bytes())
+            .map_err(|e| format!("invalid chain certificate #{} in tls.crt: {e}", i + 1))?;
+        sozu_command_lib::certificate::parse_x509(&pem.contents)
+            .map_err(|e| format!("invalid chain certificate #{} in tls.crt: {e}", i + 1))?;
+    }
+    // Sanity-check the key: it must at least be a well-formed PEM block with a
+    // plausible private-key label (full key/cert pairing is Sōzu's job).
+    let key_pem = sozu_command_lib::certificate::parse_pem(key.as_bytes())
+        .map_err(|e| format!("invalid private key in tls.key: {e}"))?;
+    if !KEY_PEM_LABELS.contains(&key_pem.label.as_str()) {
+        return Err(format!(
+            "tls.key is not a private key (PEM label {:?})",
+            key_pem.label
+        ));
+    }
+
+    Ok((leaf, chain, key, fingerprint))
 }
 
 // ----------------------------------------------------------------------------
@@ -580,7 +627,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     secret: secret_name.clone(),
                 }),
                 Some(secret) => match extract_cert(secret) {
-                    Ok((leaf, chain, key)) => {
+                    Ok((leaf, chain, key, _fingerprint)) => {
                         for h in &hosts {
                             tls_ready_hosts.insert(h.clone());
                         }

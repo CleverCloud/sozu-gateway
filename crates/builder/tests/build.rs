@@ -407,6 +407,85 @@ fn http_only_ingress_is_not_redirected() {
     assert!(out.ir.frontends[0].filters.redirect.is_none());
 }
 
+/// A build with the given Secret material must report `InvalidCertificate`,
+/// load no cert, and keep the host's frontend plain HTTP (no HTTPS, no
+/// redirect) — the "TLS-ready only with a successfully loaded cert" rule.
+fn assert_invalid_certificate(crt: &str, key: &str) {
+    let inputs = Inputs {
+        ingresses: vec![ingress_tls()],
+        services: vec![web_service()],
+        endpointslices: vec![web_slice()],
+        secrets: vec![tls_secret("demo", "app-tls", crt, key)],
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.certificates.len(), 0, "invalid cert must not load");
+    assert_eq!(out.ir.frontends.len(), 1, "only the HTTP frontend remains");
+    assert!(!out.ir.frontends[0].tls);
+    assert!(
+        out.ir.frontends[0].filters.redirect.is_none(),
+        "no HTTPS to redirect to"
+    );
+    assert_eq!(out.results.len(), 1, "build still succeeds");
+    assert!(
+        matches!(
+            &out.results[0].problems[..],
+            [Problem::InvalidCertificate { secret, .. }] if secret == "app-tls"
+        ),
+        "expected InvalidCertificate, got {:?}",
+        out.results[0].problems
+    );
+}
+
+#[test]
+fn cert_with_valid_markers_but_garbage_base64_is_rejected() {
+    // split_certificate_chain is purely textual: this passes the marker scan
+    // but the body is not base64. It must be reported per-Secret, not crash
+    // the translator's diff downstream.
+    let garbage = "-----BEGIN CERTIFICATE-----\nnot!!base64@@data\n-----END CERTIFICATE-----\n";
+    assert_invalid_certificate(garbage, KEY_A);
+}
+
+#[test]
+fn cert_with_valid_base64_but_non_der_body_is_rejected() {
+    // The body IS valid base64 (so a decode-and-hash check alone would pass)
+    // but the decoded bytes are not DER. Sōzu parses the X509 when the
+    // AddCertificate is applied and rejects it, aborting the whole apply
+    // batch every cycle — so the builder must reject it up front.
+    let garbage = "-----BEGIN CERTIFICATE-----\n\
+                   bm90IGEgY2VydGlmaWNhdGUsIGp1c3QgYmFzZTY0IGdhcmJhZ2U=\n\
+                   -----END CERTIFICATE-----\n";
+    assert_invalid_certificate(garbage, KEY_A);
+}
+
+#[test]
+fn chain_cert_with_non_der_body_is_rejected() {
+    // A valid leaf followed by a valid-base64/non-DER intermediate: the chain
+    // rides in the same AddCertificate, so it must be validated too.
+    let garbage_chain = format!(
+        "{CERT_A}-----BEGIN CERTIFICATE-----\n\
+         bm90IGEgY2VydGlmaWNhdGUsIGp1c3QgYmFzZTY0IGdhcmJhZ2U=\n\
+         -----END CERTIFICATE-----\n"
+    );
+    assert_invalid_certificate(&garbage_chain, KEY_A);
+}
+
+#[test]
+fn cert_with_garbage_key_is_rejected() {
+    // A parseable cert with a corrupt key would be rejected by Sōzu at
+    // AddCertificate time, blocking every frontend add (certs tier first).
+    let garbage = "-----BEGIN PRIVATE KEY-----\nnot!!base64@@data\n-----END PRIVATE KEY-----\n";
+    assert_invalid_certificate(CERT_A, garbage);
+}
+
+#[test]
+fn key_with_non_key_pem_label_is_rejected() {
+    // A well-formed PEM block that is not a private key (here: a certificate)
+    // is not plausible tls.key material.
+    assert_invalid_certificate(CERT_A, CERT_A);
+}
+
 #[test]
 fn certs_sharing_a_secret_are_merged_with_unioned_names() {
     // One TLS Secret backing two hosts (here two TLS entries on one Ingress, the

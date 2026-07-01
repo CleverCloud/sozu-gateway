@@ -487,7 +487,7 @@ fn load_listener_certs(
                 secret: cref.name.clone(),
             }),
             Some(secret) => match extract_cert(secret) {
-                Ok((leaf, chain, key)) => {
+                Ok((leaf, chain, key, _fingerprint)) => {
                     certificates.push(ir::Certificate {
                         listener: cfg.https_listener,
                         certificate: leaf,
