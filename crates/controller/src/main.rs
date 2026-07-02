@@ -279,9 +279,10 @@ const GATEWAY_API_KINDS: [&str; 4] = ["GatewayClass", "Gateway", "HTTPRoute", "R
 /// kind the controller watches — a partial install (e.g. GatewayClass served
 /// but ReferenceGrant absent) is a real cluster state and must read as
 /// Ingress-only (with a warning naming the missing kinds), not as gateway
-/// mode. Only a genuine `NotFound` from the apiserver (the CRD's group/kind
-/// is not served) means "absent"; any other failure — an apiserver hiccup,
-/// RBAC not yet propagated — is propagated so startup fails fast and
+/// mode. Only a 404 from the apiserver (the CRD's group/kind is not served,
+/// see [`gateway_crds_absent`]) means "absent"; any other failure — an
+/// apiserver hiccup, RBAC not yet propagated — is propagated so startup fails
+/// fast and
 /// Kubernetes restarts us, instead of silently locking the whole process into
 /// Ingress-only mode for its lifetime.
 async fn gateway_api_available(client: &Client) -> Result<bool> {
@@ -336,10 +337,16 @@ fn missing_gateway_crds(served: [bool; 4]) -> Vec<&'static str> {
         .collect()
 }
 
-/// Classify the probe error: only an apiserver `NotFound` `Status` (what the
-/// list returns when the CRD is not installed) means the CRD is absent.
+/// Classify the probe error: a 404 from the apiserver (what the list returns
+/// when the CRD's group/kind is not served) means the CRD is absent. Matched
+/// by HTTP code, not only by the parsed `NotFound` reason: managed clusters
+/// that front the apiserver with an HTTP router can answer an unserved
+/// group's path with a plain-text `404 page not found` body, which
+/// kube-client cannot parse into a typed `Status` — `reason` is then a
+/// synthetic parse-failure marker but `code` is still 404. A 404 on a
+/// collection list is never transient, so everything else stays fail-fast.
 fn gateway_crds_absent(err: &kube::Error) -> bool {
-    matches!(err, kube::Error::Api(status) if status.is_not_found())
+    matches!(err, kube::Error::Api(status) if status.is_not_found() || status.code == 404)
 }
 
 /// Run one restart-generation check (see [`shadow::check_restart_generation`]),
@@ -897,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_not_found_status_reads_as_crds_absent() {
+    fn only_a_404_reads_as_crds_absent() {
         use kube::core::Status;
 
         // What the apiserver returns when the CRD's group/kind is not served.
@@ -910,6 +917,19 @@ mod tests {
             .boxed(),
         );
         assert!(gateway_crds_absent(&not_found));
+
+        // Managed clusters fronting the apiserver with an HTTP router answer
+        // an unserved group's path with a plain-text `404 page not found`;
+        // kube-client can't parse that body into a typed Status and
+        // synthesizes this parse-failure reason. Still a 404 on a collection
+        // list, so still "absent" — matching on the reason alone crash-looped
+        // the controller on such clusters.
+        let unparsed_404 = kube::Error::Api(
+            Status::failure("404 page not found\n", "Failed to parse error data")
+                .with_code(404)
+                .boxed(),
+        );
+        assert!(gateway_crds_absent(&unparsed_404));
 
         // RBAC not yet propagated: a transient failure, never "absent".
         let forbidden = kube::Error::Api(
