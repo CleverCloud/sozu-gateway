@@ -146,7 +146,9 @@ cargo test -p sozu-gw-translator <name>
 
 For end-to-end coverage there are three shipped suites, each running in-cluster on your current
 kube-context (they default to ephemeral [ttl.sh](https://ttl.sh) images, so no registry creds are
-needed):
+needed — ttl.sh is anonymous and world-writable, which is why the suites deploy by the *digest*
+resolved from their own push, and why you should export `IMAGE=<your registry>` for anything
+beyond a throwaway cluster):
 
 ```bash
 just e2e            # Ingress + TLS
