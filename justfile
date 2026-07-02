@@ -46,13 +46,14 @@ clippy:
 image:
     docker build -t {{IMAGE}}:{{TAG}} .
 
-# Lint + render the Helm chart (also with rbac.allowStatusWrites=true and the
-# opt-in metrics + ServiceMonitor path).
+# Lint + render the Helm chart (also with rbac.allowStatusWrites=true, the
+# opt-in metrics + ServiceMonitor path, and a digest-pinned image).
 chart-lint:
     helm lint {{CHART}}
     helm template {{HELM_RELEASE}} {{CHART}} > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowStatusWrites=true > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
 
 # Package the Helm chart into dist/ (use TAG=v<semver>).
 chart-package:
@@ -73,14 +74,12 @@ e2e-gateway:
 e2e-l4:
     bash scripts/e2e-l4.sh
 
-# Run every e2e suite, sharing one freshly-built image.
+# Run every e2e suite, sharing one freshly-built, digest-pinned image.
 e2e-all:
     #!/usr/bin/env bash
     set -euo pipefail
-    rand=$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')
-    export IMAGE="ttl.sh/sozu-gw-${rand}:1h"
-    docker build -q -t "$IMAGE" . >/dev/null
-    docker push -q "$IMAGE" >/dev/null 2>&1 || docker push "$IMAGE"
+    source scripts/e2e-lib.sh
+    ensure_image
     bash scripts/e2e.sh
     bash scripts/e2e-gateway.sh
     bash scripts/e2e-l4.sh

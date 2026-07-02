@@ -7,6 +7,10 @@ image:
     repository: ghcr.io/clevercloud/sozu-gateway-controller
     # Defaults to the chart appVersion when empty (set by the release workflow).
     tag: ""
+    # When set (e.g. "sha256:…"), the image is pulled by digest instead of by
+    # tag — immutable, so nobody can swap the content behind the reference.
+    # The e2e suites use this for their throwaway ttl.sh images.
+    digest: ""
     pullPolicy: IfNotPresent
   sozu:
     repository: clevercloud/sozu

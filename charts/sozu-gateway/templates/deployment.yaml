@@ -63,7 +63,11 @@ spec:
             {{- toYaml .Values.resources.sozu | nindent 12 }}
         # --- control plane ----------------------------------------------------
         - name: controller
+          {{- if .Values.image.controller.digest }}
+          image: "{{ .Values.image.controller.repository }}@{{ .Values.image.controller.digest }}"
+          {{- else }}
           image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
