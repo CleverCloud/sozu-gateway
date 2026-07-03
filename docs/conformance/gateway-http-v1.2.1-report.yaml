@@ -1,5 +1,5 @@
 apiVersion: gateway.networking.k8s.io/v1
-date: "2026-06-25T14:33:24Z"
+date: "2026-07-03T03:47:29Z"
 gatewayAPIChannel: standard
 gatewayAPIVersion: v1.2.1
 implementation:
@@ -8,23 +8,27 @@ implementation:
   organization: clevercloud
   project: sozu-gateway
   url: https://github.com/CleverCloud/sozu-gateway
-  version: v0.1.0
+  version: v0.2.1-dev
 kind: ConformanceReport
 mode: default
 profiles:
 - core:
     failedTests:
+    - GatewayModifyListeners
+    - GatewayObservedGenerationBump
+    - GatewayWithAttachedRoutes
+    - HTTPRouteCrossNamespace
     - HTTPRouteHTTPSListener
     - HTTPRouteHeaderMatching
     - HTTPRouteHostnameIntersection
     - HTTPRouteInvalidBackendRefUnknownKind
     - HTTPRouteInvalidCrossNamespaceBackendRef
-    - HTTPRouteInvalidCrossNamespaceParentRef
     - HTTPRouteInvalidNonExistentBackendRef
     - HTTPRouteInvalidReferenceGrant
     - HTTPRouteListenerHostnameMatching
     - HTTPRouteMatching
     - HTTPRouteMatchingAcrossRoutes
+    - HTTPRouteObservedGenerationBump
     - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
     - HTTPRoutePathMatchOrder
     - HTTPRouteRedirectHostAndStatus
@@ -33,8 +37,8 @@ profiles:
     - HTTPRouteWeight
     result: failure
     statistics:
-      Failed: 17
-      Passed: 16
+      Failed: 21
+      Passed: 12
       Skipped: 0
   extended:
     failedTests:
@@ -70,5 +74,5 @@ profiles:
     - HTTPRouteRequestMultipleMirrors
     - HTTPRouteRequestTimeout
   name: GATEWAY-HTTP
-  summary: Core tests failed with 17 test failures. Extended tests failed with 3 test
+  summary: Core tests failed with 21 test failures. Extended tests failed with 3 test
     failures.

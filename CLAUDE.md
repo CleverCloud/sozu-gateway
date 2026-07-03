@@ -144,9 +144,11 @@ patches, so the controller's own status writes never re-trigger it. Status write
 diffed against the previous pass so resyncs never flood etcd).
 
 **Conformance is a documented partial, by design.** The official Gateway API v1.2.1 `GATEWAY-HTTP`
-suite passes 16/33 core tests (report: [docs/conformance/](docs/conformance/), analysis:
-[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6; the recorded score predates the `Selector`
-fail-closed change — a re-run is pending). The profile **cannot fully pass** on Sōzu (no
+suite passes 12/33 core tests (report: [docs/conformance/](docs/conformance/), analysis:
+[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6; down from a recorded 16 because the `Selector`
+fail-closed change removed passes that were artifacts of the old fail-open bug — 5 tests hang on
+the suite's `from: Selector` base Gateway; evaluating selectors via a Namespace watch would
+recover them). The profile **cannot fully pass** on Sōzu (no
 weighted splits, no header/query matching, …), so don't chase the "Conformant" badge — and don't
 read the recorded failures as regressions: several (hostname/path-matching tests) route correctly
 by hand but fail on a base-setup cert-timing gate. [docs/features.md](docs/features.md) is the

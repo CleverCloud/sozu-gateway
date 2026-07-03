@@ -110,40 +110,39 @@ run against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`).
 
 | | Passed | Failed | Result |
 |---|---|---|---|
-| Core | **16** | 17 | failure |
+| Core | **12** | 21 | failure |
 | Extended (declared: `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching`) | 0 | 3 | failure |
 
 The profile is **not passing** — and with Sōzu it **cannot** be (see hard limits below), so the goal
-is a well-documented **partial** result, not the "Conformant" badge. Running the suite surfaced and
-fixed real bugs (`observedGeneration`; a reconcile wedge on non-idempotent `Remove*`), unblocked
-hostname-less routing (catch-all `*`), added invalid-route status reasons + `allowedRoutes.namespaces`,
-per-listener status (`.status.listeners[]`), and cert `ReferenceGrant` denial reporting — taking core
-from **3 → 16**.
+is a well-documented **partial** result, not the "Conformant" badge. Score history: **3 → 16**
+(the first campaign: `observedGeneration`, the `Remove*` reconcile wedge, catch-all `*` routing,
+invalid-route status reasons, `allowedRoutes.namespaces`, per-listener status, cert `ReferenceGrant`
+denial reporting), then **16 → 12** on the post-v0.2.0 re-run — an *honesty correction*, not a
+regression: the v0.2.0 `from: Selector` fail-closed change removed passes that were artifacts of
+the old fail-open bug (details below), while `HTTPRouteInvalidCrossNamespaceParentRef` newly
+passes. Each re-run keeps paying for itself: this one caught a controller bug in the field (one
+hung status write could park the reconcile loop for ~5 minutes — kube's default ~295s read
+timeout — starving every status-polling test; fixed by giving one-shot API calls a
+seconds-bounded client, and verified gone on the recorded run: no loop stall above 90s).
 
-> Counts vary run-to-run **15–16** because a few status-polling tests flake against the poc
-> cluster's API latency (raise the conformance client QPS); ~17–18 distinct core tests pass across
-> runs/in isolation. **Note:** the hostname/path routing tests (`ListenerHostnameMatching`,
-> `HostnameIntersection`, `PathMatchOrder`) were verified to route correctly by hand (exact +
-> wildcard + precedence + one-label wildcard depth all behave), but fail in the suite at **base
-> setup**: the base `same-namespace-with-https-listener` (HTTPS-only) Gateway intermittently isn't
-> `Programmed` in time because the controller reports `SecretNotFound` for the suite's
-> programmatically-created `tls-validity-checks-certificate` — a setup-timing gate, not a routing bug.
+> **The `Selector` fail-closed blast radius (5 tests).** The suite's shared base infrastructure
+> includes a `backend-namespaces` Gateway whose listeners use
+> `allowedRoutes.namespaces.from: Selector`. Since v0.2.0 an unevaluable selector fails CLOSED
+> (the listener admits no routes, `Programmed: False`), so that base Gateway never reads
+> `Programmed` — which fails `HTTPRouteCrossNamespace` and `GatewayWithAttachedRoutes` directly,
+> and gates the *setup* of `GatewayModifyListeners`, `GatewayObservedGenerationBump` and
+> `HTTPRouteObservedGenerationBump` (the framework waits for every base Gateway before running
+> them; `GatewayClassObservedGenerationBump` needs no Gateway and passes). Their pre-v0.2.0
+> passes were artifacts of Selector admitting every namespace. **Note:** the hostname/path
+> routing tests (`ListenerHostnameMatching`, `HostnameIntersection`, `PathMatchOrder`) still
+> route correctly by hand but fail on the base-setup cert-timing gate described in earlier runs.
 
-> **Stale vs. the current tree:** the recorded 16/33 predates the `allowedRoutes.namespaces`
-> `from: Selector` fail-closed change. The upstream `HTTPRouteCrossNamespace` and
-> `GatewayWithAttachedRoutes` tests attach their routes through `from: Selector` Gateways, so
-> those recorded passes were artifacts of the old fail-open bug (Selector admitted every
-> namespace); with Selector now admitting nothing, the suite needs a re-run. The report YAML is
-> kept unedited as the record of that run.
-
-**Passing (16):** the 3 `*ObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
-`HTTPRouteExactPathMatching`, `HTTPRouteCrossNamespace`, `HTTPRouteServiceTypes`;
+**Passing (12):** `GatewayClassObservedGenerationBump`; `HTTPRouteSimpleSameNamespace`,
+`HTTPRouteExactPathMatching`, `HTTPRouteServiceTypes`;
 `HTTPRouteInvalidParentRefNotMatchingSectionName`, `HTTPRouteInvalidCrossNamespaceParentRef`;
-`GatewayWithAttachedRoutes`, `GatewayModifyListeners`, `GatewayInvalidRouteKind`,
-`GatewayInvalidTLSConfiguration`, `GatewaySecretReferenceGrant{AllInNamespace,Specific}`,
+`GatewayInvalidRouteKind`, `GatewayInvalidTLSConfiguration`,
+`GatewaySecretReferenceGrant{AllInNamespace,Specific}`,
 `GatewaySecret{Invalid,Missing}ReferenceGrant`.
-(`GatewayWithAttachedRoutesWithPort8080` also passes in isolation; it flaked here under client
-throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.md`.)
 
 **Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
@@ -165,13 +164,32 @@ throttling — run the suite with a raised client QPS, see `CONFORMANCE-HANDOFF.
   tests). Real users on a shared LB route by hostname (no collision).
 
 **Implementable remaining gaps** (would raise the count):
-1. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
+1. **Evaluate `allowedRoutes.namespaces.from: Selector` for real** — the fail-closed stance exists
+   because the controller has no Namespace label index, *not* because of any Sōzu limit. A
+   Namespace reflector + label matching would flip Selector to supported and recover the 5
+   fail-closed tests above (→ ~17/33). Highest-leverage single item on the board.
+2. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
    shared `:443`; intertwined with the catch-all-collision limit above.
 
 (`GatewaySecret{Invalid,Missing}ReferenceGrant` now pass — cert `ReferenceGrant` denial reports
 `RefNotPermitted`, with the grant `group` checked too.)
 
-Reproduce: see the harness + commands in `CONFORMANCE-HANDOFF.md`.
+Reproduce (the handoff notes previously referenced here lived in the gitignored `.scratch/`):
+
+```bash
+git clone --depth 1 --branch v1.2.1 https://github.com/kubernetes-sigs/gateway-api
+cd gateway-api   # raise the suite's client QPS (default 5 flakes on status polling):
+# in conformance/conformance.go, after config.GetConfig(): cfg.QPS = 100; cfg.Burst = 200
+go test ./conformance -run TestConformance -timeout 120m -args \
+  --gateway-class=sozu --conformance-profiles=GATEWAY-HTTP \
+  --supported-features=HTTPRouteResponseHeaderModification,HTTPRouteSchemeRedirect,HTTPRouteMethodMatching \
+  --organization=clevercloud --project=sozu-gateway \
+  --url=https://github.com/CleverCloud/sozu-gateway \
+  --contact=https://github.com/CleverCloud/sozu-gateway/issues \
+  --version=<version under test> --report-output=report.yaml
+```
+
+The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
 
 ## Reproduce
 
