@@ -396,6 +396,16 @@ fn missing_gateway_crds(served: [bool; 4]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Clamp a kube `Config` to one-shot-call timeouts (see the `ops_client`
+/// construction in `main`): connecting or waiting minutes on a single
+/// GET/PATCH is never right for best-effort calls made inline in the
+/// reconcile loop.
+fn bound_ops_config(cfg: &mut kube::Config) {
+    cfg.connect_timeout = Some(Duration::from_secs(10));
+    cfg.read_timeout = Some(Duration::from_secs(30));
+    cfg.write_timeout = Some(Duration::from_secs(30));
+}
+
 /// Classify the probe error: a 404 from the apiserver (what the list returns
 /// when the CRD's group/kind is not served) means the CRD is absent. Matched
 /// by HTTP code, not only by the parsed `NotFound` reason: managed clusters
@@ -613,6 +623,21 @@ async fn main() -> Result<()> {
     let client = Client::try_default()
         .await
         .context("create kube client (in-cluster or kubeconfig)")?;
+    // Second client for one-shot calls (status writes, Events, probes), with
+    // tight timeouts. The default client keeps kube's ~295s read timeout —
+    // deliberately longer than a watch request's 290s, which the long-lived
+    // watch streams need — but a *single* status write hanging on a
+    // black-holed connection would park the singleton reconcile loop for
+    // those same ~5 minutes: routing and status starve together (observed
+    // live under conformance-suite churn). One-shot calls get seconds, not
+    // minutes; a slow write fails fast and stays best-effort.
+    let ops_client = {
+        let mut cfg = kube::Config::infer()
+            .await
+            .context("infer kube config for the bounded ops client")?;
+        bound_ops_config(&mut cfg);
+        Client::try_from(cfg).context("create bounded ops client")?
+    };
     let agent = SozuAgentHandle::spawn(&args.socket).context("spawn sozu-agent")?;
 
     // Optional Prometheus `/metrics`: each scrape pulls Sōzu's aggregated
@@ -711,7 +736,7 @@ async fn main() -> Result<()> {
     let (gateways, gw_w) = reflector::store();
     let (http_routes, hr_w) = reflector::store();
     let (reference_grants, rg_w) = reflector::store();
-    let gateway_api_enabled = gateway_api_available(&client).await?;
+    let gateway_api_enabled = gateway_api_available(&ops_client).await?;
     if gateway_api_enabled {
         info!("Gateway API detected; watching gateway.networking.k8s.io resources");
         spawn_watch::<GatewayClass>(
@@ -829,13 +854,13 @@ async fn main() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
 
     // Event publisher for reported problems, with its diff baseline.
-    let mut problem_events = events::ProblemEvents::new(client.clone());
+    let mut problem_events = events::ProblemEvents::new(ops_client.clone());
 
     // Initial reconcile (full apply). Readiness latches once this succeeds.
     let started = std::time::Instant::now();
     match reconcile(
         &args,
-        &client,
+        &ops_client,
         &stores,
         &agent,
         &mut shadow,
@@ -920,7 +945,7 @@ async fn main() -> Result<()> {
         let started = std::time::Instant::now();
         match reconcile(
             &args,
-            &client,
+            &ops_client,
             &stores,
             &agent,
             &mut shadow,
@@ -1021,6 +1046,17 @@ mod tests {
         assert!(slice_pings(&empty, &slice(Some("demo"), Some("web"))));
         assert!(slice_pings(&empty, &slice(Some("demo"), None)));
         assert!(slice_pings(&empty, &slice(None, None)));
+    }
+
+    #[test]
+    fn ops_config_is_bounded_to_seconds() {
+        // The default kube read timeout (~295s) exists for long-lived watches;
+        // a one-shot call must never be able to hold the loop that long.
+        let mut cfg = kube::Config::new("http://localhost:8080".parse().unwrap());
+        bound_ops_config(&mut cfg);
+        for t in [cfg.connect_timeout, cfg.read_timeout, cfg.write_timeout] {
+            assert!(t.expect("bounded") <= Duration::from_secs(30));
+        }
     }
 
     #[tokio::test]
