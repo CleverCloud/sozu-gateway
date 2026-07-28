@@ -423,6 +423,7 @@ pub(crate) fn build_gateway(
                     section_name: pref.section_name.clone(),
                     port: pref.port,
                 };
+                let mut accepted_override: Option<&'static str> = None;
                 for rule in route.spec.rules.iter().flatten() {
                     attach_rule(
                         cfg,
@@ -440,9 +441,16 @@ pub(crate) fn build_gateway(
                         &mut problems,
                         &mut resolved_refs,
                         &mut resolved_refs_reason,
+                        &mut accepted_override,
                     );
                 }
-                (true, "Accepted")
+                // A rule carrying a filter we cannot honour is skipped, and the
+                // parent stops reading Accepted so the gap is visible in
+                // `kubectl get httproute` and not only in the problem list.
+                match accepted_override {
+                    Some(reason) => (false, reason),
+                    None => (true, "Accepted"),
+                }
             };
 
             // An accepted route binds to each candidate listener (programmed or
@@ -627,11 +635,23 @@ fn attach_rule(
     problems: &mut Vec<Problem>,
     resolved_refs: &mut bool,
     resolved_refs_reason: &mut &'static str,
+    accepted_override: &mut Option<&'static str>,
 ) {
     // backendRefs: exactly one Service backend (Sōzu cannot weight-split).
     // Parse the route filters into IR filters (Phase 3). Unsupported filters /
     // sub-fields are reported and skipped, never silently mis-applied.
-    let filters = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
+    let ParsedFilters {
+        filters,
+        unprogrammable,
+    } = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
+    // A filter we cannot honour takes the whole rule out: the alternative is
+    // serving a response the author never asked for. The gap must show in the
+    // status too, not only in the problem list, so the route never reads
+    // healthy while nothing (or worse, something wrong) is programmed.
+    if unprogrammable {
+        *accepted_override = Some("UnsupportedValue");
+        return;
+    }
 
     // `rule.timeouts` has no Sōzu equivalent. RequestMirror precedent: the
     // unsupported piece is reported and dropped — the rule still routes,
@@ -826,14 +846,23 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
     }
 }
 
+/// A rule's parsed filters, plus whether one of them makes the rule
+/// unprogrammable.
+struct ParsedFilters {
+    filters: ir::FrontendFilters,
+    /// A filter that determines the *response* could not be honoured. Dropping
+    /// just that sub-field and programming the rest would answer requests with
+    /// something the route author never asked for, so the whole rule is skipped
+    /// (`Accepted=False`, `UnsupportedValue`) instead.
+    unprogrammable: bool,
+}
+
 /// Parse HTTPRoute filters into neutral IR filters. Supported: header modifiers
 /// (set/add→set, remove→delete) and RequestRedirect (scheme + status).
 /// Unsupported filters/sub-fields (incl. URLRewrite) are reported.
-fn parse_filters(
-    filters: &[HttpRouteRulesFilters],
-    problems: &mut Vec<Problem>,
-) -> ir::FrontendFilters {
+fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>) -> ParsedFilters {
     let mut ff = ir::FrontendFilters::default();
+    let mut unprogrammable = false;
     for filter in filters {
         match &filter.r#type {
             HttpRouteRulesFiltersType::RequestHeaderModifier => {
@@ -897,12 +926,41 @@ fn parse_filters(
                         Some(301) => ir::RedirectStatus::MovedPermanently,
                         _ => ir::RedirectStatus::Found, // 302 is the Gateway default
                     };
-                    if r.hostname.is_some() || r.path.is_some() || r.port.is_some() {
+                    // The only part of a redirect Sōzu can express is the
+                    // scheme: `redirect_scheme` unset means USE_SAME, i.e. the
+                    // Location echoes the request's own scheme, host and path.
+                    // So anything else the author asked for cannot be honoured,
+                    // and programming the rule anyway would answer every
+                    // matching request with a redirect to itself — an infinite
+                    // loop, served under a green route status. Fail closed, the
+                    // way every other unsupported piece does.
+                    // A `port` equal to the scheme's well-known port asks for
+                    // nothing extra: Gateway API derives the redirect port from
+                    // the scheme when it is unset, and Sōzu's `redirect_scheme`
+                    // emits `https://<host><path>` with no explicit port. So
+                    // `scheme: https` and `scheme: https, port: 443` are the
+                    // same redirect, and both are expressible.
+                    let port_is_implied = matches!(
+                        (scheme, r.port),
+                        (_, None)
+                            | (Some(ir::Scheme::Https), Some(443))
+                            | (Some(ir::Scheme::Http), Some(80))
+                    );
+                    if r.hostname.is_some() || r.path.is_some() || !port_is_implied {
                         problems.push(Problem::FilterUnsupported {
                             kind: "RequestRedirect hostname/path/port".to_string(),
                         });
+                        unprogrammable = true;
+                    } else if scheme.is_none() {
+                        // A scheme-less redirect has nothing left to change:
+                        // USE_SAME + same host + same path is that same loop.
+                        problems.push(Problem::FilterUnsupported {
+                            kind: "RequestRedirect without scheme".to_string(),
+                        });
+                        unprogrammable = true;
+                    } else {
+                        ff.redirect = Some(ir::Redirect { scheme, status });
                     }
-                    ff.redirect = Some(ir::Redirect { scheme, status });
                 }
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
@@ -925,7 +983,10 @@ fn parse_filters(
             }
         }
     }
-    ff
+    ParsedFilters {
+        filters: ff,
+        unprogrammable,
+    }
 }
 
 /// The wire spelling of an HTTP method (`GET`, `POST`, …) via its serde rename.
