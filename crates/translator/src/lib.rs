@@ -57,15 +57,64 @@ fn lb_algorithm(algo: ir::LbAlgorithm) -> i32 {
     v as i32
 }
 
-fn path_rule(path: &ir::PathMatch) -> PathRule {
-    let (kind, value) = match path {
-        ir::PathMatch::Prefix(v) => (PathRuleKind::Prefix, v.clone()),
-        ir::PathMatch::Exact(v) => (PathRuleKind::Equals, v.clone()),
-        ir::PathMatch::Regex(v) => (PathRuleKind::Regex, v.clone()),
-    };
+/// Escape every regex metacharacter so a literal path is matched literally.
+fn regex_escape(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    for c in literal.chars() {
+        if r"\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn rule(kind: PathRuleKind, value: String) -> PathRule {
     PathRule {
         kind: kind as i32,
         value,
+    }
+}
+
+/// The Sōzu path rule one IR path match compiles to.
+///
+/// `PathMatch::Prefix` carries **Kubernetes** prefix semantics: it matches on
+/// path *element* boundaries, so `/foo` covers `/foo`, `/foo?page=2` and
+/// `/foo/bar`, but never `/foobar`. Sōzu's `PathRuleKind::Prefix` is a plain
+/// string prefix and matches all four, so a non-root prefix compiles to an
+/// anchored regex instead.
+///
+/// The alternation is what makes it a *boundary*: after the literal the target
+/// must end, continue with `/`, or start its query string. Sōzu matches path
+/// rules against the request target with the query string still attached
+/// (verified against a live Sōzu: without the `\?` branch, `/foo?page=2` 404s),
+/// and it does **not** anchor regexes on its own — an unanchored `/foo(/|$)`
+/// also matches `/xx/foo`, so the `^` is load-bearing. `PROTOCOL.md` left this
+/// as an open question; both halves are now measured.
+///
+/// Two cases stay a plain rule:
+///  - the root `/`, which every target starts with, so `Prefix("/")` is already
+///    exactly right and cheaper than a regex;
+///  - `Exact`/`Regex`, which map one-to-one.
+///
+/// Kubernetes treats a trailing slash as insignificant (`/foo/` ≡ `/foo`), so it
+/// is trimmed first — otherwise the two spellings of one route would diff
+/// forever.
+fn path_rule(path: &ir::PathMatch) -> PathRule {
+    match path {
+        ir::PathMatch::Exact(v) => rule(PathRuleKind::Equals, v.clone()),
+        ir::PathMatch::Regex(v) => rule(PathRuleKind::Regex, v.clone()),
+        ir::PathMatch::Prefix(v) => {
+            let trimmed = v.trim_end_matches('/');
+            if trimmed.is_empty() {
+                rule(PathRuleKind::Prefix, "/".to_string())
+            } else {
+                rule(
+                    PathRuleKind::Regex,
+                    format!("^{}(/|\\?|$)", regex_escape(trimmed)),
+                )
+            }
+        }
     }
 }
 
@@ -155,10 +204,10 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
     }
 }
 
-/// Frontends deduplicated by their Sōzu route key (tls + listener + hostname +
-/// path + method). Sōzu rejects a duplicate AddHttpFrontend, so a benign
+/// Frontends deduplicated by their IR route identity: tls, listener, hostname,
+/// path and method. Sōzu rejects a duplicate AddHttpFrontend, so a benign
 /// duplicate produced by overlapping Ingresses must not become a hard reconcile
-/// failure. First occurrence wins.
+/// failure. First occurrence wins, matching the builder's collision reporting.
 fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
     let mut seen: BTreeSet<(bool, SocketAddr, &str, &ir::PathMatch, Option<&str>)> =
         BTreeSet::new();
@@ -173,6 +222,37 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
                 f.method.as_deref(),
             ))
         })
+        .collect()
+}
+
+/// HTTP/HTTPS frontend requests, deduplicated a second time on the *emitted*
+/// route key.
+///
+/// [`unique_frontends`] compares IR path matches, but two different ones can
+/// still compile to the same Sōzu rule — `Prefix("/foo")` and `Prefix("/foo/")`
+/// are one path in Kubernetes. The builder canonicalises that spelling away, so
+/// this pass is a backstop rather than the primary control: Sōzu holds a route
+/// key once, and because translation is all-or-nothing a single clash would
+/// fail *every* reconcile, taking unrelated routes down with it. Never let an
+/// IR, however it was produced, be able to do that. First occurrence wins, as
+/// everywhere else.
+fn http_frontend_requests(ir: &ir::Ir) -> Vec<Request> {
+    let mut seen: BTreeSet<(bool, SocketAddr, String, i32, String, Option<String>)> =
+        BTreeSet::new();
+    unique_frontends(ir)
+        .into_iter()
+        .filter(|f| {
+            let path = path_rule(&f.path);
+            seen.insert((
+                f.tls,
+                f.listener,
+                f.hostname.clone(),
+                path.kind,
+                path.value,
+                f.method.clone(),
+            ))
+        })
+        .map(frontend_request)
         .collect()
 }
 
@@ -485,7 +565,7 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     let mut requests: Vec<Request> = Vec::new();
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
-    requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
+    requests.extend(http_frontend_requests(ir));
     // L4: listeners (active=true, so diff derives ActivateListener) + frontends.
     // No explicit ActivateListener here — dispatching it would need the listener
     // to already exist in this transient state, and the diff handles activation.
@@ -587,7 +667,7 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     let mut requests = Vec::new();
     requests.extend(ir.clusters.iter().map(cluster_request));
     requests.extend(ir.backends.iter().map(backend_request));
-    requests.extend(unique_frontends(ir).into_iter().map(frontend_request));
+    requests.extend(http_frontend_requests(ir));
     requests.extend(ir.certificates.iter().map(add_certificate_request));
     // L4: add the listener, activate it, then attach the frontend (tiered).
     requests.extend(l4_listener_adds(&ir.l4_frontends));

@@ -410,8 +410,25 @@ fn path_match(path_type: &str, path: Option<&str>) -> ir::PathMatch {
     match path_type {
         "Exact" => ir::PathMatch::Exact(value),
         "ImplementationSpecific" => ir::PathMatch::Regex(value),
-        // "Prefix" and anything unknown default to Prefix (the safest superset).
-        _ => ir::PathMatch::Prefix(value),
+        // "Prefix" and anything unknown default to Prefix — element-boundary
+        // matching, which is narrower than a raw string prefix and never routes
+        // more than the author asked for.
+        //
+        // The trailing slash is insignificant in Kubernetes (`/foo/` ≡ `/foo`),
+        // so it is canonicalised away here rather than in the translator: the IR
+        // is what route-collision detection compares, and two Ingresses spelling
+        // one path differently are a collision to report, not two routes.
+        _ => ir::PathMatch::Prefix(canonical_prefix(&value)),
+    }
+}
+
+/// Drop a prefix path's insignificant trailing slash, keeping the root `/`.
+fn canonical_prefix(value: &str) -> String {
+    let trimmed = value.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -803,13 +820,19 @@ fn path_value(p: &ir::PathMatch) -> &str {
 
 /// Keep exactly one frontend per Sōzu route key and report the losers.
 ///
-/// Sōzu keys a route by `address;hostname;path[;method]` — the cluster is NOT
-/// part of the key — so two frontends sharing a key cannot coexist. The
+/// Sōzu keys a route by `address;hostname;<kind><path>[;method]` — the kind is
+/// part of the key (an `Exact` and a `Prefix` on one path are two routes), the
+/// cluster is not — so two frontends sharing a key cannot coexist. The
 /// translator already dedups on that key, first occurrence wins, over the
 /// builder's `(tls, hostname, cluster_id)` ordering; the winner kept here
 /// replicates exactly that (smallest by the sort, a cluster-less redirect —
 /// `None` — ordering before any cluster id), so reporting the collision does
-/// not change observable routing. A future improvement could prefer
+/// not change observable routing.
+///
+/// This mirror only holds because [`path_match`] canonicalises a prefix's
+/// insignificant trailing slash: `/foo` and `/foo/` are one Kubernetes path and
+/// compile to one Sōzu rule, so they must be one `RouteKey` here too, or a
+/// collision would go unreported and reach the translator as a duplicate. A future improvement could prefer
 /// oldest-object-wins instead. Byte-identical duplicates (same target
 /// cluster, same filters) are benign overlaps — Sōzu would apply either one
 /// with the same effect — and stay unreported; a loser with a *different*

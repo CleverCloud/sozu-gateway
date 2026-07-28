@@ -282,9 +282,9 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 |---|---|
 | Ingress rule `host` (exact) | `RequestHttpFrontend.hostname` |
 | Ingress rule `host` wildcard `*.x` | `hostname` wildcard (Sōzu supports `*.` prefix) — to confirm in Étape 2 |
-| `pathType: Prefix` | `PathRule { Prefix, value }` |
+| `pathType: Prefix` | `PathRule { Regex, "^<value>(/\|\\?\|$)" }` — element-boundary matching (raw `Prefix` also matches `/foobar`); the root `/` stays `PathRule { Prefix, "/" }` |
 | `pathType: Exact` | `PathRule { Equals, value }` |
-| `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (⚠ 2.x anchors regexes — Étape 2) |
+| `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (2.x does **not** anchor regexes — measured; anchor yours) |
 | backend `Service` → `EndpointSlice` pod IPs | one `Cluster` + N `AddBackend` (pod `IP:port`) |
 | `spec.tls[].secretName` (`tls.crt`/`tls.key`) | `AddCertificate` on the `:443` listener address |
 | HTTP rule | `AddHttpFrontend` on `:80` listener address |
@@ -299,7 +299,10 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 2. **State persistence on restart**: rely solely on the in-memory shadow + full re-push at
    startup, or also `SaveState`/`LoadState` a file for fast crash recovery? → defaulting to
    re-push; file persistence optional later.
-3. **Wildcard host + regex path semantics** in Sōzu 2.x need a dedicated micro-probe in
-   Étape 2 before we finalize the Builder's path mapping (regex anchoring caveat).
+3. **Regex path semantics** are now measured against a live Sōzu 2.1.0: rules are matched
+   against the request target with the **query string still attached** (so `Equals("/foo")`
+   does not match `/foo?page=2`), and regexes are **not anchored** (`/foo(/|$)` also matches
+   `/xx/foo`). Both drive the `pathType: Prefix` mapping above. Wildcard host semantics still
+   want their own probe.
 4. **Multi-worker fan-in**: with `worker_count > 1`, confirm whether to inspect per-worker
    `WorkerResponses` for partial failure (we'll add defensive handling in `sozu-agent`).
