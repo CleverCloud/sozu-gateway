@@ -75,7 +75,8 @@ fn gateway_class(controller: &str) -> GatewayClass {
 
 fn http_gateway() -> Gateway {
     from_json(json!({
-        "metadata": { "name": "gw", "namespace": "demo" },
+        "metadata": { "name": "gw", "namespace": "demo",
+            "uid": "22222222-2222-2222-2222-222222222222" },
         "spec": { "gatewayClassName": "sozu",
             "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }] }
     }))
@@ -100,7 +101,8 @@ fn route_to_web(extra_backend: bool) -> HttpRoute {
         backend_refs.push(json!({ "name": "web2", "port": 80, "weight": 50 }));
     }
     from_json(json!({
-        "metadata": { "name": "route", "namespace": "demo" },
+        "metadata": { "name": "route", "namespace": "demo",
+            "uid": "33333333-3333-3333-3333-333333333333" },
         "spec": {
             "parentRefs": [{ "name": "gw" }],
             "hostnames": ["app.example.com"],
@@ -133,6 +135,17 @@ fn http_route_maps_to_ir() {
     assert_eq!(out.routes.len(), 1);
     assert!(out.routes[0].parents[0].resolved_refs);
     assert!(out.routes[0].parents[0].problems.is_empty());
+
+    // Both owners carry their source object's uid, so a problem Event on
+    // either is visible under `kubectl describe`.
+    assert_eq!(
+        out.gateways[0].uid.as_deref(),
+        Some("22222222-2222-2222-2222-222222222222")
+    );
+    assert_eq!(
+        out.routes[0].uid.as_deref(),
+        Some("33333333-3333-3333-3333-333333333333")
+    );
 
     insta::assert_json_snapshot!(out.ir);
 }

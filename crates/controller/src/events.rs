@@ -37,6 +37,12 @@ struct Owner {
     kind: &'static str,
     namespace: String,
     name: String,
+    /// The object's `metadata.uid`. `kubectl describe` looks an object's events
+    /// up with a field selector that includes `involvedObject.uid`, so an Event
+    /// published without it exists and is queryable by name yet never shows up
+    /// where its owner would look. `None` only when the source object somehow
+    /// carried no uid; the Event is still published, just without it.
+    uid: Option<String>,
 }
 
 impl Owner {
@@ -46,6 +52,7 @@ impl Owner {
             kind: Some(self.kind.to_string()),
             namespace: Some(self.namespace.clone()),
             name: Some(self.name.clone()),
+            uid: self.uid.clone(),
             ..Default::default()
         }
     }
@@ -125,6 +132,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
                 kind: "Ingress",
                 namespace: r.namespace.clone(),
                 name: r.name.clone(),
+                uid: r.uid.clone(),
             },
             &r.problems,
         );
@@ -136,6 +144,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
                 kind: "Gateway",
                 namespace: gw.namespace.clone(),
                 name: gw.name.clone(),
+                uid: gw.uid.clone(),
             },
             &gw.problems,
         );
@@ -148,6 +157,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
                     kind: "HTTPRoute",
                     namespace: route.namespace.clone(),
                     name: route.name.clone(),
+                    uid: route.uid.clone(),
                 },
                 &parent.problems,
             );
@@ -167,6 +177,7 @@ mod tests {
             results: vec![IngressResult {
                 namespace: "demo".into(),
                 name: "web".into(),
+                uid: Some("11111111-2222-3333-4444-555555555555".into()),
                 problems: vec![Problem::ServiceNotFound {
                     service: service.into(),
                 }],
@@ -189,6 +200,42 @@ mod tests {
         let (reason, note) = problems.first().expect("one problem");
         assert_eq!(reason, "ServiceNotFound");
         assert!(note.contains("demo/web"), "the note carries the detail");
+    }
+
+    /// `kubectl describe` selects an object's events on `involvedObject.uid`
+    /// as well as its name, so an Event published without the uid never shows
+    /// up on the object it is about.
+    #[test]
+    fn event_reference_carries_the_object_uid() {
+        let map = collect_problems(&out_with_ingress_problem("demo/web"));
+        let (owner, _) = map.first_key_value().expect("one owner");
+        let reference = owner.reference();
+
+        assert_eq!(
+            reference.uid.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(reference.kind.as_deref(), Some("Ingress"));
+        assert_eq!(
+            reference.api_version.as_deref(),
+            Some("networking.k8s.io/v1")
+        );
+        assert_eq!(reference.namespace.as_deref(), Some("demo"));
+        assert_eq!(reference.name.as_deref(), Some("web"));
+    }
+
+    /// An object without a uid is unusual but must not stop the Event: the
+    /// reference is published without it rather than dropped.
+    #[test]
+    fn missing_uid_still_publishes_a_reference() {
+        let mut out = out_with_ingress_problem("demo/web");
+        out.results[0].uid = None;
+        let map = collect_problems(&out);
+        let (owner, _) = map.first_key_value().expect("one owner");
+        let reference = owner.reference();
+
+        assert!(reference.uid.is_none());
+        assert_eq!(reference.name.as_deref(), Some("web"));
     }
 
     #[test]

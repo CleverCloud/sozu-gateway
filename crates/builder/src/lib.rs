@@ -359,6 +359,10 @@ pub struct L4Result {
 pub struct IngressResult {
     pub namespace: String,
     pub name: String,
+    /// `metadata.uid` of the source object. Kubernetes references an object by
+    /// uid as well as by name, so an Event that omits it is not shown by
+    /// `kubectl describe` — see [`crate::obj_uid`].
+    pub uid: Option<String>,
     pub problems: Vec<Problem>,
 }
 
@@ -389,6 +393,19 @@ pub(crate) enum PortRef {
 }
 
 // ----------------------------------------------------------------------------
+
+/// `metadata.uid` of an object, when the apiserver has assigned one.
+///
+/// Carried through the build results so Events can reference their owner the
+/// way Kubernetes does. `kubectl describe` looks events up with a field
+/// selector that includes `involvedObject.uid`, so a reference without it
+/// produces an Event that exists and is queryable by name, yet never appears
+/// where the object's owner would look for it.
+pub(crate) fn obj_uid(
+    meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+) -> Option<String> {
+    meta.uid.clone()
+}
 
 pub(crate) fn meta_nn(namespace: &Option<String>, name: &Option<String>) -> (String, String) {
     (
@@ -1063,11 +1080,13 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             continue;
         }
         let (namespace, name) = meta_nn(&ingress.metadata.namespace, &ingress.metadata.name);
+        let uid = obj_uid(&ingress.metadata);
         let mut problems: Vec<Problem> = Vec::new();
         let Some(spec) = &ingress.spec else {
             results.push(IngressResult {
                 namespace,
                 name,
+                uid,
                 problems,
             });
             continue;
@@ -1237,6 +1256,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         results.push(IngressResult {
             namespace,
             name,
+            uid,
             problems,
         });
     }

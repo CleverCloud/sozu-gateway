@@ -55,6 +55,8 @@ pub struct GatewayClassResult {
 pub struct GatewayResult {
     pub namespace: String,
     pub name: String,
+    /// `metadata.uid` of the source Gateway (see `IngressResult::uid`).
+    pub uid: Option<String>,
     pub accepted: bool,
     pub programmed: bool,
     pub problems: Vec<Problem>,
@@ -102,6 +104,8 @@ pub struct RouteParentResult {
 pub struct RouteResult {
     pub namespace: String,
     pub name: String,
+    /// `metadata.uid` of the source HTTPRoute (see `IngressResult::uid`).
+    pub uid: Option<String>,
     pub parents: Vec<RouteParentResult>,
 }
 
@@ -352,6 +356,7 @@ pub(crate) fn build_gateway(
         gateways.push(GatewayResult {
             namespace: ns,
             name,
+            uid: crate::obj_uid(&gw.metadata),
             accepted: true,
             programmed,
             problems,
@@ -467,6 +472,7 @@ pub(crate) fn build_gateway(
             routes.push(RouteResult {
                 namespace: rns,
                 name: rname,
+                uid: crate::obj_uid(&route.metadata),
                 parents,
             });
         }
