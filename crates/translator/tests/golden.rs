@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::request::RequestType;
-use sozu_command_lib::proto::command::LoadBalancingParams;
+use sozu_command_lib::proto::command::{LoadBalancingParams, PathRuleKind};
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
@@ -146,6 +146,130 @@ fn catch_all_frontend_uses_post_position() {
         l4_frontends: vec![],
     };
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+/// The single path rule emitted for one frontend's IR path match.
+fn emitted_path(model: &ir::Ir) -> (i32, String) {
+    let reqs = tr::ir_to_requests(model);
+    let mut paths: Vec<(i32, String)> = reqs
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddHttpFrontend(f)) => Some((f.path.kind, f.path.value.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(paths.len(), 1, "one frontend, one rule: {reqs:#?}");
+    paths.pop().expect("one rule")
+}
+
+fn one_prefix_route(path: &str) -> ir::Ir {
+    ir::Ir {
+        clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
+        backends: vec![backend("app", "10.0.0.1:8080", None)],
+        frontends: vec![frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix(path.into()),
+            "app",
+            false,
+        )],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn prefix_path_compiles_to_an_anchored_boundary_regex() {
+    // Kubernetes `Prefix` matches on path element boundaries: `/foo` covers
+    // `/foo`, `/foo?page=2` and `/foo/bar`, never `/foobar`. Sōzu's Prefix rule
+    // is a raw string prefix and matches all four, so this needs a regex.
+    //
+    // Both halves of the pattern are load-bearing and were measured against a
+    // live Sōzu: the `\?` branch because Sōzu matches path rules against the
+    // request target with the query string still attached, and the `^` because
+    // Sōzu does not anchor regexes itself (an unanchored rule also matches
+    // `/xx/foo`).
+    assert_eq!(
+        emitted_path(&one_prefix_route("/foo")),
+        (PathRuleKind::Regex as i32, r"^/foo(/|\?|$)".to_string())
+    );
+
+    // A trailing slash is insignificant in Kubernetes, so `/foo/` compiles to
+    // the same rule — otherwise the two spellings would diff forever.
+    assert_eq!(
+        emitted_path(&one_prefix_route("/foo/")),
+        emitted_path(&one_prefix_route("/foo"))
+    );
+
+    // Regex metacharacters in a path are literals, not syntax. `/v1.0` must not
+    // become a wildcard that also matches `/v1x0`.
+    assert_eq!(
+        emitted_path(&one_prefix_route("/v1.0")),
+        (PathRuleKind::Regex as i32, r"^/v1\.0(/|\?|$)".to_string())
+    );
+
+    // The root prefix stays a plain rule: every target starts with "/", so the
+    // regex would be pure overhead on the most common route in any cluster.
+    assert_eq!(
+        emitted_path(&one_prefix_route("/")),
+        (PathRuleKind::Prefix as i32, "/".to_string())
+    );
+
+    // Exact and ImplementationSpecific still map one-to-one.
+    let mut exact = one_prefix_route("/foo");
+    exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
+    assert_eq!(
+        emitted_path(&exact),
+        (PathRuleKind::Equals as i32, "/foo".to_string())
+    );
+
+    // One rule per frontend, so the diff round-trips as it always did.
+    let model = one_prefix_route("/foo");
+    assert!(tr::reconcile(&model, &model).expect("idem").is_empty());
+    assert_eq!(
+        tr::reconcile(&model, &ir::Ir::default())
+            .expect("teardown")
+            .iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::RemoveHttpFrontend(_))))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_prefix_route_never_takes_an_exact_route_key() {
+    // The boundary rule must not be expressible as an `Equals`, or a `Prefix`
+    // and an `Exact` route on the same path would fight for one Sōzu route key
+    // — and since translation is all-or-nothing, that clash would fail every
+    // reconcile, not just this route. Distinct kinds keep both programmable.
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("pfx", ir::LbAlgorithm::RoundRobin, false),
+            cluster("exact", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        backends: vec![],
+        frontends: vec![
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Prefix("/foo".into()),
+                "pfx",
+                false,
+            ),
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Exact("/foo".into()),
+                "exact",
+                false,
+            ),
+        ],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
+            .count(),
+        2,
+        "both routes are programmed, on distinct keys: {reqs:#?}"
+    );
 }
 
 #[test]
@@ -671,5 +795,43 @@ fn reconcile_adds_then_removes_l4_route() {
         deactivate_idx < remove_idx,
         "the listener must be deactivated before it is removed, \
          got deactivate at {deactivate_idx}, remove at {remove_idx}: {rm:#?}"
+    );
+}
+
+#[test]
+fn two_spellings_of_one_prefix_never_fail_the_translation() {
+    // `/foo` and `/foo/` are one path in Kubernetes and compile to one rule.
+    // The builder canonicalises the spelling, but the translator must never be
+    // able to fail on an IR: one clash would take down every route, not just
+    // this one.
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("a", ir::LbAlgorithm::RoundRobin, false),
+            cluster("b", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        backends: vec![],
+        frontends: vec![
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Prefix("/foo".into()),
+                "a",
+                false,
+            ),
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Prefix("/foo/".into()),
+                "b",
+                false,
+            ),
+        ],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
+            .count(),
+        1,
+        "one route key, first frontend wins: {reqs:#?}"
     );
 }

@@ -27,7 +27,14 @@ pub enum LbAlgorithm {
 /// How an Ingress path is matched, mapped from Kubernetes `pathType`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PathMatch {
-    /// `pathType: Prefix`
+    /// `pathType: Prefix` (Ingress) / `PathPrefix` (Gateway API), with
+    /// Kubernetes' **element-boundary** semantics: `/foo` matches `/foo`,
+    /// `/foo?q=1` and `/foo/bar` but never `/foobar`. That is narrower than a
+    /// raw string prefix, so the translator compiles a non-root prefix to an
+    /// anchored regex rather than to Sōzu's own `Prefix` rule.
+    ///
+    /// The trailing slash is insignificant (`/foo/` ≡ `/foo`) and the builder
+    /// canonicalises it away, so one path has one spelling here.
     Prefix(String),
     /// `pathType: Exact`
     Exact(String),

@@ -167,6 +167,12 @@ changes.
 - **Backends are pod IP:port resolved from EndpointSlices — never the Service ClusterIP.** When a
   Service has multiple ports, match the EndpointSlice port by name; only fall back to the sole port
   when there is exactly one (don't guess `first()`).
+- **`pathType: Prefix` is element-boundary matching, not a string prefix.** `/foo` covers `/foo`,
+  `/foo?q=1` and `/foo/bar` but never `/foobar`, so the translator compiles a non-root prefix to an
+  anchored regex — Sōzu's own `Prefix` rule is a raw `starts_with`. Two measured facts drive the
+  pattern: Sōzu matches path rules against the request target with the **query string attached**,
+  and it does **not** anchor regexes. The root `/` stays a plain prefix. The builder canonicalises
+  `/foo/` to `/foo` first, so one path has one IR spelling and collision reporting still works.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
