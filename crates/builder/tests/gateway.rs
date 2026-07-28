@@ -422,6 +422,120 @@ fn redirect_filter_supported_and_unsupported_reported() {
         .any(|p| matches!(p, Problem::FilterUnsupported { .. })));
 }
 
+/// Build one HTTPRoute carrying a single `RequestRedirect` filter with the
+/// given `requestRedirect` body, and return the resulting build.
+fn build_with_redirect(request_redirect: serde_json::Value) -> sozu_gw_builder::BuildOutput {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["old.example.com"],
+            "rules": [{
+                "filters": [
+                    { "type": "RequestRedirect", "requestRedirect": request_redirect }
+                ]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    build(&BuildConfig::default(), &inputs)
+}
+
+#[test]
+fn redirect_with_unsupported_target_is_skipped_not_half_applied() {
+    // Sōzu can only express the *scheme* of a redirect: an unset
+    // `redirect_scheme` means USE_SAME, so the Location it emits echoes the
+    // request's own scheme, host and path. Programming a hostname/path/port
+    // redirect anyway therefore answers every matching request with a redirect
+    // to itself — an infinite loop. The rule must be dropped entirely, and the
+    // route must stop reading Accepted.
+    for target in [
+        json!({ "hostname": "new.example.com", "statusCode": 301 }),
+        json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2" } }),
+        json!({ "port": 8443, "scheme": "https" }),
+    ] {
+        let out = build_with_redirect(target.clone());
+
+        assert!(
+            out.ir.frontends.is_empty(),
+            "nothing may be programmed for {target}: {:?}",
+            out.ir.frontends
+        );
+        let parent = &out.routes[0].parents[0];
+        assert!(
+            !parent.accepted,
+            "route must not read Accepted for {target}"
+        );
+        assert_eq!(parent.accepted_reason, "UnsupportedValue");
+        assert!(
+            parent.problems.iter().any(|p| matches!(
+                p,
+                Problem::FilterUnsupported { kind } if kind.starts_with("RequestRedirect")
+            )),
+            "the gap must be reported for {target}: {:?}",
+            parent.problems
+        );
+    }
+}
+
+#[test]
+fn redirect_port_matching_the_scheme_still_programs() {
+    // Gateway API derives the redirect port from the scheme when unset, so
+    // `scheme: https` and `scheme: https, port: 443` are the same redirect —
+    // and Sōzu expresses both with `redirect_scheme` alone. Rejecting the
+    // explicit spelling would break a route that works.
+    for target in [
+        json!({ "scheme": "https", "port": 443, "statusCode": 301 }),
+        json!({ "scheme": "http", "port": 80, "statusCode": 302 }),
+    ] {
+        let out = build_with_redirect(target.clone());
+        assert_eq!(out.ir.frontends.len(), 1, "must still program {target}");
+        assert!(out.ir.frontends[0].filters.redirect.is_some());
+        assert!(out.routes[0].parents[0].accepted, "{target}");
+    }
+
+    // A port that the scheme does not imply is still unexpressible.
+    let out = build_with_redirect(json!({ "scheme": "https", "port": 8443, "statusCode": 301 }));
+    assert!(out.ir.frontends.is_empty());
+    assert_eq!(out.routes[0].parents[0].accepted_reason, "UnsupportedValue");
+}
+
+#[test]
+fn redirect_without_scheme_is_skipped() {
+    // Nothing left to change: USE_SAME + same host + same path is the same
+    // self-redirect loop, just reached without any unsupported sub-field.
+    let out = build_with_redirect(json!({ "statusCode": 301 }));
+
+    assert!(out.ir.frontends.is_empty());
+    let parent = &out.routes[0].parents[0];
+    assert!(!parent.accepted);
+    assert_eq!(parent.accepted_reason, "UnsupportedValue");
+}
+
+#[test]
+fn scheme_only_redirect_still_programs() {
+    // The supported shape must keep working untouched — this is what
+    // examples/api-gateway/redirect.yaml and the e2e suite exercise.
+    let out = build_with_redirect(json!({ "scheme": "https", "statusCode": 301 }));
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert!(out.ir.frontends[0].cluster_id.is_none());
+    let redirect = out.ir.frontends[0]
+        .filters
+        .redirect
+        .as_ref()
+        .expect("redirect programmed");
+    assert!(matches!(redirect.scheme, Some(ir::Scheme::Https)));
+    assert!(out.routes[0].parents[0].accepted);
+}
+
 #[test]
 fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
     // A redirect-only HTTPRoute (cluster-less frontend) and an Ingress claim
