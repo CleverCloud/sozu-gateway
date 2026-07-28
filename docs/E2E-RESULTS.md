@@ -96,7 +96,7 @@ against the `whoami` demo (which echoes the request it received):
 | ----- | ------ |
 | `RequestHeaderModifier` (`set X-Env: prod`) | whoami echoes `X-Env: prod` in the request it sees |
 | `ResponseHeaderModifier` (`set X-Served-By: sozu`) | response carries `X-Served-By: sozu` |
-| `RequestRedirect` (`scheme: https`, `statusCode: 301`) | **301 Moved Permanently**, `Location: https://redirect.example.com/` |
+| `RequestRedirect` (`scheme: https`, `statusCode: 301`) | **301 Moved Permanently**, `Location: https://old.example.com/` |
 | Redirect-only route (no `backendRef`) | accepted and programmed as a cluster-less Sōzu frontend |
 
 The redirect route has no `backendRef` (the Gateway API forbids combining `RequestRedirect` with
@@ -208,9 +208,46 @@ The load/churn harnesses used for sections 2–3 live under `.scratch/` (develop
 shipped): `hot-reload-test2.sh` (config hot reload) and `dataplane-upgrade-test.sh` (Sōzu Pod
 replacement).
 
+## Restart handling
+
+Both halves of the Pod can restart independently, and each case is handled — but
+not identically, and only one of the two is gap-free.
+
+| Case | Behaviour |
+| ---- | --------- |
+| Controller restarts, Sōzu stays up | Gap-free. The persisted shadow is reloaded (`resumed shadow from persisted state`) and **zero** requests are re-applied — the baseline is real, so orphans are still pruned. |
+| Sōzu restarts, controller stays up | Detected and repaired, but **not instantly**. Sōzu comes back holding no routes while the in-memory shadow still claims everything is applied, so the diff stays empty and requests 404 until the controller notices. |
+
+Detection of the second case is **polled, not pushed**: the worker-generation
+probe runs on the periodic resync (`SOZU_GW_RESYNC_SECS`, 60 s by default) and
+when the command socket reconnects. A Sōzu main-process crash under a live
+controller therefore leaves the data plane unprogrammed for up to one resync
+period. For gap-free serving across a data-plane restart, run
+`replicaCount >= 2` so another Pod keeps answering, and/or lower
+`SOZU_GW_RESYNC_SECS`. `SOZU_GW_RESYNC_SECS=0` disables the poll entirely and
+leaves only the reconnect path.
+
+What the probe compares is Sōzu's live worker-PID set, not whether its state
+looks empty; the reasoning is in the doc comment on `check_restart_generation`
+in [crates/controller/src/shadow.rs](../crates/controller/src/shadow.rs).
+
+Observed on a **single worker bounce** — which the probe deliberately treats as
+a restart, and which is the cheap way to exercise the path (a worker bounce
+leaves the main process holding its state, which is why the agent's
+duplicate-add repair fires; a real restart would have nothing to collide with):
+
+```
+WARN sozu_gw_controller::shadow: Sōzu's worker generation changed (restarted?);
+     resetting the shadow to re-apply the full state baseline=Some({7, 8}) current=Some({8, 33})
+INFO sozu_gw_controller: applying changes to sozu … requests=16
+WARN sozu_gw_agent: sozu already holds this frontend's route key; repairing with a remove + re-add
+```
+
+Traffic was uninterrupted for that bounce. It is *not* evidence that a full
+Sōzu restart is gap-free — see the resync window above.
+
 ## Known limitations
 
-- A Sōzu-only restart at runtime (the controller staying up) is not yet detected: the controller's
-  in-memory shadow still reflects the pre-restart state, so it won't re-push until the next change.
-  Restart the whole Pod, or run `replicaCount >= 2`. (A controller-only restart is handled — the
-  shadow is persisted and resumed; see CLAUDE.md.)
+- The Gateway API CRDs are probed **once, at startup**. Installing them under a running controller
+  leaves it in Ingress-only mode with no further signal — `kubectl rollout restart` the Deployment
+  after adding the CRDs. (A `helm upgrade` that does not change the Pod spec will not do it.)
