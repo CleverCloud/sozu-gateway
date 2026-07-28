@@ -72,7 +72,10 @@ fn web_slice() -> EndpointSlice {
 fn ingress_tls() -> Ingress {
     from_json(json!({
         "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
-        "metadata": { "name": "web", "namespace": "demo" },
+        // The uid is carried into the Event reference, so pin a real one here
+        // rather than let the snapshot record `null` and assert nothing.
+        "metadata": { "name": "web", "namespace": "demo",
+            "uid": "11111111-1111-1111-1111-111111111111" },
         "spec": {
             "ingressClassName": "sozu",
             "tls": [{ "hosts": ["app.example.com"], "secretName": "app-tls" }],
@@ -97,6 +100,13 @@ fn happy_path_http_and_tls() {
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
+
+    // The source object's uid reaches the result, which is what lets an Event
+    // reference its owner the way `kubectl describe` looks it up.
+    assert_eq!(
+        out.results[0].uid.as_deref(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
 
     // 1 cluster, 2 ready backends, http + https frontends, 1 cert, accepted clean.
     assert_eq!(out.ir.clusters.len(), 1);
