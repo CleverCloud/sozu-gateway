@@ -202,6 +202,13 @@ pub enum Problem {
     L4PortReserved {
         port: u16,
     },
+    /// Two entries in the same `tcp/udp-services` map resolve to the same listen
+    /// port (e.g. the keys `"9000"` and `"09000"`, or two ports written the same
+    /// way in the TCP and UDP maps). L4 has no host multiplexing, so a port
+    /// carries exactly one Service: the later entry is dropped.
+    L4PortDuplicate {
+        port: u16,
+    },
 }
 
 impl Problem {
@@ -232,6 +239,7 @@ impl Problem {
             Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
             Problem::InvalidL4Mapping { .. } => "InvalidL4Mapping",
             Problem::L4PortReserved { .. } => "L4PortReserved",
+            Problem::L4PortDuplicate { .. } => "L4PortDuplicate",
         }
     }
 
@@ -329,6 +337,10 @@ impl std::fmt::Display for Problem {
             Problem::L4PortReserved { port } => {
                 write!(f, "L4 port {port} is reserved by the gateway's own listeners")
             }
+            Problem::L4PortDuplicate { port } => write!(
+                f,
+                "L4 port {port} is already mapped by an earlier entry; this one is ignored"
+            ),
         }
     }
 }
@@ -967,6 +979,11 @@ fn build_l4(
     let mut results = Vec::new();
     // Ports already bound by the static HTTP/HTTPS listeners can't be reused.
     let reserved = [cfg.http_listener.port(), cfg.https_listener.port()];
+    // Ports already claimed by an earlier entry in this pass. Distinct
+    // ConfigMap keys can resolve to the same port ("9000" and "09000" both
+    // parse to 9000), and L4 gives a port exactly one Service, so a second
+    // claim is a duplicate rather than a second route.
+    let mut claimed: BTreeSet<(ir::L4Protocol, u16)> = BTreeSet::new();
 
     for (protocol, label, cm) in [
         (ir::L4Protocol::Tcp, "TCP", inputs.tcp_services.as_ref()),
@@ -981,6 +998,12 @@ fn build_l4(
                 }),
                 Some((port, _, _, _)) if reserved.contains(&port) => {
                     problems.push(Problem::L4PortReserved { port })
+                }
+                // `cm.data` is a BTreeMap, so the winner is the
+                // lexicographically first key and stays the same across
+                // reconciles — no flapping between two colliding mappings.
+                Some((port, _, _, _)) if claimed.contains(&(protocol, port)) => {
+                    problems.push(Problem::L4PortDuplicate { port })
                 }
                 Some((port, ns, svc, port_ref)) => {
                     match add_service_route(
@@ -997,6 +1020,12 @@ fn build_l4(
                             if !has_endpoints {
                                 problems.push(Problem::NoReadyEndpoints { service: svc });
                             }
+                            // Claim the port only now: an entry that failed to
+                            // resolve produced no route, so it must not lock the
+                            // port against a later, working mapping. Claiming it
+                            // while merely considering the entry would let one
+                            // broken key take a serving port down.
+                            claimed.insert((protocol, port));
                             l4_frontends.push(ir::L4Frontend {
                                 protocol,
                                 listener: SocketAddr::new(cfg.http_listener.ip(), port),
