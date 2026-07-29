@@ -838,6 +838,119 @@ fn identical_duplicate_routes_are_benign_and_unreported() {
 }
 
 #[test]
+fn tcp_services_duplicate_port_is_dropped_and_reported() {
+    // Distinct ConfigMap keys can resolve to the same port. L4 gives a port
+    // exactly one Service, so the later mapping must be dropped *and* reported:
+    // silently ignoring it leaves the operator guessing, and passing both on to
+    // the translator hits `check_l4_conflicts`, which fails the whole
+    // translation — blocking every routing change, not just this port's.
+    // Two *different*, both-resolvable Services on one port: the case the
+    // translator's `check_l4_conflicts` turns into a whole-translation failure.
+    let other_svc: Service = from_json(json!({
+        "apiVersion": "v1", "kind": "Service",
+        "metadata": { "name": "other", "namespace": "demo" },
+        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+    }));
+    let other_slice: EndpointSlice = from_json(json!({
+        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
+        "metadata": { "name": "other-abc", "namespace": "demo",
+            "labels": { "kubernetes.io/service-name": "other" } },
+        "addressType": "IPv4",
+        "ports": [{ "name": "http", "port": 8080 }],
+        "endpoints": [{ "addresses": ["10.244.0.9"], "conditions": { "ready": true } }]
+    }));
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": {
+            "5432": "demo/web:80",
+            "05432": "demo/other:80"
+        }
+    }));
+    let inputs = Inputs {
+        services: arcs(vec![web_service(), other_svc]),
+        endpointslices: arcs(vec![web_slice(), other_slice]),
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.l4_frontends.len(),
+        1,
+        "one listen port carries one route: {:?}",
+        out.ir.l4_frontends
+    );
+    assert_eq!(out.ir.l4_frontends[0].listener.to_string(), "0.0.0.0:5432");
+
+    // Stated as the property the translator relies on: no two L4 frontends
+    // claim one (protocol, listen address), so `check_l4_conflicts` can never
+    // fail on an IR this builder produced.
+    let mut claims: Vec<_> = out
+        .ir
+        .l4_frontends
+        .iter()
+        .map(|f| (f.protocol, f.listener))
+        .collect();
+    let before = claims.len();
+    claims.sort();
+    claims.dedup();
+    assert_eq!(claims.len(), before, "one address, one claim");
+    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| matches!(p, Problem::L4PortDuplicate { port: 5432 })),
+        "the losing entry is reported, not silently ignored: {problems:?}"
+    );
+
+    // The winner is the lexicographically first key and stays the winner on
+    // every pass — a flapping choice would churn Sōzu on each resync.
+    let again = build(&BuildConfig::default(), &inputs);
+    assert_eq!(again.ir.l4_frontends, out.ir.l4_frontends);
+}
+
+#[test]
+fn a_broken_l4_entry_does_not_lock_the_port_against_a_working_one() {
+    // "05432" sorts first and fails to resolve. If a failed entry claimed the
+    // port anyway, the working "5432" mapping would be dropped as a duplicate
+    // and the port would stop routing entirely — a typo taking down live
+    // traffic, the opposite of what the duplicate check is for.
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": {
+            "05432": "demo/does-not-exist:80",
+            "5432": "demo/web:80"
+        }
+    }));
+    let inputs = Inputs {
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.l4_frontends.len(),
+        1,
+        "the working mapping still routes: {:?}",
+        out.ir.l4_frontends
+    );
+    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
+    assert!(problems
+        .iter()
+        .any(|p| matches!(p, Problem::ServiceNotFound { .. })));
+    assert!(
+        !problems
+            .iter()
+            .any(|p| matches!(p, Problem::L4PortDuplicate { .. })),
+        "a failed entry never claimed the port: {problems:?}"
+    );
+}
+
+#[test]
 fn tcp_services_configmap_maps_to_l4_frontend() {
     let cm: ConfigMap = from_json(json!({
         "apiVersion": "v1", "kind": "ConfigMap",
