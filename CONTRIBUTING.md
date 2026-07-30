@@ -100,7 +100,7 @@ status. This protocol is verified against a live Sōzu and documented in
   [`config.toml`](deploy/sozu/config.toml).
 
 Remember the deployment shape when reproducing socket issues: control plane (this repo) and data
-plane (`clevercloud/sozu:2.1.0`) run as separate containers in one Pod, sharing the command socket
+plane (`clevercloud/sozu:2.2.0`) run as separate containers in one Pod, sharing the command socket
 via an `emptyDir` volume, both as uid `1000`.
 
 ## Testing

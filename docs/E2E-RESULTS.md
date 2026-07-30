@@ -8,7 +8,7 @@ golden tests in `crates/*/tests/`; this page is about the assembled system servi
 
 - Managed Kubernetes cluster, **Cilium** CNI (LoadBalancer via Cilium LB-IPAM), single node,
   Kubernetes v1.36.
-- Data plane: **Sōzu 2.1.0** (`clevercloud/sozu:2.1.0`), control plane built from this repo.
+- Data plane: **Sōzu 2.2.0** (`clevercloud/sozu:2.2.0`), control plane built from this repo.
 - The controller image was distributed via the anonymous `ttl.sh` registry (no credentials), the
   add-on installed with the Helm chart, traffic generated with [`hey`](https://github.com/rakyll/hey).
 
@@ -151,10 +151,11 @@ seconds-bounded client, and verified gone on the recorded run: no loop stall abo
 - **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
   (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
 - **Header `set` appends instead of replacing.** Gateway `set` must overwrite an existing header,
-  but the deployed `clevercloud/sozu:2.1.0` data plane appends (observed `original,header-set`) —
-  so `HTTPRouteRequestHeaderModifier`/`ResponseHeaderModifier` fail. (The 2.1.0 *command-lib*
-  documents set/replace; the running binary doesn't honour it, so this is a data-plane gap pending a
-  Sōzu build that replaces.)
+  but the deployed `clevercloud/sozu:2.2.0` data plane appends — a client sending `X-Env: staging`
+  into a route that sets `X-Env: prod` reaches the backend with both — so
+  `HTTPRouteRequestHeaderModifier`/`ResponseHeaderModifier` fail. (The *command-lib* documents
+  set/replace; the running binary doesn't honour it, so this is a data-plane gap pending a Sōzu
+  build that replaces. Re-verified unchanged on the 2.1.0 → 2.2.0 bump.)
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). Per-Gateway addresses would need multiple LBs (unavailable), so

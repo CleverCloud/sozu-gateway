@@ -26,7 +26,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Data-plane protocol: official LGPL-3.0 crate. We reuse its protobuf types and
 # socket framing — we never reimplement the wire format or invent fields.
-sozu-command-lib = "2.1.0"
+sozu-command-lib = "2.2.0"
 # Same major as sozu-command-lib's own mio: sozu-agent builds the command
 # socket's `mio::net::UnixStream` itself (from a std stream) so it can bound
 # writes, and tests reuse `Channel` server-side to speak the real framing.
