@@ -361,6 +361,13 @@ fn tcp_listener_add(addr: SocketAddr) -> Request {
         back_timeout: 30,
         connect_timeout: 3,
         active: true,
+        // SNI preread knobs (sozu 2.2.0). Left unset: they are only consulted
+        // when a frontend on this listener is SNI-scoped, and none of ours is —
+        // one L4 listen address carries exactly one cluster. Unset also means
+        // the fields are not encoded at all, so the request stays byte-identical
+        // to what a pre-2.2.0 Sōzu already accepts.
+        sni_preread_timeout: None,
+        sni_preread_max_bytes: None,
     })
     .into()
 }
@@ -393,6 +400,13 @@ fn l4_frontend_request(f: &ir::L4Frontend) -> Request {
             cluster_id: f.cluster_id.clone(),
             address: f.listener.into(),
             tags: Default::default(),
+            // SNI/ALPN routing (sozu 2.2.0) is not wired: the IR has no place to
+            // carry a hostname for an L4 route, because `tcp-services` has none
+            // to read it from. Absent `sni` is Sōzu's raw-TCP fallback — the
+            // frontend matches whatever the ClientHello says — which is exactly
+            // today's behaviour. Adopting SNI needs a user-facing surface first.
+            sni: None,
+            alpn: vec![],
         })
         .into(),
         ir::L4Protocol::Udp => RequestType::AddUdpFrontend(RequestUdpFrontend {

@@ -19,7 +19,9 @@ expression: "tr::ir_to_requests(&model)"
         "front_timeout": 60,
         "back_timeout": 30,
         "connect_timeout": 3,
-        "active": true
+        "active": true,
+        "sni_preread_timeout": null,
+        "sni_preread_max_bytes": null
       }
     }
   },
@@ -92,7 +94,9 @@ expression: "tr::ir_to_requests(&model)"
           },
           "port": 5432
         },
-        "tags": {}
+        "tags": {},
+        "sni": null,
+        "alpn": []
       }
     }
   }
