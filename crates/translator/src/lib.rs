@@ -189,6 +189,7 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
         payload.redirect = Some(match redirect.status {
             ir::RedirectStatus::MovedPermanently => RedirectPolicy::Permanent,
             ir::RedirectStatus::Found => RedirectPolicy::Found,
+            ir::RedirectStatus::PermanentRedirect => RedirectPolicy::PermanentRedirect,
         } as i32);
         if let Some(scheme) = redirect.scheme {
             payload.redirect_scheme = Some(match scheme {

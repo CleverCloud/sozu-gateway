@@ -486,6 +486,72 @@ fn redirect_with_unsupported_target_is_skipped_not_half_applied() {
 }
 
 #[test]
+fn redirect_status_308_programs_natively() {
+    // Sōzu has a PERMANENT_REDIRECT policy and it was going unused: 308 was
+    // being served as 302 by the catch-all arm. The difference matters — 308
+    // forbids the client rewriting the method to GET, which is why an author
+    // picks it over 301.
+    let out = build_with_redirect(json!({ "scheme": "https", "statusCode": 308 }));
+
+    assert_eq!(out.ir.frontends.len(), 1);
+    let redirect = out.ir.frontends[0]
+        .filters
+        .redirect
+        .as_ref()
+        .expect("redirect programmed");
+    assert!(matches!(
+        redirect.status,
+        ir::RedirectStatus::PermanentRedirect
+    ));
+    assert!(out.routes[0].parents[0].accepted);
+}
+
+#[test]
+fn a_redirect_status_sozu_cannot_emit_is_skipped_not_downgraded() {
+    // v1.6.1 widened the allowed set from {301,302} to {301,302,303,307,308}.
+    // 303 and 307 have no RedirectPolicy variant, and the catch-all used to
+    // serve them as 302 — a different redirect than the one asked for, with no
+    // signal to the author.
+    for code in [303, 307] {
+        let out = build_with_redirect(json!({ "scheme": "https", "statusCode": code }));
+        assert!(
+            out.ir.frontends.is_empty(),
+            "statusCode {code} must not be served as something else"
+        );
+        let parent = &out.routes[0].parents[0];
+        assert!(!parent.accepted, "{code}");
+        assert_eq!(parent.accepted_reason, "UnsupportedValue");
+        assert!(
+            parent.problems.iter().any(|p| matches!(
+                p,
+                Problem::FilterUnsupported { kind } if kind.contains(&code.to_string())
+            )),
+            "the rejected code must be named: {:?}",
+            parent.problems
+        );
+    }
+}
+
+#[test]
+fn the_default_and_302_still_map_to_found() {
+    for body in [
+        json!({ "scheme": "https" }),
+        json!({ "scheme": "https", "statusCode": 302 }),
+    ] {
+        let out = build_with_redirect(body.clone());
+        let redirect = out.ir.frontends[0]
+            .filters
+            .redirect
+            .as_ref()
+            .expect("redirect programmed");
+        assert!(
+            matches!(redirect.status, ir::RedirectStatus::Found),
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn redirect_port_matching_the_scheme_still_programs() {
     // Gateway API derives the redirect port from the scheme when unset, so
     // `scheme: https` and `scheme: https, port: 443` are the same redirect —

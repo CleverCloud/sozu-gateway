@@ -941,9 +941,30 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                         }
                         HttpRouteRulesFiltersRequestRedirectScheme::Unknown => None,
                     });
+                    // Exhaustive on purpose. The catch-all this replaces turned
+                    // every status Sōzu cannot emit into a 302: a route asking
+                    // for 303 or 307 was served as something else entirely, and
+                    // the author had no way to find out. v1.6.1 widened the
+                    // allowed set from {301,302} to {301,302,303,307,308},
+                    // which made the silence far more likely to be hit.
                     let status = match r.status_code {
-                        Some(301) => ir::RedirectStatus::MovedPermanently,
-                        _ => ir::RedirectStatus::Found, // 302 is the Gateway default
+                        None | Some(302) => Some(ir::RedirectStatus::Found),
+                        Some(301) => Some(ir::RedirectStatus::MovedPermanently),
+                        Some(308) => Some(ir::RedirectStatus::PermanentRedirect),
+                        // 303 and 307 have no RedirectPolicy variant, and the
+                        // difference is method rewriting — precisely what an
+                        // author picking them cares about.
+                        Some(_) => None,
+                    };
+                    let Some(status) = status else {
+                        problems.push(Problem::FilterUnsupported {
+                            kind: format!(
+                                "RequestRedirect statusCode {}",
+                                r.status_code.unwrap_or_default()
+                            ),
+                        });
+                        unprogrammable = true;
+                        continue;
                     };
                     // The only part of a redirect Sōzu can express is the
                     // scheme: `redirect_scheme` unset means USE_SAME, i.e. the
