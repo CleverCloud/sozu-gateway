@@ -381,7 +381,23 @@ where
     match api.list(&ListParams::default().limit(1)).await {
         Ok(_) => Ok(true),
         Err(e) if gateway_crds_absent(&e) => Ok(false),
-        Err(e) => Err(e).context("probe Gateway API availability"),
+        // A 403 lands here, not in the absent branch, and it must: reading
+        // "forbidden" as "not installed" would quietly drop the whole Gateway
+        // API because someone tightened a ClusterRole. Fail fast, but name the
+        // kind and the likely cause — the alternative is a crash-loop whose log
+        // says only "probe Gateway API availability".
+        Err(e) => {
+            let kind = std::any::type_name::<K>()
+                .rsplit("::")
+                .next()
+                .unwrap_or("?");
+            Err(e).with_context(|| {
+                format!(
+                    "probing whether {kind} is served (a 403 here means the ClusterRole is \
+                     missing list/watch on it, not that the CRD is absent)"
+                )
+            })
+        }
     }
 }
 
@@ -912,6 +928,32 @@ async fn main() -> Result<()> {
             _ = maybe_tick(resync.as_mut()) => {
                 debug!("periodic resync");
                 check_sozu = true;
+                // The CRD probe runs once, at startup, because the reflectors
+                // for the Gateway API kinds are wired there — a store whose
+                // writer was dropped cannot be attached to later. So a cluster
+                // that installs the CRDs under a running controller would stay
+                // Ingress-only for the process's whole life, with nothing said
+                // about it after the one startup line.
+                //
+                // Re-probing here and exiting on a change hands the problem to
+                // the thing that already solves it: Kubernetes restarts us, and
+                // the fresh process wires the watches. Same reflex as a watch
+                // stream ending — fail fast rather than run blind.
+                if !gateway_api_enabled {
+                    match gateway_api_available(&ops_client).await {
+                        Ok(true) => {
+                            info!(
+                                "Gateway API CRDs have appeared since startup; exiting so the \
+                                 restarted process watches them"
+                            );
+                            std::process::exit(0);
+                        }
+                        Ok(false) => {}
+                        // A probe failure here is not fatal: we are already
+                        // serving Ingress, and the next tick retries.
+                        Err(e) => debug!(error = ?e, "Gateway API re-probe failed; will retry"),
+                    }
+                }
             }
             _ = sigterm.recv() => { info!("SIGTERM received; shutting down"); break; }
             _ = sigint.recv() => { info!("SIGINT received; shutting down"); break; }

@@ -272,6 +272,7 @@ Sōzu restart is gap-free — see the resync window above.
 
 ## Known limitations
 
-- The Gateway API CRDs are probed **once, at startup**. Installing them under a running controller
-  leaves it in Ingress-only mode with no further signal — `kubectl rollout restart` the Deployment
-  after adding the CRDs. (A `helm upgrade` that does not change the Pod spec will not do it.)
+- Installing the Gateway API CRDs under a running controller takes effect on the next resync tick
+  (`SOZU_GW_RESYNC_SECS`, 60 s by default), not immediately: the controller re-probes, then exits so
+  the restarted process can wire the watches. With `SOZU_GW_RESYNC_SECS=0` there is no re-probe, and
+  the Deployment has to be restarted by hand.
