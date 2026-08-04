@@ -118,16 +118,42 @@ fn is_duplicate_add(request: &Request, failure_message: &str) -> bool {
 /// silent misrouting. The removes are keyed the same way (verified in
 /// `sozu-command-lib` 2.1.0's `state.rs`: `remove_http_frontend` /
 /// `remove_https_frontend` remove by `front.to_string()`, the route key, not
-/// by struct equality; `remove_{tcp,udp}_frontend` match the `cluster_id`
-/// bucket by address, and their adds only ever return `Exists` for an
-/// identical entry), so a remove built from the add's own payload evicts the
+/// by struct equality), so a remove built from the add's own payload evicts the
 /// stored entry even when it differs — then re-sending the add installs the
 /// desired one.
+///
+/// **L4 is asymmetric and the repair cannot always work.** In 2.2.0
+/// `add_tcp_frontend` raises `Exists` from a listener-wide scan across *every*
+/// cluster bucket (SNI/ALPN routing made one address shareable), while
+/// `remove_tcp_frontend` looks the entry up under `tcp_fronts[cluster_id]`
+/// first and returns `NotFound` when that bucket is absent. So when the
+/// occupying frontend belongs to a *different* cluster, a remove keyed on our
+/// own `cluster_id` cannot evict it — and re-sending the add would earn the
+/// same `Exists` forever. That case is a genuine conflict between two claims on
+/// one address, not a stale-state artefact, and is reported as such rather than
+/// retried.
 ///
 /// `AddTcpListener`/`AddUdpListener` return `None` deliberately: a listener is
 /// keyed by its address alone, so a duplicate cannot mask a different routing
 /// target, and repairing one would need deactivate-before-remove ordering —
 /// out of scope. A duplicate listener add stays plainly tolerated.
+/// Is this an L4 (TCP/UDP) frontend add? Only those carry the cluster-bucketed
+/// remove that cannot evict another cluster's entry.
+fn is_l4_frontend(request: &Request) -> bool {
+    matches!(
+        request.request_type,
+        Some(RequestType::AddTcpFrontend(_)) | Some(RequestType::AddUdpFrontend(_))
+    )
+}
+
+/// Did the repair remove find nothing to evict? `NotFound` is the missing
+/// cluster bucket, `NoChange` the bucket that exists but holds no match — both
+/// mean our remove could not reach whatever raised the `Exists`.
+fn repair_found_nothing(failure_message: &str) -> bool {
+    let m = failure_message.to_ascii_lowercase();
+    m.contains("did not find") || m.contains("did not bring any change")
+}
+
 fn removal_for(request: &Request) -> Option<Request> {
     match &request.request_type {
         Some(RequestType::AddHttpFrontend(front)) => {
@@ -354,8 +380,25 @@ impl SozuAgent {
                             warn!(error = %msg, "sozu already holds this frontend's route key; repairing with a remove + re-add");
                             match self.apply_one(&remove) {
                                 Ok(()) => {}
-                                // The stored entry vanished between the `Exists`
-                                // and our remove: harmless — the re-add decides.
+                                // A remove that finds no entry to evict means
+                                // one of two things. For HTTP the stored entry
+                                // simply vanished between the `Exists` and our
+                                // remove — harmless, the re-add decides. For L4
+                                // it means the address is held by a *different*
+                                // cluster, which our cluster-keyed remove can
+                                // never reach: the re-add is guaranteed to earn
+                                // the same `Exists`, so say what is actually
+                                // wrong instead of burning a retry on it.
+                                Err(SozuError::Failure(remove_msg))
+                                    if is_l4_frontend(request)
+                                        && repair_found_nothing(&remove_msg) =>
+                                {
+                                    return Err(SozuError::Failure(format!(
+                                        "{msg}: another cluster already routes this L4 address, \
+                                         and a frontend owned by another cluster cannot be \
+                                         evicted by this one (repair remove said: {remove_msg})"
+                                    )));
+                                }
                                 Err(SozuError::Failure(remove_msg)) => {
                                     warn!(error = %remove_msg, "sozu rejected the repair remove; attempting the re-add anyway");
                                 }
@@ -582,8 +625,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use sozu_command_lib::proto::command::{
-        Cluster, DeactivateListener, ListenerType, RequestHttpFrontend, TcpListenerConfig,
-        WorkerInfo, WorkerInfos,
+        Cluster, DeactivateListener, ListenerType, RequestHttpFrontend, RequestTcpFrontend,
+        SocketAddress, TcpListenerConfig, WorkerInfo, WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -1210,5 +1253,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn only_l4_frontend_adds_take_the_unrepairable_path() {
+        // HTTP removes are keyed by the route string, so they can evict an
+        // entry belonging to any cluster — their repair is never blocked this
+        // way and must keep its retry.
+        let tcp: Request = RequestType::AddTcpFrontend(RequestTcpFrontend {
+            cluster_id: "a".into(),
+            address: SocketAddress::new_v4(0, 0, 0, 0, 9000),
+            ..Default::default()
+        })
+        .into();
+        assert!(is_l4_frontend(&tcp));
+
+        let http: Request = RequestType::AddHttpFrontend(RequestHttpFrontend {
+            cluster_id: Some("a".into()),
+            address: SocketAddress::new_v4(0, 0, 0, 0, 80),
+            hostname: "h".into(),
+            ..Default::default()
+        })
+        .into();
+        assert!(!is_l4_frontend(&http));
+    }
+
+    #[test]
+    fn both_empty_repair_outcomes_are_recognised() {
+        // The two ways `remove_tcp_frontend` reports "nothing evicted": a
+        // missing cluster bucket (NotFound) and a bucket holding no match
+        // (NoChange). Both mean the occupant is out of this remove's reach.
+        assert!(repair_found_nothing(
+            "Did not find TcpFrontend with address or id 'x'"
+        ));
+        assert!(repair_found_nothing(
+            "dispatching this request did not bring any change to the state"
+        ));
+        // An `Exists` is a different outcome and must not be folded in.
+        assert!(!repair_found_nothing("TcpFrontend 'x' already exists"));
     }
 }
