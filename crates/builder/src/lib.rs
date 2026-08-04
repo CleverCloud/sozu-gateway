@@ -287,19 +287,39 @@ pub enum Problem {
     UnsupportedProtocol {
         protocol: String,
     },
-    /// An HTTP/HTTPS listener declares a port that differs from the
-    /// externally advertised port for its protocol
-    /// (see [`BuildConfig::advertised_for`]).
-    /// `listener.port` is the client-visible port — the LoadBalancer
-    /// Service's exposed port, not the pod bind — and the gateway only
-    /// serves the advertised ones (Sōzu's HTTP(S) listeners are fixed at
-    /// boot); the listener is reported and NOT programmed — landing its
-    /// routes on the advertised port would silently serve traffic on a port
-    /// the Gateway never declared.
-    ListenerPortMismatch {
+    /// A listener declares a `(port, protocol)` pair this gateway does not
+    /// expose. The port is the client-visible one — the Service's port, not the
+    /// pod bind — and only the exposed set can carry traffic, because the
+    /// Service's ports are fixed by the chart and Sōzu's HTTP(S) listeners are
+    /// fixed at boot. The listener is reported and NOT programmed: landing its
+    /// routes on some other port would silently serve them somewhere the
+    /// Gateway never declared.
+    ///
+    /// `exposed` carries the ports actually on offer for that protocol, so the
+    /// message can say what the author could have written instead.
+    PortNotExposed {
         listener: String,
         declared: i32,
-        expected: u16,
+        protocol: String,
+        exposed: Vec<u16>,
+    },
+    /// A `tcp/udp-services` entry maps a port the exposure table does not
+    /// carry. Sōzu would listen on it, but no Service port routes to it, so the
+    /// mapping is dead: traffic never arrives. Reported rather than programmed,
+    /// since a listener nobody can reach is worse than none — it reads as
+    /// working.
+    L4PortNotExposed {
+        port: u16,
+        exposed: Vec<u16>,
+    },
+    /// A `tcp/udp-services` entry targets a namespace other than the one its
+    /// exposed port names as owner. A layer-4 port carries exactly one route
+    /// and has no hostname to arbitrate with, so the table names who may claim
+    /// it; a mapping from elsewhere is refused rather than served.
+    L4PortNotOwned {
+        port: u16,
+        owner: String,
+        claimed_by: String,
     },
     WeightedBackendsUnsupported,
     /// A single `backendRef` with `weight: 0` (the standard drain pattern)
@@ -330,9 +350,6 @@ pub enum Problem {
     // L4 (TCP/UDP) services.
     InvalidL4Mapping {
         entry: String,
-    },
-    L4PortReserved {
-        port: u16,
     },
     /// Two entries in the same `tcp/udp-services` map resolve to the same listen
     /// port (e.g. the keys `"9000"` and `"09000"`, or two ports written the same
@@ -368,7 +385,9 @@ impl Problem {
             Problem::RouteCollision { .. } => "RouteCollision",
             Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
             Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
-            Problem::ListenerPortMismatch { .. } => "ListenerPortMismatch",
+            Problem::PortNotExposed { .. } => "PortNotExposed",
+            Problem::L4PortNotExposed { .. } => "L4PortNotExposed",
+            Problem::L4PortNotOwned { .. } => "L4PortNotOwned",
             Problem::WeightedBackendsUnsupported => "WeightedBackendsUnsupported",
             Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
             Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
@@ -377,7 +396,6 @@ impl Problem {
             Problem::FilterUnsupported { .. } => "FilterUnsupported",
             Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
             Problem::InvalidL4Mapping { .. } => "InvalidL4Mapping",
-            Problem::L4PortReserved { .. } => "L4PortReserved",
             Problem::L4PortDuplicate { .. } => "L4PortDuplicate",
             Problem::GatewaySpecUnsupported { .. } => "GatewaySpecUnsupported",
         }
@@ -387,7 +405,7 @@ impl Problem {
     /// lets per-listener status conditions cite their own problems.
     pub fn listener(&self) -> Option<&str> {
         match self {
-            Problem::ListenerPortMismatch { listener, .. }
+            Problem::PortNotExposed { listener, .. }
             | Problem::NamespaceSelectorUnsupported { listener } => Some(listener),
             _ => None,
         }
@@ -441,17 +459,34 @@ impl std::fmt::Display for Problem {
             Problem::UnsupportedProtocol { protocol } => {
                 write!(f, "listener protocol {protocol:?} is not supported (HTTP/HTTPS only)")
             }
-            Problem::ListenerPortMismatch {
+            Problem::PortNotExposed {
                 listener,
                 declared,
-                expected,
+                protocol,
+                exposed,
             } => write!(
                 f,
-                "listener {listener:?} declares port {declared} but this gateway only serves the advertised port {expected}"
+                "listener {listener} declares port {declared}, which this gateway does not expose \
+                 for {protocol}; exposed: {exposed:?}"
             ),
-            Problem::WeightedBackendsUnsupported => {
-                write!(f, "weighted multi-backend splits are not supported (Sōzu cannot weight backends)")
-            }
+            Problem::L4PortNotExposed { port, exposed } => write!(
+                f,
+                "L4 port {port} is not exposed by this gateway, so nothing routes to it; \
+                 exposed: {exposed:?}"
+            ),
+            Problem::L4PortNotOwned {
+                port,
+                owner,
+                claimed_by,
+            } => write!(
+                f,
+                "L4 port {port} is reserved for namespace {owner}, but this entry targets \
+                 {claimed_by}"
+            ),
+            Problem::WeightedBackendsUnsupported => write!(
+                f,
+                "multiple backendRefs (weighted split) are not supported"
+            ),
             Problem::ZeroWeightBackendUnsupported { service } => write!(
                 f,
                 "backendRef {service:?} with weight 0 cannot be honoured (Sōzu cannot drain by weight); the rule was skipped"
@@ -473,9 +508,6 @@ impl std::fmt::Display for Problem {
             ),
             Problem::InvalidL4Mapping { entry } => {
                 write!(f, "invalid L4 service mapping: {entry}")
-            }
-            Problem::L4PortReserved { port } => {
-                write!(f, "L4 port {port} is reserved by the gateway's own listeners")
             }
             Problem::GatewaySpecUnsupported { field } => write!(
                 f,
@@ -1125,6 +1157,14 @@ fn parse_l4_entry(key: &str, value: &str) -> Option<(u16, String, String, PortRe
     ))
 }
 
+/// The exposure table's protocol for an L4 route's transport.
+fn l4_protocol(protocol: ir::L4Protocol) -> ExposedProtocol {
+    match protocol {
+        ir::L4Protocol::Tcp => ExposedProtocol::Tcp,
+        ir::L4Protocol::Udp => ExposedProtocol::Udp,
+    }
+}
+
 /// Compile the `tcp/udp-services` ConfigMaps into L4 frontends (+ per-port
 /// results), resolving each target Service to pod-IP backends via the same path
 /// as HTTP. L4 has no host multiplexing: one listen port → one Service.
@@ -1139,7 +1179,6 @@ fn build_l4(
     let mut l4_frontends = Vec::new();
     let mut results = Vec::new();
     // Ports already bound by the static HTTP/HTTPS listeners can't be reused.
-    let reserved = cfg.reserved_binds();
     // Ports already claimed by an earlier entry in this pass. Distinct
     // ConfigMap keys can resolve to the same port ("9000" and "09000" both
     // parse to 9000), and L4 gives a port exactly one Service, so a second
@@ -1157,16 +1196,44 @@ fn build_l4(
                 None => problems.push(Problem::InvalidL4Mapping {
                     entry: format!("{key}: {value}"),
                 }),
-                Some((port, _, _, _)) if reserved.contains(&port) => {
-                    problems.push(Problem::L4PortReserved { port })
-                }
                 // `cm.data` is a BTreeMap, so the winner is the
                 // lexicographically first key and stays the same across
                 // reconciles — no flapping between two colliding mappings.
                 Some((port, _, _, _)) if claimed.contains(&(protocol, port)) => {
                     problems.push(Problem::L4PortDuplicate { port })
                 }
+                // A port the exposure table does not carry gets a Sōzu listener
+                // but no Service port, so nothing ever reaches it. A listener
+                // nobody can dial is worse than none: it reads as working.
+                Some((port, _, _, _)) if cfg.exposed(l4_protocol(protocol), port).is_none() => {
+                    problems.push(Problem::L4PortNotExposed {
+                        port,
+                        exposed: cfg.advertised_ports(l4_protocol(protocol)),
+                    })
+                }
                 Some((port, ns, svc, port_ref)) => {
+                    // The table may reserve a layer-4 port for one namespace.
+                    // There is no hostname to arbitrate with down here, so a
+                    // claim from elsewhere is refused rather than served.
+                    let entry = cfg
+                        .exposed(l4_protocol(protocol), port)
+                        .expect("checked exposed above");
+                    let bind = entry.bind;
+                    let owner = entry.owner.as_deref();
+                    if let Some(owner) = owner.filter(|o| *o != ns) {
+                        problems.push(Problem::L4PortNotOwned {
+                            port,
+                            owner: owner.to_string(),
+                            claimed_by: ns.clone(),
+                        });
+                        results.push(L4Result {
+                            protocol: label.to_string(),
+                            listen_port: key.trim().parse().unwrap_or(0),
+                            target: value.clone(),
+                            problems,
+                        });
+                        continue;
+                    }
                     match add_service_route(
                         index,
                         clusters,
@@ -1189,12 +1256,12 @@ fn build_l4(
                             claimed.insert((protocol, port));
                             l4_frontends.push(ir::L4Frontend {
                                 protocol,
-                                listener: SocketAddr::new(
-                                    cfg.bind_for(ExposedProtocol::Http)
-                                        .expect("HTTP is always exposed")
-                                        .ip(),
-                                    port,
-                                ),
+                                // The exposure entry's bind, not the advertised
+                                // port: the Service maps one onto the other and
+                                // Sōzu listens on the pod-side one. Before the
+                                // table the two were the same number, which is
+                                // why this read as a port rather than a lookup.
+                                listener: BuildConfig::bind_addr(bind),
                                 cluster_id,
                             });
                         }
