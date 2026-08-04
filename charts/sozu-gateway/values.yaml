@@ -143,6 +143,10 @@ service:
 # Service, no host routing). Ports must be > 1024 (the data plane runs
 # unprivileged). Enabling either map grants the controller ConfigMap read access
 # and points it at the rendered map(s).
+# During the transition to `exposure` these still render their own Service
+# ports, so nothing breaks — but a mapping whose port is not also in `exposure`
+# is reported (`L4PortNotExposed`) and not programmed, because the Service would
+# have no port routing to it. Add the matching `exposure` entry alongside.
 l4:
   tcpServices: {}   # "5432": "demo/postgres:5432"
   udpServices: {}   # "5353": "demo/coredns:53"

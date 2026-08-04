@@ -90,6 +90,24 @@ fn ingress_tls() -> Ingress {
     }))
 }
 
+/// A `BuildConfig` whose exposure table carries the chart defaults plus the
+/// given L4 ports. An L4 mapping is only served on a port the gateway exposes,
+/// so an L4 fixture has to say which.
+fn cfg_exposing_tcp(ports: &[(u16, Option<&str>)]) -> BuildConfig {
+    let mut cfg = BuildConfig::default();
+    for (port, owner) in ports {
+        cfg.exposure.push(ExposedPort {
+            name: format!("tcp-{port}"),
+            port: *port,
+            bind: *port,
+            protocol: ExposedProtocol::Tcp,
+            transport: None,
+            owner: owner.map(str::to_string),
+        });
+    }
+    cfg
+}
+
 #[test]
 fn happy_path_http_and_tls() {
     let inputs = Inputs {
@@ -883,7 +901,7 @@ fn tcp_services_duplicate_port_is_dropped_and_reported() {
         tcp_services: Some(cm),
         ..Default::default()
     };
-    let out = build(&BuildConfig::default(), &inputs);
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
 
     assert_eq!(
         out.ir.l4_frontends.len(),
@@ -916,7 +934,7 @@ fn tcp_services_duplicate_port_is_dropped_and_reported() {
 
     // The winner is the lexicographically first key and stays the winner on
     // every pass — a flapping choice would churn Sōzu on each resync.
-    let again = build(&BuildConfig::default(), &inputs);
+    let again = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
     assert_eq!(again.ir.l4_frontends, out.ir.l4_frontends);
 }
 
@@ -940,7 +958,7 @@ fn a_broken_l4_entry_does_not_lock_the_port_against_a_working_one() {
         tcp_services: Some(cm),
         ..Default::default()
     };
-    let out = build(&BuildConfig::default(), &inputs);
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
 
     assert_eq!(
         out.ir.l4_frontends.len(),
@@ -977,7 +995,7 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
         tcp_services: Some(cm),
         ..Default::default()
     };
-    let out = build(&BuildConfig::default(), &inputs);
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
 
     assert_eq!(
         out.ir.l4_frontends.len(),
@@ -990,9 +1008,12 @@ fn tcp_services_configmap_maps_to_l4_frontend() {
     assert_eq!(out.ir.backends.len(), 2, "L4 service resolved to pod IPs");
 
     let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    assert!(problems
-        .iter()
-        .any(|p| matches!(p, Problem::L4PortReserved { port: 80 })));
+    assert!(
+        problems
+            .iter()
+            .any(|p| matches!(p, Problem::L4PortNotExposed { port: 80, .. })),
+        "80 is exposed for HTTP, not for TCP — the mapping has nowhere to land"
+    );
     assert!(problems
         .iter()
         .any(|p| matches!(p, Problem::InvalidL4Mapping { .. })));
@@ -1031,7 +1052,7 @@ fn referenced_services_cover_resolved_and_unresolved_backends() {
         tcp_services: Some(cm),
         ..Default::default()
     };
-    let out = build(&BuildConfig::default(), &inputs);
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
 
     let referenced: Vec<&str> = out.referenced_services.iter().map(|s| s.as_str()).collect();
     assert_eq!(
@@ -1135,11 +1156,14 @@ fn problem_display_carries_the_detail_and_reason_stays_machine_readable() {
     assert!(p.to_string().contains("demo/web") && p.to_string().contains("http"));
     assert_eq!(p.reason(), "ServicePortNotFound");
 
-    let p = Problem::ListenerPortMismatch {
+    let p = Problem::PortNotExposed {
         listener: "https".into(),
         declared: 8443,
-        expected: 443,
+        protocol: "HTTPS".into(),
+        exposed: vec![443],
     };
+    // The declared port and the menu both appear: knowing 8443 is wrong is
+    // useless without knowing 443 was available.
     assert!(p.to_string().contains("8443") && p.to_string().contains("443"));
     assert_eq!(
         p.listener(),
@@ -1262,4 +1286,70 @@ fn an_l4_port_names_its_owner_and_http_stays_shared() {
     // A port nobody exposes is simply not on the menu.
     assert!(cfg.exposed(ExposedProtocol::Tcp, 9999).is_none());
     assert_eq!(cfg.advertised_ports(ExposedProtocol::Tcp), vec![5432]);
+}
+
+#[test]
+fn an_l4_mapping_on_an_unexposed_port_is_reported_not_programmed() {
+    // Sōzu would listen on it, but no Service port routes there, so the mapping
+    // is dead. A listener nobody can dial is worse than none: it reads as
+    // working.
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": { "9999": "demo/web:80" }
+    }));
+    let inputs = Inputs {
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
+
+    assert!(out.ir.l4_frontends.is_empty(), "nothing is programmed");
+    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
+    let reported = problems
+        .iter()
+        .find(|p| matches!(p, Problem::L4PortNotExposed { port: 9999, .. }))
+        .expect("the unexposed port is named");
+    // The message lists what was on offer — knowing 9999 is wrong is useless
+    // without knowing 5432 was available.
+    assert!(reported.to_string().contains("5432"), "{reported}");
+}
+
+#[test]
+fn an_l4_port_reserved_for_one_namespace_refuses_another() {
+    let cm: ConfigMap = from_json(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": { "5432": "demo/web:80" }
+    }));
+    let inputs = Inputs {
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        tcp_services: Some(cm),
+        ..Default::default()
+    };
+
+    // Reserved for `data`, claimed by `demo`: refused, because there is no
+    // hostname down here to arbitrate between two claims on one port.
+    let out = build(&cfg_exposing_tcp(&[(5432, Some("data"))]), &inputs);
+    assert!(out.ir.l4_frontends.is_empty());
+    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
+    assert!(
+        problems.iter().any(|p| matches!(
+            p,
+            Problem::L4PortNotOwned { port: 5432, owner, claimed_by }
+                if owner == "data" && claimed_by == "demo"
+        )),
+        "{problems:?}"
+    );
+
+    // Reserved for the namespace that claims it: served.
+    let out = build(&cfg_exposing_tcp(&[(5432, Some("demo"))]), &inputs);
+    assert_eq!(out.ir.l4_frontends.len(), 1);
+
+    // Unreserved: shared, so anyone may claim it.
+    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
+    assert_eq!(out.ir.l4_frontends.len(), 1);
 }

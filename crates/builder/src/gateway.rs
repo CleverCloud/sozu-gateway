@@ -214,22 +214,28 @@ fn build_listener(
     // protocol (Sōzu's HTTP(S) listeners are fixed at boot); a mismatch
     // fails closed: programming its routes anyway would silently serve them
     // on a port the Gateway never declared.
-    let expected_port = if info.https {
-        cfg.advertised_for(ExposedProtocol::Https)
-            .unwrap_or_default()
+    let wanted = if info.https {
+        ExposedProtocol::Https
     } else {
-        cfg.advertised_for(ExposedProtocol::Http)
-            .unwrap_or_default()
+        ExposedProtocol::Http
     };
-    if routable && l.port != i32::from(expected_port) {
+    // The declared port must be one this gateway actually exposes. The set can
+    // hold several entries per protocol now, so this is a membership test, not
+    // a comparison against one blessed value.
+    let served = u16::try_from(l.port)
+        .ok()
+        .and_then(|p| cfg.exposed(wanted, p))
+        .is_some();
+    if routable && !served {
         info.accepted = false;
         info.accepted_reason = "PortUnavailable";
         info.programmed = false;
         info.programmed_reason = "Invalid";
-        problems.push(Problem::ListenerPortMismatch {
+        problems.push(Problem::PortNotExposed {
             listener: l.name.clone(),
             declared: l.port,
-            expected: expected_port,
+            protocol: l.protocol.clone(),
+            exposed: cfg.advertised_ports(wanted),
         });
     } else if !selector_unsupported {
         match l.protocol.as_str() {

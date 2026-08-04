@@ -1254,13 +1254,13 @@ fn listener_port_mismatch_is_reported_and_not_programmed() {
     let out = build(&BuildConfig::default(), &inputs);
 
     assert!(out.ir.frontends.is_empty(), "no traffic on the wrong port");
-    assert!(out.gateways[0]
-        .problems
-        .contains(&Problem::ListenerPortMismatch {
-            listener: "http-alt".to_string(),
-            declared: 8080,
-            expected: 80,
-        }));
+    assert!(out.gateways[0].problems.contains(&Problem::PortNotExposed {
+        listener: "http-alt".to_string(),
+        declared: 8080,
+        protocol: "HTTP".to_string(),
+        // The message names what the author could have written instead.
+        exposed: vec![80],
+    }));
     let l = &out.gateways[0].listeners[0];
     assert!(!l.accepted);
     assert_eq!(l.accepted_reason, "PortUnavailable");
