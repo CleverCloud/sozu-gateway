@@ -27,8 +27,42 @@ data:
     [[listeners]]
     protocol = "http"
     address = "0.0.0.0:{{ .Values.sozu.httpPort }}"
+    {{- with .Values.sozu.hardening.sozuIdHeader }}
+    sozu_id_header = {{ . | quote }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.sendXRealIp }}
+    send_x_real_ip = {{ . }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.elideXRealIp }}
+    elide_x_real_ip = {{ . }}
+    {{- end }}
 
     [[listeners]]
     protocol = "https"
     address = "0.0.0.0:{{ .Values.sozu.httpsPort }}"
     tls_versions = ["TLS_V12", "TLS_V13"]
+    {{- with .Values.sozu.hardening.sozuIdHeader }}
+    sozu_id_header = {{ . | quote }}
+    {{- end }}
+    {{- if not (kindIs "invalid" .Values.sozu.hardening.strictSniBinding) }}
+    strict_sni_binding = {{ .Values.sozu.hardening.strictSniBinding }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.sendXRealIp }}
+    send_x_real_ip = {{ . }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.elideXRealIp }}
+    elide_x_real_ip = {{ . }}
+    {{- end }}
+    {{- if .Values.sozu.hardening.hsts.enabled }}
+    [listeners.hsts]
+    enabled = true
+    {{- with .Values.sozu.hardening.hsts.maxAge }}
+    max_age = {{ printf "%.0f" (float64 .) }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.hsts.includeSubdomains }}
+    include_subdomains = {{ . }}
+    {{- end }}
+    {{- with .Values.sozu.hardening.hsts.preload }}
+    preload = {{ . }}
+    {{- end }}
+    {{- end }}

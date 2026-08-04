@@ -68,6 +68,40 @@ sozu:
   httpsPort: 8443
   workerCount: 2
   logLevel: info
+  # Listener-level knobs Sōzu parses from its own config.toml. None of these
+  # reach the IR: the HTTP/HTTPS listeners are declared at boot and re-creating
+  # one would drop its certificate store, so they are set here or not at all.
+  # Empty entries are omitted from the rendered config, leaving Sōzu's own
+  # default in force.
+  hardening:
+    # Header carrying Sōzu's per-request id (its default is "Sozu-Id").
+    sozuIdHeader: ""
+    # Require a request's Host/:authority to exact-match the negotiated TLS SNI
+    # (CWE-346/CWE-444). HTTPS only. **Sōzu defaults this to true**, which is
+    # why it is left unset here rather than defaulted in the chart. Set it to
+    # false only if you knowingly serve hostname-less catch-all routes over
+    # HTTPS, or drive clients with a Host that differs from the SNI.
+    strictSniBinding: null
+    # Append a proxy-generated X-Real-IP carrying the peer address.
+    sendXRealIp: false
+    # Strip any client-supplied X-Real-IP before forwarding (anti-spoofing).
+    # Independent of sendXRealIp — enabling both is the usual pairing.
+    elideXRealIp: false
+    # Per-status answer templates are deliberately NOT exposed here. Sōzu wants
+    # a complete HTTP response, status line included — an `inline:` body of bare
+    # HTML is rejected — and a template it cannot parse makes it fail to add any
+    # listener at all, so the whole data plane comes up dead. Carrying a
+    # CRLF-bearing raw response through a values scalar is not worth that blast
+    # radius; answer overrides want a mounted file and their own change.
+    # HSTS (RFC 6797) applied to every HTTPS frontend that declares none of its
+    # own. Rejected by Sōzu on an HTTP listener, so it is rendered only under
+    # the HTTPS one. Off by default: a max-age served by mistake is remembered
+    # by browsers long after the mistake is fixed.
+    hsts:
+      enabled: false
+      maxAge: 31536000
+      includeSubdomains: false
+      preload: false
 
 service:
   type: LoadBalancer
