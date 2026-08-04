@@ -32,7 +32,7 @@ K8s objects ─▶ reflector caches ─▶ builder ─▶ IR ─▶ translator �
   `Frontend`, `Certificate`, `Ir`), mapped 1:1 onto Sōzu's routing vocabulary. **No I/O.** It
   depends only on `serde`.
 - [`crates/gateway-api`](crates/gateway-api) (`sozu-gw-gateway-api`) — `kopium`-generated Gateway
-  API CRD types (v1.2.1 standard channel). **Types only — do not hand-edit; regenerate per the
+  API CRD types (v1.6.1 standard channel). **Types only — do not hand-edit; regenerate per the
   crate's README.** `kube` is pulled in for the `CustomResource` derive, not for client/runtime I/O.
 - [`crates/builder`](crates/builder) (`sozu-gw-builder`) — maps typed Ingress **and** Gateway API
   objects into the IR, emitting non-fatal `Problem`s for anything Sōzu can't represent. Resolves

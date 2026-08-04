@@ -209,6 +209,13 @@ pub enum Problem {
     L4PortDuplicate {
         port: u16,
     },
+    /// A `Gateway` spec field this controller does not honour. Reported rather
+    /// than ignored: several of these carry security intent (client-certificate
+    /// validation, which namespaces may contribute listeners), and a field that
+    /// is silently dropped reads to its author as a field that was applied.
+    GatewaySpecUnsupported {
+        field: &'static str,
+    },
 }
 
 impl Problem {
@@ -240,6 +247,7 @@ impl Problem {
             Problem::InvalidL4Mapping { .. } => "InvalidL4Mapping",
             Problem::L4PortReserved { .. } => "L4PortReserved",
             Problem::L4PortDuplicate { .. } => "L4PortDuplicate",
+            Problem::GatewaySpecUnsupported { .. } => "GatewaySpecUnsupported",
         }
     }
 
@@ -337,6 +345,10 @@ impl std::fmt::Display for Problem {
             Problem::L4PortReserved { port } => {
                 write!(f, "L4 port {port} is reserved by the gateway's own listeners")
             }
+            Problem::GatewaySpecUnsupported { field } => write!(
+                f,
+                "Gateway field {field} is not honoured by this controller and is ignored"
+            ),
             Problem::L4PortDuplicate { port } => write!(
                 f,
                 "L4 port {port} is already mapped by an earlier entry; this one is ignored"

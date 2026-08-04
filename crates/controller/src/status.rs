@@ -225,14 +225,15 @@ fn build_listeners_status(
             );
             GatewayStatusListeners {
                 name: l.name.clone(),
-                supported_kinds: l
-                    .supported_kinds
-                    .iter()
-                    .map(|k| GatewayStatusListenersSupportedKinds {
-                        group: Some(GW_GROUP.to_string()),
-                        kind: k.clone(),
-                    })
-                    .collect(),
+                supported_kinds: Some(
+                    l.supported_kinds
+                        .iter()
+                        .map(|k| GatewayStatusListenersSupportedKinds {
+                            group: Some(GW_GROUP.to_string()),
+                            kind: k.clone(),
+                        })
+                        .collect(),
+                ),
                 attached_routes: l.attached_routes,
                 conditions,
             }
@@ -389,11 +390,11 @@ async fn write_route(
                     },
                 },
             ],
-            existing.and_then(|p| p.conditions.as_deref()),
+            existing.map(|p| p.conditions.as_slice()),
             generation,
         );
         parents.push(HttpRouteStatusParents {
-            conditions: Some(conditions),
+            conditions,
             controller_name: controller_name.to_string(),
             parent_ref: HttpRouteStatusParentsParentRef {
                 group: Some(GW_GROUP.to_string()),

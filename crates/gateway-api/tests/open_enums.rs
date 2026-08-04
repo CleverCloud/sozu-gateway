@@ -17,9 +17,12 @@ fn route_with_filter(kind: &str) -> serde_json::Value {
 
 #[test]
 fn a_filter_type_from_a_newer_crd_deserialises_as_unknown() {
-    // `CORS` is a real HTTPRoute filter type in Gateway API v1.6.1, and these
-    // types are generated from v1.2.1.
-    let route: HttpRoute = serde_json::from_value(route_with_filter("CORS")).expect("must parse");
+    // Deliberately a value no Gateway API release defines: the point is the
+    // mechanism, not any one member. Naming a real future member would make
+    // this test expire the day the types are regenerated past it — which is
+    // exactly what happened when `CORS` landed in v1.6.1.
+    let route: HttpRoute =
+        serde_json::from_value(route_with_filter("AFilterFromAFutureRelease")).expect("must parse");
     let rules = route.spec.rules.expect("one rule");
     let filters = rules[0].filters.as_ref().expect("one filter");
     assert!(matches!(
@@ -32,13 +35,15 @@ fn a_filter_type_from_a_newer_crd_deserialises_as_unknown() {
 fn one_unknown_member_does_not_hide_the_whole_page() {
     // This is the failure that matters: the reflector decodes a list, not one
     // object, so a single unparseable item used to take every route with it.
+    // `CORS` was the real-world instance — it landed in v1.6.1 while the types
+    // were generated from v1.2.1.
     let page = serde_json::json!({
         "apiVersion": "v1", "kind": "List",
         "items": [
             { "apiVersion": "gateway.networking.k8s.io/v1", "kind": "HTTPRoute",
               "metadata": { "name": "healthy", "namespace": "demo" },
               "spec": { "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }] } },
-            route_with_filter("CORS"),
+            route_with_filter("AFilterFromAFutureRelease"),
         ]
     });
     let list: kube::core::ObjectList<HttpRoute> =

@@ -63,7 +63,7 @@ Ingress works out of the box. To also use the Gateway API, install its CRDs (the
 auto-detects them and otherwise stays in Ingress-only mode):
 
 ```sh
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
 ```
 
 Then create a `GatewayClass` (with `controllerName: sozu.io/gateway-controller`), a `Gateway` and an

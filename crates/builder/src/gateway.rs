@@ -342,6 +342,19 @@ pub(crate) fn build_gateway(
         }
         let (ns, name) = meta_nn(&gw.metadata.namespace, &gw.metadata.name);
         let mut problems = Vec::new();
+        // Gateway API v1.6.1 added these to the Gateway spec. Neither is
+        // honoured, and both are reported rather than dropped: `tls` carries
+        // client-certificate validation (a security control Sōzu's proto has no
+        // field for at all), and `allowedListeners` decides which namespaces may
+        // contribute listeners — a permission, not a preference.
+        if gw.spec.tls.is_some() {
+            problems.push(Problem::GatewaySpecUnsupported { field: "spec.tls" });
+        }
+        if gw.spec.allowed_listeners.is_some() {
+            problems.push(Problem::GatewaySpecUnsupported {
+                field: "spec.allowedListeners",
+            });
+        }
         // Every declared listener gets a status entry, even unsupported / cert-less
         // ones (a route can still attach to them; they just aren't programmed).
         let listeners: Vec<ListenerInfo> = gw
@@ -981,6 +994,17 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                 problems.push(Problem::FilterUnsupported {
                     kind: "URLRewrite".to_string(),
                 });
+            }
+            // Sōzu has no CORS support: no response-header synthesis keyed on
+            // Origin, no preflight handling. Serving the rule without the
+            // filter would answer cross-origin requests the route author meant
+            // to gate, so the rule is skipped like any other filter we cannot
+            // honour.
+            HttpRouteRulesFiltersType::Cors => {
+                problems.push(Problem::FilterUnsupported {
+                    kind: "CORS".to_string(),
+                });
+                unprogrammable = true;
             }
             HttpRouteRulesFiltersType::RequestMirror | HttpRouteRulesFiltersType::ExtensionRef => {
                 problems.push(Problem::FilterUnsupported {
