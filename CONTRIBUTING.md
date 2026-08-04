@@ -66,8 +66,33 @@ You need:
   source for task and command names. Run `just` with no args to list every recipe.
 - **Rust 1.88 (stable)**, edition 2021. No nightly is required — unlike Sōzu, formatting and lints
   run on the stable toolchain.
-- The easiest path is the **devcontainer** ([`.devcontainer`](.devcontainer)): it installs `protoc`,
-  `just`, the Rust toolchain, and a Kubernetes stack (kubectl/helm/minikube) for you.
+- The **devcontainer** ([`.devcontainer`](.devcontainer)) brings the Rust toolchain, Go, and a
+  Kubernetes stack (kubectl/helm/minikube). It does **not** bring `protoc`, `just`, or a docker
+  daemon, so a fresh container needs:
+
+  ```bash
+  sudo apt-get update && sudo apt-get install -y protobuf-compiler   # the update is required
+  GOBIN=$HOME/.local/bin go install github.com/google/go-containerregistry/cmd/crane@latest
+  ```
+
+  Without `just`, read the recipe bodies out of the [justfile](justfile) — they are plain
+  cargo/helm/bash one-liners.
+
+### Running the e2e suites without docker
+
+`ensure_image` in [`scripts/e2e-lib.sh`](scripts/e2e-lib.sh) calls `docker build`, which the
+devcontainer cannot do. [`scripts/build-image-nodocker.sh`](scripts/build-image-nodocker.sh)
+produces the same image with `crane` and prints an `IMAGE`/`DIGEST` pair; exporting those makes
+`ensure_image` skip the docker path and deploy by digest:
+
+```bash
+cargo build --release -p sozu-gw-controller
+eval "$(bash scripts/build-image-nodocker.sh | tail -2)"
+bash scripts/e2e.sh
+```
+
+The suites **cannot run in parallel**: `e2e.sh` and `e2e-gateway.sh` both port-forward to local
+port 18080, so a concurrent run silently curls the other cluster's Sōzu. Run them in series.
 
 The core loop:
 
