@@ -26,7 +26,7 @@ data:
 
     [[listeners]]
     protocol = "http"
-    address = "0.0.0.0:{{ .Values.sozu.httpPort }}"
+    address = "0.0.0.0:{{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTP"))).bind }}"
     {{- with .Values.sozu.hardening.sozuIdHeader }}
     sozu_id_header = {{ . | quote }}
     {{- end }}
@@ -39,7 +39,7 @@ data:
 
     [[listeners]]
     protocol = "https"
-    address = "0.0.0.0:{{ .Values.sozu.httpsPort }}"
+    address = "0.0.0.0:{{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTPS"))).bind }}"
     tls_versions = ["TLS_V12", "TLS_V13"]
     {{- with .Values.sozu.hardening.sozuIdHeader }}
     sozu_id_header = {{ . | quote }}

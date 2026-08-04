@@ -26,3 +26,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "sozu-gateway.serviceAccountName" -}}
 {{ include "sozu-gateway.fullname" . }}
 {{- end -}}
+
+{{/*
+The exposure entry serving a given Gateway API protocol, as JSON. Used where a
+template needs one specific listener (Sōzu's static HTTP/HTTPS binds).
+*/}}
+{{- define "sozu-gateway.exposureFor" -}}
+{{- $proto := .proto -}}
+{{- range .root.Values.exposure -}}
+{{- if eq .protocol $proto -}}{{ toJson . }}{{- end -}}
+{{- end -}}
+{{- end }}

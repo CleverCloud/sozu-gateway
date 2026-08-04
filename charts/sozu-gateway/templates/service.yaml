@@ -16,21 +16,19 @@ spec:
   selector:
     {{- include "sozu-gateway.selectorLabels" . | nindent 4 }}
   ports:
-    - name: http
-      port: {{ .Values.service.httpPort }}
-      targetPort: http
-      protocol: TCP
-    - name: https
-      port: {{ .Values.service.httpsPort }}
-      targetPort: https
-      protocol: TCP
+    {{- range .Values.exposure }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .bind }}
+      protocol: {{ .transport | default "TCP" }}
+    {{- end }}
     {{- range $port, $svc := .Values.l4.tcpServices }}
     - name: tcp-{{ $port }}
       port: {{ $port }}
       targetPort: {{ $port }}
       protocol: TCP
     {{- end }}
-    {{- range $port, $svc := .Values.l4.udpServices }}
+  {{- range $port, $svc := .Values.l4.udpServices }}
     - name: udp-{{ $port }}
       port: {{ $port }}
       targetPort: {{ $port }}

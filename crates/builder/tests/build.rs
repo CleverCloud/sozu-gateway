@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::ByteString;
 use serde_json::json;
 
-use sozu_gw_builder::{build, BuildConfig, Inputs, Problem};
+use sozu_gw_builder::{build, BuildConfig, ExposedPort, ExposedProtocol, Inputs, Problem};
 use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
@@ -1147,4 +1147,119 @@ fn problem_display_carries_the_detail_and_reason_stays_machine_readable() {
         "listener-scoped variants say so"
     );
     assert_eq!(Problem::TimeoutsUnsupported.listener(), None);
+}
+
+#[test]
+fn colliding_binds_are_detected_on_the_bind_not_the_advertised_key() {
+    // The trap the table exists to catch. These two entries collide on nothing
+    // a user reads — different name, different advertised port, different
+    // protocol — and still resolve to one socket. Sōzu would reject the second
+    // listener add, and since the translation is all-or-nothing the whole
+    // reconcile fails with it.
+    let cfg = BuildConfig {
+        exposure: vec![
+            ExposedPort {
+                name: "http".into(),
+                port: 80,
+                bind: 8080,
+                protocol: ExposedProtocol::Http,
+                transport: None,
+                owner: None,
+            },
+            ExposedPort {
+                name: "postgres".into(),
+                port: 5432,
+                bind: 8080,
+                protocol: ExposedProtocol::Tcp,
+                transport: None,
+                owner: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    let clashes = cfg.colliding_binds();
+    assert_eq!(clashes.len(), 1, "one pair collides: {clashes:?}");
+    assert_eq!(clashes[0].0.name, "http");
+    assert_eq!(clashes[0].1.name, "postgres");
+
+    // The advertised keys really are distinct, which is the whole point.
+    assert_ne!(
+        (clashes[0].0.protocol, clashes[0].0.port),
+        (clashes[0].1.protocol, clashes[0].1.port)
+    );
+}
+
+#[test]
+fn the_chart_default_shape_is_collision_free() {
+    let cfg = BuildConfig {
+        exposure: vec![
+            ExposedPort {
+                name: "http".into(),
+                port: 80,
+                bind: 8080,
+                protocol: ExposedProtocol::Http,
+                transport: Some("TCP".into()),
+                owner: None,
+            },
+            ExposedPort {
+                name: "https".into(),
+                port: 443,
+                bind: 8443,
+                protocol: ExposedProtocol::Https,
+                transport: Some("TCP".into()),
+                owner: None,
+            },
+        ],
+        ..Default::default()
+    };
+    assert!(cfg.colliding_binds().is_empty());
+    assert_eq!(cfg.advertised_for(ExposedProtocol::Http), Some(80));
+    assert_eq!(
+        cfg.bind_for(ExposedProtocol::Https).map(|a| a.port()),
+        Some(8443)
+    );
+    // A layer-4 route may not land on a bind an exposed entry already holds.
+    assert_eq!(cfg.reserved_binds(), [8080, 8443].into_iter().collect());
+}
+
+#[test]
+fn an_l4_port_names_its_owner_and_http_stays_shared() {
+    // HTTP and HTTPS multiplex on hostname, so any number of Gateways share
+    // them. A layer-4 port carries exactly one route and has no hostname to
+    // arbitrate with, so it names the namespace allowed to claim it.
+    let cfg = BuildConfig {
+        exposure: vec![
+            ExposedPort {
+                name: "http".into(),
+                port: 80,
+                bind: 8080,
+                protocol: ExposedProtocol::Http,
+                transport: None,
+                owner: None,
+            },
+            ExposedPort {
+                name: "postgres".into(),
+                port: 5432,
+                bind: 5432,
+                protocol: ExposedProtocol::Tcp,
+                transport: None,
+                owner: Some("data".into()),
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        cfg.exposed(ExposedProtocol::Http, 80)
+            .and_then(|e| e.owner.as_deref()),
+        None
+    );
+    assert_eq!(
+        cfg.exposed(ExposedProtocol::Tcp, 5432)
+            .and_then(|e| e.owner.as_deref()),
+        Some("data")
+    );
+    // A port nobody exposes is simply not on the menu.
+    assert!(cfg.exposed(ExposedProtocol::Tcp, 9999).is_none());
+    assert_eq!(cfg.advertised_ports(ExposedProtocol::Tcp), vec![5432]);
 }
