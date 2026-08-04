@@ -37,7 +37,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use sozu_gw_agent::SozuAgentHandle;
-use sozu_gw_builder::{build, BuildConfig, Inputs};
+use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
 use sozu_gw_translator as tr;
 
@@ -68,22 +68,25 @@ struct Args {
     /// Path to the Sōzu command socket.
     #[arg(long, env = "SOZU_GW_SOCKET", default_value = "/run/sozu/sozu.sock")]
     socket: String,
-    /// HTTP listener address declared in Sōzu's config.toml.
-    #[arg(long, env = "SOZU_GW_HTTP_LISTENER", default_value = "0.0.0.0:80")]
-    http_listener: SocketAddr,
-    /// HTTPS listener address declared in Sōzu's config.toml.
-    #[arg(long, env = "SOZU_GW_HTTPS_LISTENER", default_value = "0.0.0.0:443")]
-    https_listener: SocketAddr,
-    /// Externally advertised port for HTTP Gateway listeners — what a
-    /// Gateway's `listener.port` declares and clients connect to (the
-    /// LoadBalancer Service's exposed port), as opposed to the pod-level
-    /// `--http-listener` bind.
-    #[arg(long, env = "SOZU_GW_GATEWAY_HTTP_PORT", default_value = "80")]
-    gateway_http_port: u16,
-    /// Externally advertised port for HTTPS Gateway listeners (see
-    /// `--gateway-http-port`).
-    #[arg(long, env = "SOZU_GW_GATEWAY_HTTPS_PORT", default_value = "443")]
-    gateway_https_port: u16,
+    /// Ports this gateway exposes, as JSON — the single source of what a
+    /// Gateway listener may declare and where Sōzu listens for it. Rendered by
+    /// the chart from its `exposure` values, and the reason this is not four
+    /// scalars any more: a gateway serving arbitrary layer-4 ports cannot
+    /// encode them in a fixed pair.
+    ///
+    /// `[{"name":"http","port":80,"bind":"0.0.0.0:8080","protocol":"HTTP"}]`
+    ///
+    /// `port` is advertised (what a listener declares, what clients dial),
+    /// `bind` is where Sōzu listens in the Pod, and `owner` — optional, layer-4
+    /// only — names the namespace allowed to claim the port.
+    /// Defaults to the two ports a gateway has always served, so the binary
+    /// stays runnable on its own; the chart always sets it.
+    #[arg(
+        long,
+        env = "SOZU_GW_EXPOSURE",
+        default_value = r#"[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]"#
+    )]
+    exposure: String,
     /// Debounce window: coalesce bursts of watch events before reconciling.
     #[arg(long, env = "SOZU_GW_DEBOUNCE_MS", default_value = "500")]
     debounce_ms: u64,
@@ -462,6 +465,7 @@ async fn probe_sozu_generation(
 /// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
 /// last-applied IR) only on a successful apply, so a failed push is retried from
 /// the same baseline.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile(
     args: &Args,
     client: &Client,
@@ -470,15 +474,13 @@ async fn reconcile(
     shadow: &mut Ir,
     problem_events: &mut events::ProblemEvents,
     referenced_services: &RwLock<BTreeSet<String>>,
+    exposure: &[ExposedPort],
 ) -> Result<()> {
     let cfg = BuildConfig {
         class_name: args.class_name.clone(),
         class_is_default: class_is_default(stores, &args.class_name),
         controller_name: args.controller_name.clone(),
-        http_listener: args.http_listener,
-        https_listener: args.https_listener,
-        gateway_http_port: args.gateway_http_port,
-        gateway_https_port: args.gateway_https_port,
+        exposure: exposure.to_vec(),
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
@@ -620,6 +622,37 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     info!(?args, "starting sozu gateway controller");
+
+    // The exposure table decides both what a Gateway listener may declare and
+    // where Sōzu listens for it, so a malformed or self-contradicting one is a
+    // startup error, not something to discover on the first reconcile.
+    let exposure: Vec<ExposedPort> =
+        serde_json::from_str(&args.exposure).context("parsing --exposure")?;
+    if exposure.is_empty() {
+        anyhow::bail!("--exposure is empty: the gateway would serve nothing");
+    }
+    {
+        // Injectivity on `bind`, not on the advertised key: two entries can
+        // differ in everything a user reads and still resolve to one socket,
+        // and the second listener add would fail the whole reconcile.
+        let probe = BuildConfig {
+            exposure: exposure.clone(),
+            ..Default::default()
+        };
+        let clashes = probe.colliding_binds();
+        if let Some((a, b)) = clashes.first() {
+            anyhow::bail!(
+                "exposure entries {:?} and {:?} both bind {} — one socket cannot serve two",
+                a.name,
+                b.name,
+                a.bind
+            );
+        }
+    }
+    info!(
+        ports = ?exposure.iter().map(|e| format!("{}={}->{}", e.name, e.port, e.bind)).collect::<Vec<_>>(),
+        "exposed ports"
+    );
 
     if let Some(ps) = &args.publish_service {
         let valid = ps
@@ -882,6 +915,7 @@ async fn main() -> Result<()> {
         &mut shadow,
         &mut problem_events,
         &referenced_services,
+        &exposure,
     )
     .await
     {
@@ -993,6 +1027,7 @@ async fn main() -> Result<()> {
             &mut shadow,
             &mut problem_events,
             &referenced_services,
+            &exposure,
         )
         .await
         {

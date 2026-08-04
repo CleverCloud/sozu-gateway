@@ -10,7 +10,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::ByteString;
 use serde_json::json;
 
-use sozu_gw_builder::{build, BuildConfig, Inputs, Problem};
+use sozu_gw_builder::{build, BuildConfig, ExposedPort, ExposedProtocol, Inputs, Problem};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 use sozu_gw_ir as ir;
 
@@ -1302,8 +1302,17 @@ fn listener_on_the_advertised_port_is_programmed() {
         endpointslices: arcs(vec![web_slice()]),
         ..Default::default()
     };
+    // Advertise HTTP on 8080 instead of 80: a listener declaring 80 is then
+    // no longer on the menu.
     let cfg = BuildConfig {
-        gateway_http_port: 8080,
+        exposure: vec![ExposedPort {
+            name: "http".into(),
+            port: 8080,
+            bind: 8080,
+            protocol: ExposedProtocol::Http,
+            transport: None,
+            owner: None,
+        }],
         ..Default::default()
     };
     let out = build(&cfg, &inputs);
@@ -1338,11 +1347,27 @@ fn standard_gateway_ports_are_accepted_on_unprivileged_binds() {
         secrets: arcs(vec![tls_secret()]),
         ..Default::default()
     };
+    // The chart's real shape: 80/443 advertised, bound unprivileged. The two
+    // ports of an entry differing is the normal case, not an edge one.
     let cfg = BuildConfig {
-        // The chart's pod-level binds; advertised ports keep their 80/443
-        // defaults, as the chart wires them from the Service values.
-        http_listener: "0.0.0.0:8080".parse().expect("addr"),
-        https_listener: "0.0.0.0:8443".parse().expect("addr"),
+        exposure: vec![
+            ExposedPort {
+                name: "http".into(),
+                port: 80,
+                bind: 8080,
+                protocol: ExposedProtocol::Http,
+                transport: None,
+                owner: None,
+            },
+            ExposedPort {
+                name: "https".into(),
+                port: 443,
+                bind: 8443,
+                protocol: ExposedProtocol::Https,
+                transport: None,
+                owner: None,
+            },
+        ],
         ..Default::default()
     };
     let out = build(&cfg, &inputs);

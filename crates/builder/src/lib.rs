@@ -39,23 +39,140 @@ const RETRY_AFTER_ANNOTATION: &str = "sozu.io/retry-after";
 /// to `"false"` to keep serving plain HTTP.
 const SSL_REDIRECT_ANNOTATION: &str = "sozu.io/ssl-redirect";
 
-/// Listener addresses and class identity the build is parameterised over.
+/// The Gateway API listener protocol one exposed port serves.
+///
+/// Distinct from the Service port's transport protocol: a Kubernetes Service
+/// only knows TCP/UDP/SCTP and the apiserver rejects `protocol: HTTP`, so the
+/// chart carries both and this is the one routing cares about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ExposedProtocol {
+    Http,
+    Https,
+    Tcp,
+    Udp,
+    Tls,
+}
+
+/// One port this gateway exposes.
+///
+/// The two ports are not interchangeable and both have to be written down.
+/// `port` is what a `Gateway` listener declares and what a client dials — the
+/// Service's client-facing port. `bind` is where Sōzu actually listens inside
+/// the Pod, which cannot be a privileged port: both containers run as uid 1000
+/// with every capability dropped, so 80 and 443 are unreachable and the chart's
+/// default maps them to 8080 and 8443.
+///
+/// Deriving one from the other was considered and rejected: a fixed offset
+/// reads naturally for 80 → 8080 and absurdly for 5432, and the collision check
+/// that matters operates on `bind`, so it must be a value the operator can see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ExposedPort {
+    /// Service port name.
+    pub name: String,
+    /// Advertised port: what a Gateway listener declares, what clients dial.
+    pub port: u16,
+    /// Port Sōzu listens on inside the Pod. A port, not an address: the bind
+    /// interface is always the unspecified one, and the Service's `targetPort`
+    /// needs the bare number anyway.
+    pub bind: u16,
+    pub protocol: ExposedProtocol,
+    /// The Service port's transport protocol. Carried so the chart's values and
+    /// this struct are the same shape; routing never reads it — `protocol` is
+    /// what decides where a listener attaches.
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// Namespace allowed to claim this port. `None` means shared, which is how
+    /// HTTP and HTTPS work — they multiplex on hostname, so any number of
+    /// Gateways can serve on one. A layer-4 port carries exactly one route and
+    /// has no hostname to arbitrate with, so it names its owner instead of
+    /// letting two Gateways race for it.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// The exposed ports and class identity the build is parameterised over.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
     pub class_name: String,
     pub class_is_default: bool,
     /// GatewayClass `controllerName` we own (Gateway API).
     pub controller_name: String,
-    pub http_listener: SocketAddr,
-    pub https_listener: SocketAddr,
-    /// Externally advertised port for HTTP Gateway listeners: the port clients
-    /// connect to (the LoadBalancer Service's exposed port), which a Gateway's
-    /// `listener.port` declares. Distinct from `http_listener`, the pod-level
-    /// bind — under the chart defaults the Service maps 80 → 8080.
-    pub gateway_http_port: u16,
-    /// Externally advertised port for HTTPS Gateway listeners (see
-    /// [`Self::gateway_http_port`]).
-    pub gateway_https_port: u16,
+    /// Every port the gateway exposes, in the operator's declared order.
+    ///
+    /// This replaces the four scalars that used to encode exactly two ports.
+    /// The rule a user meets moves with it: from "your listener's port must be
+    /// 80 or 443" to "your `(port, protocol)` must be one this gateway
+    /// exposes", which is strictly more permissive.
+    pub exposure: Vec<ExposedPort>,
+}
+
+impl BuildConfig {
+    /// The bind address serving `protocol`, if any port exposes it.
+    pub fn bind_for(&self, protocol: ExposedProtocol) -> Option<SocketAddr> {
+        self.exposure
+            .iter()
+            .find(|e| e.protocol == protocol)
+            .map(|e| Self::bind_addr(e.bind))
+    }
+
+    /// A bind port as the address Sōzu listens on.
+    pub fn bind_addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)
+    }
+
+    /// The advertised port for `protocol` — what a Gateway listener must
+    /// declare to be served on it.
+    pub fn advertised_for(&self, protocol: ExposedProtocol) -> Option<u16> {
+        self.exposure
+            .iter()
+            .find(|e| e.protocol == protocol)
+            .map(|e| e.port)
+    }
+
+    /// The entry serving `(protocol, port)`, i.e. the one a Gateway listener
+    /// declaring that pair attaches to.
+    pub fn exposed(&self, protocol: ExposedProtocol, port: u16) -> Option<&ExposedPort> {
+        self.exposure
+            .iter()
+            .find(|e| e.protocol == protocol && e.port == port)
+    }
+
+    /// The advertised ports on offer for `protocol`, for a message that tells
+    /// the user what they could have declared instead.
+    pub fn advertised_ports(&self, protocol: ExposedProtocol) -> Vec<u16> {
+        self.exposure
+            .iter()
+            .filter(|e| e.protocol == protocol)
+            .map(|e| e.port)
+            .collect()
+    }
+
+    /// Bind ports already taken by an exposed entry. A layer-4 route may not
+    /// land on one: it would resolve to an address Sōzu already listens on,
+    /// `AddTcpListener` is rejected, and since the translation is
+    /// all-or-nothing the whole reconcile fails with it.
+    pub fn reserved_binds(&self) -> BTreeSet<u16> {
+        self.exposure.iter().map(|e| e.bind).collect()
+    }
+
+    /// Pairs of entries that would land on the same bind address.
+    ///
+    /// The check that matters is on `bind`, not on the advertised
+    /// `(protocol, port)` key: two entries can differ in everything a user
+    /// reads and still resolve to one socket. A TCP entry advertising 8080 does
+    /// not collide with `(HTTP, 80)` on any key, yet both bind `0.0.0.0:8080`.
+    pub fn colliding_binds(&self) -> Vec<(&ExposedPort, &ExposedPort)> {
+        let mut out = Vec::new();
+        for (i, a) in self.exposure.iter().enumerate() {
+            for b in self.exposure.iter().skip(i + 1) {
+                if a.bind == b.bind {
+                    out.push((a, b));
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Default for BuildConfig {
@@ -64,10 +181,25 @@ impl Default for BuildConfig {
             class_name: "sozu".to_string(),
             class_is_default: false,
             controller_name: "sozu.io/gateway-controller".to_string(),
-            http_listener: "0.0.0.0:80".parse().expect("const addr"),
-            https_listener: "0.0.0.0:443".parse().expect("const addr"),
-            gateway_http_port: 80,
-            gateway_https_port: 443,
+            // The chart's own defaults: 80/443 advertised, bound unprivileged.
+            exposure: vec![
+                ExposedPort {
+                    name: "http".to_string(),
+                    port: 80,
+                    bind: 80,
+                    protocol: ExposedProtocol::Http,
+                    transport: None,
+                    owner: None,
+                },
+                ExposedPort {
+                    name: "https".to_string(),
+                    port: 443,
+                    bind: 443,
+                    protocol: ExposedProtocol::Https,
+                    transport: None,
+                    owner: None,
+                },
+            ],
         }
     }
 }
@@ -157,7 +289,7 @@ pub enum Problem {
     },
     /// An HTTP/HTTPS listener declares a port that differs from the
     /// externally advertised port for its protocol
-    /// ([`BuildConfig::gateway_http_port`]/[`BuildConfig::gateway_https_port`]).
+    /// (see [`BuildConfig::advertised_for`]).
     /// `listener.port` is the client-visible port — the LoadBalancer
     /// Service's exposed port, not the pod bind — and the gateway only
     /// serves the advertised ones (Sōzu's HTTP(S) listeners are fixed at
@@ -1007,7 +1139,7 @@ fn build_l4(
     let mut l4_frontends = Vec::new();
     let mut results = Vec::new();
     // Ports already bound by the static HTTP/HTTPS listeners can't be reused.
-    let reserved = [cfg.http_listener.port(), cfg.https_listener.port()];
+    let reserved = cfg.reserved_binds();
     // Ports already claimed by an earlier entry in this pass. Distinct
     // ConfigMap keys can resolve to the same port ("9000" and "09000" both
     // parse to 9000), and L4 gives a port exactly one Service, so a second
@@ -1057,7 +1189,12 @@ fn build_l4(
                             claimed.insert((protocol, port));
                             l4_frontends.push(ir::L4Frontend {
                                 protocol,
-                                listener: SocketAddr::new(cfg.http_listener.ip(), port),
+                                listener: SocketAddr::new(
+                                    cfg.bind_for(ExposedProtocol::Http)
+                                        .expect("HTTP is always exposed")
+                                        .ip(),
+                                    port,
+                                ),
                                 cluster_id,
                             });
                         }
@@ -1157,7 +1294,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         certificates.push(FingerprintedCert {
                             fingerprint,
                             cert: ir::Certificate {
-                                listener: cfg.https_listener,
+                                listener: cfg
+                                    .bind_for(ExposedProtocol::Https)
+                                    .expect("HTTPS is always exposed"),
                                 certificate: leaf,
                                 chain,
                                 key,
@@ -1241,7 +1380,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                 method: None,
                                 cluster_id: Some(cluster_id.clone()),
                                 tls: false,
-                                listener: cfg.http_listener,
+                                listener: cfg
+                                    .bind_for(ExposedProtocol::Http)
+                                    .expect("HTTP is always exposed"),
                                 filters: http_filters,
                             },
                             source: source.clone(),
@@ -1254,7 +1395,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                     method: None,
                                     cluster_id: Some(cluster_id),
                                     tls: true,
-                                    listener: cfg.https_listener,
+                                    listener: cfg
+                                        .bind_for(ExposedProtocol::Https)
+                                        .expect("HTTPS is always exposed"),
                                     filters: ir::FrontendFilters::default(),
                                 },
                                 source: source.clone(),

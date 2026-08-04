@@ -37,8 +37,8 @@ use sozu_gw_gateway_api::httproute::{
 use sozu_gw_ir as ir;
 
 use crate::{
-    add_service_route, extract_cert, meta_nn, BuildConfig, FingerprintedCert, FrontendSource,
-    Index, Inputs, PortRef, Problem, SourcedFrontend,
+    add_service_route, extract_cert, meta_nn, BuildConfig, ExposedProtocol, FingerprintedCert,
+    FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -215,9 +215,11 @@ fn build_listener(
     // fails closed: programming its routes anyway would silently serve them
     // on a port the Gateway never declared.
     let expected_port = if info.https {
-        cfg.gateway_https_port
+        cfg.advertised_for(ExposedProtocol::Https)
+            .unwrap_or_default()
     } else {
-        cfg.gateway_http_port
+        cfg.advertised_for(ExposedProtocol::Http)
+            .unwrap_or_default()
     };
     if routable && l.port != i32::from(expected_port) {
         info.accepted = false;
@@ -593,7 +595,9 @@ fn load_listener_certs(
                     certificates.push(FingerprintedCert {
                         fingerprint,
                         cert: ir::Certificate {
-                            listener: cfg.https_listener,
+                            listener: cfg
+                                .bind_for(ExposedProtocol::Https)
+                                .expect("HTTPS is always exposed"),
                             certificate: leaf,
                             chain,
                             key,
@@ -830,9 +834,11 @@ fn attach_rule(
                         tls: l.https,
                         filters: filters.clone(),
                         listener: if l.https {
-                            cfg.https_listener
+                            cfg.bind_for(ExposedProtocol::Https)
+                                .expect("HTTPS is always exposed")
                         } else {
-                            cfg.http_listener
+                            cfg.bind_for(ExposedProtocol::Http)
+                                .expect("HTTP is always exposed")
                         },
                     },
                     source: source.clone(),

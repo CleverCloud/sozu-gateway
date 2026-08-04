@@ -58,10 +58,11 @@ spec:
               drop: ["ALL"]
           args: ["start", "-c", "/etc/sozu/config.toml"]
           ports:
-            - name: http
-              containerPort: {{ .Values.sozu.httpPort }}
-            - name: https
-              containerPort: {{ .Values.sozu.httpsPort }}
+            {{- range .Values.exposure }}
+            - name: {{ .name }}
+              containerPort: {{ .bind }}
+              protocol: {{ .transport | default "TCP" }}
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: http
@@ -107,17 +108,10 @@ spec:
               value: {{ .Values.ingressClass.controllerValue | quote }}
             - name: SOZU_GW_SOCKET
               value: /run/sozu/sozu.sock
-            - name: SOZU_GW_HTTP_LISTENER
-              value: "0.0.0.0:{{ .Values.sozu.httpPort }}"
-            - name: SOZU_GW_HTTPS_LISTENER
-              value: "0.0.0.0:{{ .Values.sozu.httpsPort }}"
-            # Advertised Gateway API listener ports: what a Gateway's
-            # listeners[].port declares — the Service's client-facing ports,
-            # which map onto the unprivileged pod binds above.
-            - name: SOZU_GW_GATEWAY_HTTP_PORT
-              value: {{ .Values.service.httpPort | quote }}
-            - name: SOZU_GW_GATEWAY_HTTPS_PORT
-              value: {{ .Values.service.httpsPort | quote }}
+            # Ports this gateway exposes: what a Gateway listener may declare,
+            # and where Sōzu listens for it. Rendered from `exposure`.
+            - name: SOZU_GW_EXPOSURE
+              value: {{ toJson (.Values.exposure | default list) | quote }}
             - name: SOZU_GW_DEBOUNCE_MS
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS

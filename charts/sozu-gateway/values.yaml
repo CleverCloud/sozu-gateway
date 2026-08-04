@@ -62,10 +62,39 @@ rbac:
   # writes (they are best-effort either way).
   allowGatewayStatusWrites: true
 
-# Sōzu data-plane sidecar. Unprivileged listener ports (no root / NET_BIND).
+# Ports this gateway exposes. Single source of truth for the Service's ports,
+# Sōzu's listeners, and what a Gateway API listener may declare.
+#
+#   port  — advertised: what a Gateway `listeners[].port` declares and what
+#           clients dial. This is the Service port.
+#   bind  — where Sōzu listens inside the Pod. Cannot be privileged: both
+#           containers run as uid 1000 with all capabilities dropped, so 80 and
+#           443 are unreachable and map to 8080/8443 below.
+#   protocol  — the Gateway API listener protocol served here.
+#   transport — the Service port's protocol. Separate on purpose: a Service only
+#           knows TCP/UDP/SCTP and the apiserver rejects `protocol: HTTP`.
+#   owner — optional, layer-4 only: the namespace allowed to claim this port. A
+#           layer-4 port carries exactly one route and has no hostname to
+#           arbitrate with, so it names its owner rather than letting two
+#           Gateways race for it. HTTP/HTTPS multiplex on hostname and stay
+#           shared.
+#
+# `bind` values must be unique — two entries on one socket cannot both be added,
+# and the failure takes the whole reconcile with it.
+exposure:
+  - name: http
+    port: 80
+    bind: 8080
+    protocol: HTTP
+    transport: TCP
+  - name: https
+    port: 443
+    bind: 8443
+    protocol: HTTPS
+    transport: TCP
+
+# Sōzu data-plane sidecar.
 sozu:
-  httpPort: 8080
-  httpsPort: 8443
   workerCount: 2
   logLevel: info
   # Listener-level knobs Sōzu parses from its own config.toml. None of these
@@ -106,12 +135,7 @@ sozu:
 service:
   type: LoadBalancer
   externalTrafficPolicy: Local
-  # Client-facing ports on the LoadBalancer (mapped to sozu.httpPort/httpsPort
-  # in the pod). These are also the ports Gateway API listeners must declare
-  # (`listeners[].port`); the chart wires them to the controller as the
-  # advertised gateway ports.
-  httpPort: 80
-  httpsPort: 443
+  # Ports come from `exposure` above — this is the single source.
   annotations: {}
 
 # Layer-4 (TCP/UDP) passthrough. Each entry maps a gateway port to a Service;
