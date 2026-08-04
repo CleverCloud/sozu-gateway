@@ -72,7 +72,7 @@ the time the LoadBalancer routes to it, the routes exist.
 
 ## 4. Gateway API (Phase 2)
 
-Installing the Gateway API CRDs (v1.2.1 standard channel), then a `GatewayClass`, a `Gateway`
+Installing the Gateway API CRDs (v1.6.1 standard channel), then a `GatewayClass`, a `Gateway`
 (HTTP + HTTPS listeners) and an `HTTPRoute` to the demo app:
 
 | Check | Result |

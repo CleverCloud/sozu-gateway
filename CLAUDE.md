@@ -113,7 +113,7 @@ golden snapshots.
 
 ### Gateway API (Phase 2)
 
-`crates/gateway-api` holds **kopium-generated** CRD types (v1.2.1 standard channel,
+`crates/gateway-api` holds **kopium-generated** CRD types (v1.6.1 standard channel,
 `--schema=disabled`; regenerate per its README — do not hand-edit). The builder's
 [`gateway` module](crates/builder/src/gateway.rs) maps GatewayClass/Gateway/HTTPRoute through the
 **same** Service→pod-IP resolver and into the **same** IR as Ingress (a route and an Ingress to one
@@ -195,7 +195,7 @@ changes.
 
 `sozu-command-lib` **2.2.0** (LGPL-3.0) against Sōzu **2.2.0**, `kube` **4**, `k8s-openapi`
 **0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
-**v1.2.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
+**v1.6.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
 `kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
 rust-version 1.88.
 

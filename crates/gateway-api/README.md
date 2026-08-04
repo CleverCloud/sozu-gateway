@@ -1,7 +1,7 @@
 # sozu-gw-gateway-api
 
 Rust types for the [Gateway API](https://gateway-api.sigs.k8s.io/) CRDs
-(`gateway.networking.k8s.io`), generated from the upstream **v1.2.1** standard channel.
+(`gateway.networking.k8s.io`), generated from the upstream **v1.6.1** standard channel.
 
 The published `gateway-api` crate targets `kube` 3 / `k8s-openapi` 0.27, which conflicts with this
 workspace's `kube` 4 / `k8s-openapi` 0.28 — so the types are generated locally against our exact
@@ -10,7 +10,7 @@ versions with [`kopium`](https://github.com/kube-rs/kopium) instead.
 ## Regenerate
 
 ```sh
-GWVER=v1.2.1
+GWVER=v1.6.1
 base="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$GWVER/config/crd/standard"
 for f in gatewayclasses gateways httproutes referencegrants; do
   curl -sSL "$base/gateway.networking.k8s.io_${f}.yaml" -o "/tmp/${f}.yaml"
