@@ -51,6 +51,13 @@ pub async fn load_initial(agent: &SozuAgentHandle, shadow_file: &str, probe_file
             ir
         }
         Err(e) => {
+            // Also the downgrade path: the IR is a versioned-by-nothing serde
+            // enum soup, so a shadow written by a newer controller can carry a
+            // variant this one has no name for. Falling back to empty is safe
+            // for traffic (everything is re-applied) but loses the baseline, so
+            // orphans from before the downgrade are not pruned until an object
+            // changes. Widening an IR enum is therefore a compatibility event,
+            // not a refactor.
             warn!(error = %e, "persisted shadow is unreadable; will re-apply");
             Ir::default()
         }

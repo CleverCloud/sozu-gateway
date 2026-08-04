@@ -130,6 +130,9 @@ pub enum RedirectStatus {
     MovedPermanently,
     /// HTTP 302
     Found,
+    /// HTTP 308. Unlike 301 it forbids a client rewriting the method to GET,
+    /// which is the whole reason an author picks it.
+    PermanentRedirect,
 }
 
 /// Rewrite the request's host and/or full path before proxying.
