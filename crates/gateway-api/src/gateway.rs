@@ -105,6 +105,11 @@ pub enum GatewayListenersAllowedRoutesNamespacesFrom {
     All,
     Selector,
     Same,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -161,6 +166,11 @@ pub struct GatewayListenersTlsCertificateRefs {
 pub enum GatewayListenersTlsMode {
     Terminate,
     Passthrough,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

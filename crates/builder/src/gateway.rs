@@ -918,9 +918,15 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
             }
             HttpRouteRulesFiltersType::RequestRedirect => {
                 if let Some(r) = &filter.request_redirect {
-                    let scheme = r.scheme.as_ref().map(|s| match s {
-                        HttpRouteRulesFiltersRequestRedirectScheme::Http => ir::Scheme::Http,
-                        HttpRouteRulesFiltersRequestRedirectScheme::Https => ir::Scheme::Https,
+                    // `Unknown` folds to None, which the scheme-less branch
+                    // below then refuses: a scheme this build cannot name is
+                    // not a scheme it may guess at.
+                    let scheme = r.scheme.as_ref().and_then(|s| match s {
+                        HttpRouteRulesFiltersRequestRedirectScheme::Http => Some(ir::Scheme::Http),
+                        HttpRouteRulesFiltersRequestRedirectScheme::Https => {
+                            Some(ir::Scheme::Https)
+                        }
+                        HttpRouteRulesFiltersRequestRedirectScheme::Unknown => None,
                     });
                     let status = match r.status_code {
                         Some(301) => ir::RedirectStatus::MovedPermanently,
@@ -980,6 +986,18 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                 problems.push(Problem::FilterUnsupported {
                     kind: format!("{:?}", filter.r#type),
                 });
+            }
+            // A filter type this build's generated types do not name: the
+            // cluster's CRDs are newer than the controller. The rule is
+            // skipped rather than served without the filter, because a
+            // filter is there to change what the response is.
+            HttpRouteRulesFiltersType::Unknown => {
+                problems.push(Problem::FilterUnsupported {
+                    kind: "a filter type this controller build does not know (its Gateway API \
+                           CRDs are newer than the types it was generated against)"
+                        .to_string(),
+                });
+                unprogrammable = true;
             }
         }
     }

@@ -217,6 +217,11 @@ pub struct HttpRouteRulesBackendRefsFiltersRequestRedirectPath {
 pub enum HttpRouteRulesBackendRefsFiltersRequestRedirectPathType {
     ReplaceFullPath,
     ReplacePrefixMatch,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -225,6 +230,11 @@ pub enum HttpRouteRulesBackendRefsFiltersRequestRedirectScheme {
     Http,
     #[serde(rename = "https")]
     Https,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -233,6 +243,11 @@ pub enum HttpRouteRulesBackendRefsFiltersRequestRedirectStatusCode {
     r#_301,
     #[serde(rename = "302")]
     r#_302,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -266,6 +281,11 @@ pub enum HttpRouteRulesBackendRefsFiltersType {
     #[serde(rename = "URLRewrite")]
     UrlRewrite,
     ExtensionRef,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -298,6 +318,11 @@ pub struct HttpRouteRulesBackendRefsFiltersUrlRewritePath {
 pub enum HttpRouteRulesBackendRefsFiltersUrlRewritePathType {
     ReplaceFullPath,
     ReplacePrefixMatch,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -430,6 +455,11 @@ pub struct HttpRouteRulesFiltersRequestRedirectPath {
 pub enum HttpRouteRulesFiltersRequestRedirectPathType {
     ReplaceFullPath,
     ReplacePrefixMatch,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -438,6 +468,11 @@ pub enum HttpRouteRulesFiltersRequestRedirectScheme {
     Http,
     #[serde(rename = "https")]
     Https,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -446,6 +481,11 @@ pub enum HttpRouteRulesFiltersRequestRedirectStatusCode {
     r#_301,
     #[serde(rename = "302")]
     r#_302,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -479,6 +519,11 @@ pub enum HttpRouteRulesFiltersType {
     #[serde(rename = "URLRewrite")]
     UrlRewrite,
     ExtensionRef,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -511,6 +556,11 @@ pub struct HttpRouteRulesFiltersUrlRewritePath {
 pub enum HttpRouteRulesFiltersUrlRewritePathType {
     ReplaceFullPath,
     ReplacePrefixMatch,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -541,6 +591,11 @@ pub struct HttpRouteRulesMatchesHeaders {
 pub enum HttpRouteRulesMatchesHeadersType {
     Exact,
     RegularExpression,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -563,6 +618,11 @@ pub enum HttpRouteRulesMatchesMethod {
     Trace,
     #[serde(rename = "PATCH")]
     Patch,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -578,6 +638,11 @@ pub enum HttpRouteRulesMatchesPathType {
     Exact,
     PathPrefix,
     RegularExpression,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -592,6 +657,11 @@ pub struct HttpRouteRulesMatchesQueryParams {
 pub enum HttpRouteRulesMatchesQueryParamsType {
     Exact,
     RegularExpression,
+    /// A member this build does not know. Kubernetes API enums are open:
+    /// a newer CRD may carry values generated before they existed, and a
+    /// closed enum would fail the whole list page rather than one object.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
