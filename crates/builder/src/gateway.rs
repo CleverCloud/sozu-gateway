@@ -603,15 +603,33 @@ pub(crate) fn build_gateway(
                 .filter(|l| l.allow_from.admits(&rns, &gw_ns, index))
                 .collect();
 
+            // Of the admitting listeners, those whose hostname the route's
+            // hostnames actually intersect. A route bound to a listener it
+            // shares no hostname with is attached to nothing: it must not read
+            // Accepted, and must not count toward that listener's
+            // attachedRoutes. The intersection depends only on the route and
+            // the listener, never on a rule, so it is settled once here.
+            let matching: Vec<&ListenerInfo> = candidates
+                .iter()
+                .copied()
+                .filter(|l| {
+                    !effective_hostnames(route.spec.hostnames.as_deref(), l.hostname.as_deref())
+                        .is_empty()
+                })
+                .collect();
+
             let mut problems = Vec::new();
             let mut resolved_refs = true;
             let mut resolved_refs_reason = "ResolvedRefs";
             // No addressable listener -> NoMatchingParent; addressable but none
-            // admits this namespace -> NotAllowedByListeners.
+            // admits this namespace -> NotAllowedByListeners; admitted but no
+            // shared hostname -> NoMatchingListenerHostname.
             let (accepted, accepted_reason) = if addressable.is_empty() {
                 (false, "NoMatchingParent")
             } else if candidates.is_empty() {
                 (false, "NotAllowedByListeners")
+            } else if matching.is_empty() {
+                (false, "NoMatchingListenerHostname")
             } else {
                 // Attribute this rule's frontends to the (route, parent) pair
                 // so a route-key collision can be reported on its result.
@@ -634,7 +652,7 @@ pub(crate) fn build_gateway(
                         frontends,
                         &rns,
                         route.spec.hostnames.as_deref(),
-                        &candidates,
+                        &matching,
                         rule,
                         &source,
                         &mut problems,
@@ -655,7 +673,7 @@ pub(crate) fn build_gateway(
             // An accepted route binds to each candidate listener (programmed or
             // not) — count it toward that listener's attachedRoutes.
             if accepted {
-                for c in &candidates {
+                for c in &matching {
                     *attached
                         .entry((gw_ns.clone(), pref.name.clone(), c.name.clone()))
                         .or_insert(0) += 1;

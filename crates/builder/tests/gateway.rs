@@ -2044,3 +2044,61 @@ fn a_listener_binds_to_the_entry_serving_its_own_port() {
         assert_eq!(f.listener.port(), 9444, "frontends follow their listener");
     }
 }
+
+#[test]
+fn a_route_sharing_no_hostname_with_its_listener_is_not_accepted() {
+    // The shape the conformance suite pins: a listener with a hostname, two
+    // routes that inherit it, and one whose own hostname intersects nothing.
+    //
+    // The odd one out is attached to nothing, so it must say so — reading
+    // Accepted while serving no traffic is the silent-acceptance this project
+    // exists to avoid — and it must not inflate the listener's attachedRoutes,
+    // which is the count of routes actually bound to it.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80, "hostname": "foo.example.com" }
+        ]}
+    }));
+    let inherits: HttpRoute = from_json(json!({
+        "metadata": { "name": "inherits", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let elsewhere: HttpRoute = from_json(json!({
+        "metadata": { "name": "elsewhere", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["not-accepted.test.com"],
+            "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![inherits, elsewhere]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    let inherits = out.routes.iter().find(|r| r.name == "inherits").unwrap();
+    assert!(inherits.parents[0].accepted);
+    let elsewhere = out.routes.iter().find(|r| r.name == "elsewhere").unwrap();
+    assert!(!elsewhere.parents[0].accepted, "it is attached to nothing");
+    assert_eq!(
+        elsewhere.parents[0].accepted_reason,
+        "NoMatchingListenerHostname"
+    );
+
+    assert_eq!(
+        out.gateways[0].listeners[0].attached_routes, 1,
+        "only the route the listener actually carries counts"
+    );
+    // And nothing was programmed for the route that matches no hostname.
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.frontends[0].hostname, "foo.example.com");
+}
