@@ -47,8 +47,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
-    request::RequestType, AddBackend, Cluster, PathRule, PathRuleKind, RedirectPolicy,
-    RedirectScheme, Request, RequestHttpFrontend, Response, ResponseStatus, RulePosition,
+    request::RequestType, AddBackend, Cluster, Header, HeaderPosition, PathRule, PathRuleKind,
+    RedirectPolicy, RedirectScheme, Request, RequestHttpFrontend, Response, ResponseStatus,
+    RulePosition,
 };
 
 fn env_or(key: &str, default: &str) -> String {
@@ -71,6 +72,12 @@ struct Case {
     path: Option<(PathRuleKind, &'static str)>,
     /// Request target to send. Defaults to `/original`.
     target: Option<&'static str>,
+    /// Header mutations on the frontend: (position, key, val). An empty `val`
+    /// is Sōzu's documented delete.
+    headers: &'static [(HeaderPosition, &'static str, &'static str)],
+    /// Extra request headers to send, so a *pre-existing* header can be
+    /// distinguished from one the proxy added.
+    send: &'static [(&'static str, &'static str)],
 }
 
 const CASES: &[Case] = &[
@@ -84,6 +91,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "path-only.probe",
@@ -96,6 +105,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "host-and-path.probe",
@@ -108,6 +119,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "dollar-literal.probe",
@@ -119,6 +132,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "redirect-301.probe",
@@ -130,6 +145,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "redirect-302.probe",
@@ -142,6 +159,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "redirect-308.probe",
@@ -153,6 +172,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "dollar-bare.probe",
@@ -164,6 +185,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "query.probe",
@@ -176,6 +199,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: Some("/original?q=1&x=2"),
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "prefix-capture.probe",
@@ -189,6 +214,63 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: Some((PathRuleKind::Regex, "^/foo(/|\\?|$)")),
         target: Some("/foo/bar/baz"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "hdr-set-request.probe",
+        question: "Gateway `set` must OVERWRITE. The proto says HeaderPosition mirrors HAProxy \
+                   set-header, which replaces. Client sends X-Env: staging, frontend sets \
+                   X-Env: prod — does the backend see one value or two?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "X-Env", "prod")],
+        send: &[("X-Env", "staging")],
+    },
+    Case {
+        host: "hdr-set-request-absent.probe",
+        question: "same set, but the client sends no X-Env — the header must appear once",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "X-Env", "prod")],
+        send: &[],
+    },
+    Case {
+        host: "hdr-delete-request.probe",
+        question: "empty val is documented as delete-by-name (HAProxy del-header parity)",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "X-Env", "")],
+        send: &[("X-Env", "staging")],
+    },
+    Case {
+        host: "hdr-set-response.probe",
+        question: "the response side of the same question: the backend answers \
+                   X-Served-By: backend and the frontend sets X-Served-By: sozu",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Response, "X-Served-By", "sozu")],
+        send: &[],
     },
     Case {
         host: "redirect-port.probe",
@@ -201,6 +283,8 @@ const CASES: &[Case] = &[
         rewrite_port: Some(8443),
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
     Case {
         host: "redirect-302-scheme-only.probe",
@@ -212,6 +296,8 @@ const CASES: &[Case] = &[
         rewrite_port: None,
         path: None,
         target: None,
+        headers: &[],
+        send: &[],
     },
 ];
 
@@ -225,25 +311,34 @@ fn spawn_echo_backend(addr: SocketAddr) -> Result<()> {
                 let mut reader = BufReader::new(stream.try_clone().expect("clone"));
                 let mut request_line = String::new();
                 let mut host = String::new();
+                // Every occurrence, in order: one X-Env means replaced, two
+                // means appended, and that is the whole question.
+                let mut seen: Vec<String> = Vec::new();
                 let _ = reader.read_line(&mut request_line);
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
                         break;
                     }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("host:") {
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("host:") {
                         host = v.trim().to_string();
+                    }
+                    if lower.starts_with("x-env:") {
+                        seen.push(line.trim().to_string());
                     }
                 }
                 let body = format!(
-                    "request-line={} backend-host={}\n",
+                    "request-line={} backend-host={} x-env=[{}]\n",
                     request_line.trim(),
-                    host
+                    host,
+                    seen.join(" | ")
                 );
                 let mut stream = stream;
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Served-By: backend\r\n\
+                     Connection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -268,14 +363,17 @@ fn apply(channel: &mut Channel<Request, Response>, label: &str, req: Request) ->
 }
 
 /// Send one request through Sōzu and return the raw response (headers + body).
-fn probe_request(dial: SocketAddr, host: &str, target: &str) -> String {
+fn probe_request(dial: SocketAddr, host: &str, target: &str, send: &[(&str, &str)]) -> String {
     let mut stream = match TcpStream::connect(dial) {
         Ok(s) => s,
         Err(e) => return format!("<connect failed: {e}>"),
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-    let request =
-        format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: sozu-probe\r\n\r\n");
+    let extra: String = send.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         User-Agent: sozu-probe\r\n{extra}\r\n"
+    );
     if let Err(e) = stream.write_all(request.as_bytes()) {
         return format!("<write failed: {e}>");
     }
@@ -291,6 +389,7 @@ fn probe_request(dial: SocketAddr, host: &str, target: &str) -> String {
 fn digest(raw: &str) -> String {
     let mut status = "<no status line>".to_string();
     let mut location = None;
+    let mut served_by: Vec<String> = Vec::new();
     let mut body = None;
     let mut in_body = false;
     for (i, line) in raw.lines().enumerate() {
@@ -308,13 +407,20 @@ fn digest(raw: &str) -> String {
             in_body = true;
             continue;
         }
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("location:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("location:") {
             location = Some(v.trim().to_string());
+        }
+        if lower.starts_with("x-served-by:") {
+            served_by.push(line.trim().to_string());
         }
     }
     let mut out = status;
     if let Some(l) = location {
         out.push_str(&format!(" | Location: {l}"));
+    }
+    if !served_by.is_empty() {
+        out.push_str(&format!(" | resp X-Served-By=[{}]", served_by.join(" ; ")));
     }
     if let Some(b) = body {
         out.push_str(&format!(" | body: {b}"));
@@ -385,6 +491,15 @@ fn main() -> Result<()> {
             rewrite_host: case.rewrite_host.map(str::to_string),
             rewrite_path: case.rewrite_path.map(str::to_string),
             rewrite_port: case.rewrite_port,
+            headers: case
+                .headers
+                .iter()
+                .map(|(position, key, val)| Header {
+                    position: *position as i32,
+                    key: key.to_string(),
+                    val: val.to_string(),
+                })
+                .collect(),
             ..Default::default()
         };
         if let Err(e) = apply(
@@ -412,7 +527,7 @@ fn main() -> Result<()> {
             println!("A: FRONTEND REJECTED — {why}\n");
             continue;
         }
-        let raw = probe_request(http_dial, case.host, target);
+        let raw = probe_request(http_dial, case.host, target, case.send);
         println!("A: {}\n", digest(&raw));
     }
 
