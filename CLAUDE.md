@@ -26,7 +26,6 @@ just image          # docker build the controller image
 just chart-lint     # helm lint + template (also rbac.allowStatusWrites + metrics/ServiceMonitor)
 just e2e            # in-cluster end-to-end (Ingress + TLS) on the current kube-context
 just e2e-gateway    # Gateway API + HTTPRoute filters (header/redirect) end-to-end
-just e2e-l4         # raw TCP (L4) via the deprecated tcp-services ConfigMap
 just e2e-l4-routes  # layer-4 through the Gateway API (TCPRoute + UDPRoute)
 just e2e-all        # every e2e suite, sharing one freshly-built image
 ```
@@ -174,10 +173,10 @@ changes.
   `ir::L4Frontend`s and the translator adds + activates the listeners dynamically over the socket —
   `ConfigState::diff` emits `Add{Tcp,Udp}Listener` + `ActivateListener` (and the reverse on removal)
   for free.
-- **Layer-4 routes have two sources, and conflicts are settled in the builder.** `TCPRoute`/
-  `UDPRoute` attached to a `protocol: TCP`/`UDP` Gateway listener are the supported path; the
-  cluster-global `tcp/udp-services` ConfigMaps are deprecated and lose any socket a route also
-  claims. Two routes contesting a socket are settled by oldest `creationTimestamp` **then**
+- **Layer-4 routes are `TCPRoute`/`UDPRoute` on a `protocol: TCP`/`UDP` Gateway listener, and
+  conflicts are settled in the builder.** (The cluster-global `tcp/udp-services` ConfigMaps are
+  gone — see [docs/UPGRADING.md](docs/UPGRADING.md).) Two routes contesting a socket are settled by
+  oldest `creationTimestamp` **then**
   `namespace/name` — the timestamp has one-second granularity, so without the second key the winner
   would follow cache iteration order and flip between reconciles. The translator's
   `check_l4_conflicts` stays as a net, but it must never be what settles this: it returns an error

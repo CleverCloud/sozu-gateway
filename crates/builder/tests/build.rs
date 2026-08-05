@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
+use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -88,24 +88,6 @@ fn ingress_tls() -> Ingress {
             }]
         }
     }))
-}
-
-/// A `BuildConfig` whose exposure table carries the chart defaults plus the
-/// given L4 ports. An L4 mapping is only served on a port the gateway exposes,
-/// so an L4 fixture has to say which.
-fn cfg_exposing_tcp(ports: &[(u16, Option<&str>)]) -> BuildConfig {
-    let mut cfg = BuildConfig::default();
-    for (port, owner) in ports {
-        cfg.exposure.push(ExposedPort {
-            name: format!("tcp-{port}"),
-            port: *port,
-            bind: *port,
-            protocol: ExposedProtocol::Tcp,
-            transport: None,
-            owner: owner.map(str::to_string),
-        });
-    }
-    cfg
 }
 
 #[test]
@@ -866,160 +848,6 @@ fn identical_duplicate_routes_are_benign_and_unreported() {
 }
 
 #[test]
-fn tcp_services_duplicate_port_is_dropped_and_reported() {
-    // Distinct ConfigMap keys can resolve to the same port. L4 gives a port
-    // exactly one Service, so the later mapping must be dropped *and* reported:
-    // silently ignoring it leaves the operator guessing, and passing both on to
-    // the translator hits `check_l4_conflicts`, which fails the whole
-    // translation — blocking every routing change, not just this port's.
-    // Two *different*, both-resolvable Services on one port: the case the
-    // translator's `check_l4_conflicts` turns into a whole-translation failure.
-    let other_svc: Service = from_json(json!({
-        "apiVersion": "v1", "kind": "Service",
-        "metadata": { "name": "other", "namespace": "demo" },
-        "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
-    }));
-    let other_slice: EndpointSlice = from_json(json!({
-        "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
-        "metadata": { "name": "other-abc", "namespace": "demo",
-            "labels": { "kubernetes.io/service-name": "other" } },
-        "addressType": "IPv4",
-        "ports": [{ "name": "http", "port": 8080 }],
-        "endpoints": [{ "addresses": ["10.244.0.9"], "conditions": { "ready": true } }]
-    }));
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": {
-            "5432": "demo/web:80",
-            "05432": "demo/other:80"
-        }
-    }));
-    let inputs = Inputs {
-        services: arcs(vec![web_service(), other_svc]),
-        endpointslices: arcs(vec![web_slice(), other_slice]),
-        tcp_services: Some(cm),
-        ..Default::default()
-    };
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-
-    assert_eq!(
-        out.ir.l4_frontends.len(),
-        1,
-        "one listen port carries one route: {:?}",
-        out.ir.l4_frontends
-    );
-    assert_eq!(out.ir.l4_frontends[0].listener.to_string(), "0.0.0.0:5432");
-
-    // Stated as the property the translator relies on: no two L4 frontends
-    // claim one (protocol, listen address), so `check_l4_conflicts` can never
-    // fail on an IR this builder produced.
-    let mut claims: Vec<_> = out
-        .ir
-        .l4_frontends
-        .iter()
-        .map(|f| (f.protocol, f.listener))
-        .collect();
-    let before = claims.len();
-    claims.sort();
-    claims.dedup();
-    assert_eq!(claims.len(), before, "one address, one claim");
-    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    assert!(
-        problems
-            .iter()
-            .any(|p| matches!(p, Problem::L4PortDuplicate { port: 5432 })),
-        "the losing entry is reported, not silently ignored: {problems:?}"
-    );
-
-    // The winner is the lexicographically first key and stays the winner on
-    // every pass — a flapping choice would churn Sōzu on each resync.
-    let again = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-    assert_eq!(again.ir.l4_frontends, out.ir.l4_frontends);
-}
-
-#[test]
-fn a_broken_l4_entry_does_not_lock_the_port_against_a_working_one() {
-    // "05432" sorts first and fails to resolve. If a failed entry claimed the
-    // port anyway, the working "5432" mapping would be dropped as a duplicate
-    // and the port would stop routing entirely — a typo taking down live
-    // traffic, the opposite of what the duplicate check is for.
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": {
-            "05432": "demo/does-not-exist:80",
-            "5432": "demo/web:80"
-        }
-    }));
-    let inputs = Inputs {
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
-        tcp_services: Some(cm),
-        ..Default::default()
-    };
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-
-    assert_eq!(
-        out.ir.l4_frontends.len(),
-        1,
-        "the working mapping still routes: {:?}",
-        out.ir.l4_frontends
-    );
-    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    assert!(problems
-        .iter()
-        .any(|p| matches!(p, Problem::ServiceNotFound { .. })));
-    assert!(
-        !problems
-            .iter()
-            .any(|p| matches!(p, Problem::L4PortDuplicate { .. })),
-        "a failed entry never claimed the port: {problems:?}"
-    );
-}
-
-#[test]
-fn tcp_services_configmap_maps_to_l4_frontend() {
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": {
-            "5432": "demo/web:80",   // valid -> one L4 frontend + pod-IP backends
-            "80": "demo/web:80",     // reserved (HTTP listener) -> reported
-            "oops": "not-a-mapping"  // unparseable -> reported
-        }
-    }));
-    let inputs = Inputs {
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
-        tcp_services: Some(cm),
-        ..Default::default()
-    };
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-
-    assert_eq!(
-        out.ir.l4_frontends.len(),
-        1,
-        "only the valid mapping yields a route"
-    );
-    let f = &out.ir.l4_frontends[0];
-    assert!(matches!(f.protocol, ir::L4Protocol::Tcp));
-    assert_eq!(f.listener.to_string(), "0.0.0.0:5432");
-    assert_eq!(out.ir.backends.len(), 2, "L4 service resolved to pod IPs");
-
-    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    assert!(
-        problems
-            .iter()
-            .any(|p| matches!(p, Problem::L4PortNotExposed { port: 80, .. })),
-        "80 is exposed for HTTP, not for TCP — the mapping has nowhere to land"
-    );
-    assert!(problems
-        .iter()
-        .any(|p| matches!(p, Problem::InvalidL4Mapping { .. })));
-}
-
-#[test]
 fn referenced_services_cover_resolved_and_unresolved_backends() {
     // The EndpointSlice ping filter feeds on this set: a Service must be in it
     // whether it resolved or not — a slice appearing later for a still-broken
@@ -1039,26 +867,20 @@ fn referenced_services_cover_resolved_and_unresolved_backends() {
             }]
         }
     }));
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": { "5432": "db/postgres:5432" } // service absent -> still referenced
-    }));
     let inputs = Inputs {
         ingresses: arcs(vec![ingress_tls(), broken]),
         services: arcs(vec![web_service()]),
         endpointslices: arcs(vec![web_slice()]),
         secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
-        tcp_services: Some(cm),
         ..Default::default()
     };
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
+    let out = build(&BuildConfig::default(), &inputs);
 
     let referenced: Vec<&str> = out.referenced_services.iter().map(|s| s.as_str()).collect();
     assert_eq!(
         referenced,
-        vec!["db/postgres", "demo/ghost", "demo/web"],
-        "resolved (Ingress), unresolved (Ingress) and L4 targets all count"
+        vec!["demo/ghost", "demo/web"],
+        "resolved and unresolved backends both count"
     );
 }
 
@@ -1286,70 +1108,4 @@ fn an_l4_port_names_its_owner_and_http_stays_shared() {
     // A port nobody exposes is simply not on the menu.
     assert!(cfg.exposed(ExposedProtocol::Tcp, 9999).is_none());
     assert_eq!(cfg.advertised_ports(ExposedProtocol::Tcp), vec![5432]);
-}
-
-#[test]
-fn an_l4_mapping_on_an_unexposed_port_is_reported_not_programmed() {
-    // Sōzu would listen on it, but no Service port routes there, so the mapping
-    // is dead. A listener nobody can dial is worse than none: it reads as
-    // working.
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": { "9999": "demo/web:80" }
-    }));
-    let inputs = Inputs {
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
-        tcp_services: Some(cm),
-        ..Default::default()
-    };
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-
-    assert!(out.ir.l4_frontends.is_empty(), "nothing is programmed");
-    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    let reported = problems
-        .iter()
-        .find(|p| matches!(p, Problem::L4PortNotExposed { port: 9999, .. }))
-        .expect("the unexposed port is named");
-    // The message lists what was on offer — knowing 9999 is wrong is useless
-    // without knowing 5432 was available.
-    assert!(reported.to_string().contains("5432"), "{reported}");
-}
-
-#[test]
-fn an_l4_port_reserved_for_one_namespace_refuses_another() {
-    let cm: ConfigMap = from_json(json!({
-        "apiVersion": "v1", "kind": "ConfigMap",
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": { "5432": "demo/web:80" }
-    }));
-    let inputs = Inputs {
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
-        tcp_services: Some(cm),
-        ..Default::default()
-    };
-
-    // Reserved for `data`, claimed by `demo`: refused, because there is no
-    // hostname down here to arbitrate between two claims on one port.
-    let out = build(&cfg_exposing_tcp(&[(5432, Some("data"))]), &inputs);
-    assert!(out.ir.l4_frontends.is_empty());
-    let problems: Vec<&Problem> = out.l4_results.iter().flat_map(|r| &r.problems).collect();
-    assert!(
-        problems.iter().any(|p| matches!(
-            p,
-            Problem::L4PortNotOwned { port: 5432, owner, claimed_by }
-                if owner == "data" && claimed_by == "demo"
-        )),
-        "{problems:?}"
-    );
-
-    // Reserved for the namespace that claims it: served.
-    let out = build(&cfg_exposing_tcp(&[(5432, Some("demo"))]), &inputs);
-    assert_eq!(out.ir.l4_frontends.len(), 1);
-
-    // Unreserved: shared, so anyone may claim it.
-    let out = build(&cfg_exposing_tcp(&[(5432, None)]), &inputs);
-    assert_eq!(out.ir.l4_frontends.len(), 1);
 }

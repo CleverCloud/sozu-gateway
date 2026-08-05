@@ -59,7 +59,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `TCPRoute` / `UDPRoute` | ✅ | one Service `backendRef`; a socket carries exactly one route, and a second claimant loses on `creationTimestamp` then `namespace/name` (`L4RouteConflict`) — never by failing the reconcile |
 | Gateway API | `GRPCRoute` / `TLSRoute` | ❌ | |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
-| Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` (or the deprecated `tcp/udp-services` ConfigMaps); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
+| Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
@@ -103,10 +103,9 @@ One annotation is read from the **Ingress** instead (it depends on that Ingress'
 
 ## L4 (TCP/UDP)
 
-Raw TCP/UDP forwarding has **two** front ends. There is no host multiplexing at
-layer 4 either way: one port forwards to exactly one Service.
-
-### TCPRoute / UDPRoute (supported)
+Raw TCP/UDP forwarding is a `TCPRoute` or a `UDPRoute` on a layer-4 `Gateway`
+listener. There is no host multiplexing at layer 4: one port forwards to exactly
+one Service.
 
 Declare the port in the chart's `exposure` table — only Helm can open a port on
 the Service — then point a `Gateway` listener and a route at it:
@@ -145,25 +144,9 @@ A full example is in [`examples/api-gateway/l4-routes.yaml`](../examples/api-gat
   reject it obscurely. Layer-4 traffic therefore lives on a port TLS clients do
   not dial by default.
 
-### `tcp/udp-services` ConfigMaps (deprecated)
+The cluster + backends resolve to pod IPs exactly like HTTP, so hot reload and
+pruning work the same way.
 
-The ingress-nginx convention, pointed to by `--tcp-services-configmap` /
-`--udp-services-configmap` (Helm `l4.tcpServices` / `l4.udpServices`):
-
-```yaml
-# ConfigMap data — "<gateway-port>": "<namespace>/<service>:<service-port>"
-data:
-  "5432": "demo/postgres:5432"   # TCP :5432 -> the postgres Service
-```
-
-It still works, and will be removed. The reason is not tidiness: the map is
-cluster-global and has no admission control whatsoever — anyone who can edit it
-routes any port to any Service in any namespace, with no ReferenceGrant and no
-Gateway to consent. Where a route and an entry name the same socket, the route
-wins and the entry is reported (`L4PortClaimedByRoute`).
-
-Both paths resolve the cluster + backends to pod IPs exactly like HTTP, so hot
-reload and pruning work the same way. An entry mapping a port the `exposure`
-table does not carry is reported (`L4PortNotExposed`) and not programmed: the
-Service would have no port routing to it, so a listener nobody can dial reads as
-working while serving nobody.
+> **Removed in this release:** the `tcp/udp-services` ConfigMaps. Layer-4
+> routing now requires the Gateway API CRDs — see [UPGRADING.md](UPGRADING.md)
+> for why, and how to migrate.

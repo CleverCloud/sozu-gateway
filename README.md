@@ -82,7 +82,6 @@ The controller is configured entirely through the Helm chart
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
 | `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status for **every** route kind) |
 | `metrics.enabled` | `false` | Serve Prometheus `/metrics` (pulled from Sōzu over the socket) |
-| `l4.tcpServices` / `udpServices` | `{}` | **Deprecated** (use `TCPRoute`/`UDPRoute`): map `"<port>": "<ns>/<svc>:<port>"` for raw TCP / UDP forwarding |
 
 A few behaviours worth knowing:
 
@@ -98,6 +97,7 @@ A few behaviours worth knowing:
 - [Feature matrix](docs/features.md) — supported / planned / not supported, with Sōzu's hard limits.
 - [Installation guide](docs/getting-started/installation.md) — install, verify, Gateway API, source, upgrade, uninstall.
 - [End-to-end results](docs/E2E-RESULTS.md) — what was validated on a live cluster, and how to reproduce it.
+- [Upgrading](docs/UPGRADING.md) — breaking changes and how to migrate.
 - [Examples](examples/README.md) — Ingress + Gateway API manifests (TLS, redirects, L4, header filters, …).
 - [PROTOCOL.md](PROTOCOL.md) — the verified Sōzu command-socket wire protocol.
 

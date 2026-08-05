@@ -401,11 +401,10 @@ fn l4_frontend_request(f: &ir::L4Frontend) -> Request {
             cluster_id: f.cluster_id.clone(),
             address: f.listener.into(),
             tags: Default::default(),
-            // SNI/ALPN routing (sozu 2.2.0) is not wired: no source of layer-4
-            // routes carries a hostname to read it from. `tcp-services` has no
-            // such field, and neither does TCPRoute v1 — only TLSRoute does, and
-            // there `hostnames` is required. Absent `sni` is Sōzu's raw-TCP
-            // fallback: the frontend matches whatever the ClientHello says.
+            // SNI/ALPN routing (sozu 2.2.0) is not wired: TCPRoute v1 carries no
+            // hostname to read it from — only TLSRoute does, and there
+            // `hostnames` is required. Absent `sni` is Sōzu's raw-TCP fallback:
+            // the frontend matches whatever the ClientHello says.
             sni: None,
             alpn: vec![],
         })

@@ -66,19 +66,12 @@ caught here rather than left to `helm install` to reject obscurely.
     {{- $_ := set $l7 $e.protocol (add1 (get $l7 $e.protocol)) -}}
   {{- end -}}
 {{- end -}}
+{{- if or (.Values.l4).tcpServices (.Values.l4).udpServices -}}
+  {{- fail "l4.tcpServices/l4.udpServices are removed — layer-4 routing is a TCPRoute or a UDPRoute now. Helm ignores unknown values, so this check exists to stop an upgrade from silently dropping your layer-4 routes. Migration: docs/UPGRADING.md" -}}
+{{- end -}}
 {{- range $proto, $count := $l7 -}}
   {{- if ne (int $count) 1 -}}
     {{- fail (printf "exposure must hold exactly one %s entry, found %d: Sōzu's HTTP and HTTPS listeners are declared in config.toml and bound at boot, one per protocol — re-creating one would drop its certificate store, so there is nowhere for a second to come from. Layer-4 (TCP/UDP) entries have no such limit" $proto (int $count)) -}}
-  {{- end -}}
-{{- end -}}
-{{- range $port, $svc := .Values.l4.tcpServices -}}
-  {{- if not (hasKey $ports (printf "%s/TCP" (toString $port))) -}}
-    {{- fail (printf "l4.tcpServices maps port %v to %q, but no exposure entry advertises %v on TCP — the Service would have no port routing there, so the controller reports the mapping (L4PortNotExposed) and programs nothing. Add: {name: tcp-%v, port: %v, bind: %v, protocol: TCP, transport: TCP}" $port $svc $port $port $port $port) -}}
-  {{- end -}}
-{{- end -}}
-{{- range $port, $svc := .Values.l4.udpServices -}}
-  {{- if not (hasKey $ports (printf "%s/UDP" (toString $port))) -}}
-    {{- fail (printf "l4.udpServices maps port %v to %q, but no exposure entry advertises %v on UDP — the Service would have no port routing there, so the controller reports the mapping (L4PortNotExposed) and programs nothing. Add: {name: udp-%v, port: %v, bind: %v, protocol: UDP, transport: UDP}" $port $svc $port $port $port $port) -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

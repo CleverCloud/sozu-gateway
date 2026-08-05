@@ -183,7 +183,7 @@ pub struct Ir {
     pub frontends: Vec<Frontend>,
     pub backends: Vec<Backend>,
     pub certificates: Vec<Certificate>,
-    /// Raw TCP/UDP routes (L4). Empty unless tcp/udp-services are configured.
+    /// Raw TCP/UDP routes (L4), from TCPRoute/UDPRoute. Empty otherwise.
     #[serde(default)]
     pub l4_frontends: Vec<L4Frontend>,
 }

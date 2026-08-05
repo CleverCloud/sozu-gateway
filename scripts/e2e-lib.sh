@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shared helpers for the end-to-end scripts (e2e.sh, e2e-gateway.sh, e2e-l4.sh).
+# Shared helpers for the end-to-end scripts (e2e.sh, e2e-gateway.sh,
+# e2e-l4-routes.sh).
 # Source this file; do not run it directly.
 #
 # The controller image is pushed to an ephemeral, anonymous registry (ttl.sh) by
@@ -45,7 +46,7 @@ ensure_image() {
 }
 
 # Install/upgrade the add-on. Extra `helm --set` flags are passed through, e.g.
-#   ensure_addon --set l4.tcpServices.9000="sozu-demo/echo-tcp:9000"
+#   ensure_addon --set-json 'exposure=[...]' 
 ensure_addon() {
   echo "==> helm upgrade --install $RELEASE $*"
   helm upgrade --install "$RELEASE" "$ROOT/charts/sozu-gateway" -n "$NS" --create-namespace \

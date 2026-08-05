@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end test: deploy the sozu-gateway add-on + a demo Ingress app on the
 # current kube-context and verify HTTP + HTTPS traffic flows through Sōzu.
-# Companion suites: e2e-gateway.sh (Gateway API + filters), e2e-l4.sh (raw TCP).
+# Companion suites: e2e-gateway.sh (Gateway API + filters),
+# e2e-l4-routes.sh (TCPRoute/UDPRoute).
 #
 # The controller image is pushed to an ephemeral, anonymous registry (ttl.sh) by
 # default so this works without registry credentials. Export IMAGE to use your

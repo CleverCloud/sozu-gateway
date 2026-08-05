@@ -3,9 +3,6 @@
 # UDPRoute attached to TCP/UDP Gateway listeners, forwarded by Sōzu to echo
 # backends, probed by an in-cluster socat client (see `l4_probe`).
 #
-# This is the supported replacement for the l4.tcpServices/udpServices
-# ConfigMaps (scripts/e2e-l4.sh still covers those while they exist).
-#
 # It also exercises the conflict path: a second TCPRoute claiming the same port
 # must lose, say so on its own status, and — the part that matters — leave every
 # other route serving.
@@ -31,8 +28,8 @@ l4_probe() {
 
 # Release the ports this suite claims, pass or fail. The suites share the demo
 # namespace and run in sequence, and this one is the only one that *claims a
-# socket*: leaving its TCPRoute behind makes the next suite's tcp-services
-# mapping lose port 9000 to it — correctly, and confusingly.
+# socket*: leaving its TCPRoute behind would make a later suite contend for
+# port 9000 with it.
 #
 # Only the routing objects. The echo Deployments and Services are shared demo
 # fixtures other suites also apply, and deleting them here would race their

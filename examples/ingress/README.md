@@ -11,7 +11,6 @@ sozu-demo`) and the IngressClass `sozu`. Hosts are fictional — reach them with
 | [ssl-redirect.yaml](ssl-redirect.yaml) | Automatic **HTTP→HTTPS** redirect | on by default for TLS hosts; opt out with `sozu.io/ssl-redirect: "false"` |
 | [load-balancing-and-sticky.yaml](load-balancing-and-sticky.yaml) | LB algorithm + **sticky sessions** | Service annotations `sozu.io/load-balancing`, `sozu.io/sticky-sessions` |
 | [connection-limit.yaml](connection-limit.yaml) | **Per-source-IP connection limit** | Service annotations `sozu.io/max-connections-per-ip`, `sozu.io/retry-after` |
-| [l4-tcp.yaml](l4-tcp.yaml) | Raw **TCP (L4)** forwarding | Helm `l4.tcpServices` (see the file header) |
 | [external-dns.yaml](external-dns.yaml) | **external-dns** integration | DNS from the Ingress host + the controller-published `.status.loadBalancer` (`rbac.allowStatusWrites=true`) |
 | [cert-manager.yaml](cert-manager.yaml) | **cert-manager** automatic TLS | `cert-manager.io/cluster-issuer` annotation + `spec.tls.secretName` |
 

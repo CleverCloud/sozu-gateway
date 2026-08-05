@@ -9,13 +9,11 @@ the shared namespace).
 
 - **[ingress/](ingress/)** — the Kubernetes **Ingress** API and Service
   annotations: TLS, automatic HTTP→HTTPS redirect, load-balancing algorithm &
-  sticky sessions, per-IP connection limit, and raw TCP (L4) forwarding through
-  the deprecated `tcp-services` ConfigMap.
+  sticky sessions, and the per-IP connection limit.
 - **[api-gateway/](api-gateway/)** — the **Gateway API**
   (`GatewayClass`/`Gateway`/`HTTPRoute`): routing plus header/redirect/rewrite
   filters, and layer-4 routing with `TCPRoute`/`UDPRoute`
-  ([l4-routes.yaml](api-gateway/l4-routes.yaml)) — the supported replacement for
-  the ConfigMap above. Requires the Gateway API CRDs.
+  ([l4-routes.yaml](api-gateway/l4-routes.yaml)). Requires the Gateway API CRDs.
 
 Send traffic through the proxy using the Service's external IP (or a
 port-forward), with a `Host` header or `--resolve` for the fictional hostnames:

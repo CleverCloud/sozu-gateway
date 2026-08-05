@@ -160,30 +160,6 @@ service:
   # Ports come from `exposure` above — this is the single source.
   annotations: {}
 
-# DEPRECATED — use TCPRoute/UDPRoute instead; these maps will be removed.
-#
-# Layer-4 (TCP/UDP) passthrough, ingress-nginx style. Each entry maps a gateway
-# port to a Service; the port is exposed on the LoadBalancer and routed by Sōzu
-# (one port → one Service, no host routing). Ports must be > 1024 (the data
-# plane runs unprivileged). Enabling either map grants the controller ConfigMap
-# read access and points it at the rendered map(s).
-#
-# Why it is going away: this map is cluster-global and has no admission control
-# at all. Anyone who can edit it routes any port to any Service in any
-# namespace, with no ReferenceGrant and no Gateway to consent. A
-# TCPRoute/UDPRoute goes through the Gateway's listener, its `owner`, and
-# ReferenceGrant — so where both name the same socket, the route wins and the
-# map entry is reported (`L4PortClaimedByRoute`), not silently dropped.
-#
-# Every mapped port must also be an `exposure` entry: `exposure` is the single
-# source of the Service's ports, and the controller refuses to program a mapping
-# the table does not carry (`L4PortNotExposed`) because nothing would route to
-# it. The chart fails the render rather than letting you discover that at
-# runtime.
-l4:
-  tcpServices: {}   # "5432": "demo/postgres:5432"
-  udpServices: {}   # "5353": "demo/coredns:53"
-
 # Both containers run as this uid so they can share the command socket on the
 # emptyDir volume.
 runAsUser: 1000

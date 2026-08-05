@@ -1877,32 +1877,6 @@ fn an_l4_listener_honours_the_ports_owner() {
     )));
 }
 
-/// The deprecated ConfigMap path and a route can name the same socket. The
-/// route wins — it passed the Gateway's admission controls, the cluster-global
-/// map passed none — and the entry says so instead of vanishing.
-#[test]
-fn a_route_beats_a_tcp_services_entry_on_the_same_socket() {
-    let mut inputs = l4_inputs(
-        vec![tcp_route(
-            "db",
-            None,
-            json!([{ "name": "postgres", "port": 5432 }]),
-        )],
-        vec![],
-    );
-    inputs.tcp_services = Some(from_json(json!({
-        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
-        "data": { "5432": "demo/postgres-b:5432" }
-    })));
-    let out = build(&l4_config(), &inputs);
-
-    assert_eq!(out.ir.l4_frontends.len(), 1);
-    assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
-    assert!(out.l4_results[0].problems.iter().any(
-        |p| matches!(p, Problem::L4PortClaimedByRoute { port: 5432, route } if route == "demo/db")
-    ));
-}
-
 /// A listener attaches to the exposure entry that serves *its own* port, not
 /// to the first entry of its protocol. With several HTTPS ports exposed,
 /// picking the first would land a Gateway's routes — and its certificate — on

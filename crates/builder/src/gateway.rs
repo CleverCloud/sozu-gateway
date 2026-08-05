@@ -141,9 +141,6 @@ pub(crate) struct GatewayBuildResults {
     pub routes: Vec<RouteResult>,
     /// Layer-4 frontends from TCPRoute/UDPRoute, port conflicts already settled.
     pub l4_frontends: Vec<ir::L4Frontend>,
-    /// Which route (`namespace/name`) won each layer-4 socket, so the
-    /// deprecated ConfigMap path can stand down from one it also maps.
-    pub l4_claims: BTreeMap<(ir::L4Protocol, SocketAddr), String>,
 }
 
 /// A listener protocol this controller serves, and the one route kind that
@@ -670,7 +667,7 @@ pub(crate) fn build_gateway(
     // 4. TCPRoutes / UDPRoutes on the layer-4 listeners. Same Service→pod-IP
     // resolver, same Gateway admission rules; the port conflicts they can
     // create are settled inside, never left to the translator.
-    let (l4_frontends, l4_claims) = attach_l4_routes(
+    let l4_frontends = attach_l4_routes(
         inputs,
         index,
         clusters,
@@ -710,7 +707,6 @@ pub(crate) fn build_gateway(
         gateways,
         routes,
         l4_frontends,
-        l4_claims,
     }
 }
 
@@ -1556,12 +1552,9 @@ fn resolve_l4_backend(
 /// **Conflicts are settled here, not in the translator.** The translator's
 /// `check_l4_conflicts` returns an error that `reconcile` propagates with `?`,
 /// which fails the *entire* reconcile — every HTTP route in the cluster
-/// included. That was tolerable while the only source was a ConfigMap, whose
-/// `BTreeMap` keys make a duplicate impossible by construction. A two-object
-/// API has no such guarantee, and one tenant's second TCPRoute must not be able
-/// to stop routing for everyone else. So the loser is dropped with a Problem on
-/// its own status, and the translator's guard is left as a net that should now
-/// never fire.
+/// included. One tenant's second TCPRoute must not be able to stop routing for
+/// everyone else, so the loser is dropped with a Problem on its own status and
+/// the translator's guard is left as a net that should never fire.
 ///
 /// The tie-break is oldest `creationTimestamp`, then `namespace/name`. The
 /// second key is not decoration: `creationTimestamp` has one-second
@@ -1577,10 +1570,7 @@ fn attach_l4_routes(
     gw_listeners: &BTreeMap<(String, String), Vec<ListenerInfo>>,
     routes: &mut Vec<RouteResult>,
     attached: &mut BTreeMap<(String, String, String), i32>,
-) -> (
-    Vec<ir::L4Frontend>,
-    BTreeMap<(ir::L4Protocol, SocketAddr), String>,
-) {
+) -> Vec<ir::L4Frontend> {
     let mut views: Vec<L4RouteView> = Vec::new();
     views.extend(inputs.tcp_routes.iter().map(|r| L4RouteView::of_tcp(r)));
     views.extend(inputs.udp_routes.iter().map(|r| L4RouteView::of_udp(r)));
@@ -1734,11 +1724,7 @@ fn attach_l4_routes(
         }
     }
     l4_frontends.sort_by_key(|f| (f.protocol, f.listener));
-    let claims = winners
-        .into_iter()
-        .map(|(socket, (_, route))| (socket, route))
-        .collect();
-    (l4_frontends, claims)
+    l4_frontends
 }
 
 /// Is a cross-namespace reference allowed by a `ReferenceGrant` in the target

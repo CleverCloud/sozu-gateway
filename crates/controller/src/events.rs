@@ -21,10 +21,10 @@
 //!
 //! Every problem an *object* owns is published on that object, whatever its
 //! kind: the route kinds carry theirs on the route, which is why the owner's
-//! kind travels in the build result instead of being a literal here. The one
-//! exception is the `tcp/udp-services` ConfigMap path, whose "owner" is a map
-//! entry rather than an object anybody can describe — those problems reach
-//! controller logs only.
+//! kind travels in the build result instead of being a literal here.
+//!
+//! Every problem now has one: layer-4 routing is a TCPRoute or a UDPRoute, not
+//! an entry in a cluster-global map with nobody to describe.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -191,7 +191,6 @@ mod tests {
             gateway_classes: vec![],
             gateways: vec![],
             routes: vec![],
-            l4_results: vec![],
             referenced_services: Default::default(),
         }
     }

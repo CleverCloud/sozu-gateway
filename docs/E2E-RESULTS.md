@@ -250,9 +250,8 @@ The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` Gat
 ```sh
 just e2e            # section 1: Ingress + TLS — install + demo app + HTTP/HTTPS + hot removal
 just e2e-gateway    # sections 4–5: Gateway API routing + header/redirect filters
-just e2e-l4         # raw TCP (L4) via the deprecated tcp-services ConfigMap
 just e2e-l4-routes  # section 5b: TCPRoute + UDPRoute through the Gateway API
-just e2e-all        # all four, sharing one freshly-built image
+just e2e-all        # all three, sharing one freshly-built image
 ```
 
 Each suite builds + pushes the controller image to the anonymous `ttl.sh` registry by default (no
