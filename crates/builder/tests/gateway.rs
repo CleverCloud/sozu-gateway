@@ -11,7 +11,7 @@ use k8s_openapi::ByteString;
 use serde_json::json;
 
 use sozu_gw_builder::{build, BuildConfig, ExposedPort, ExposedProtocol, Inputs, Problem};
-use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
@@ -1498,4 +1498,466 @@ fn cert_grant_with_wrong_from_group_is_not_permitted() {
     let l = &out.gateways[0].listeners[0];
     assert!(!l.resolved_refs);
     assert_eq!(l.resolved_refs_reason, "RefNotPermitted");
+}
+
+// ---------------------------------------------------------------------------
+// Layer-4 routes (TCPRoute / UDPRoute)
+// ---------------------------------------------------------------------------
+
+/// The chart defaults plus one exposed TCP port and one exposed UDP port.
+fn l4_config() -> BuildConfig {
+    let mut cfg = BuildConfig::default();
+    cfg.exposure.push(ExposedPort {
+        name: "postgres".to_string(),
+        port: 5432,
+        bind: 5432,
+        protocol: ExposedProtocol::Tcp,
+        transport: Some("TCP".to_string()),
+        owner: None,
+    });
+    cfg.exposure.push(ExposedPort {
+        name: "dns".to_string(),
+        port: 5353,
+        bind: 5353,
+        protocol: ExposedProtocol::Udp,
+        transport: Some("UDP".to_string()),
+        owner: None,
+    });
+    cfg
+}
+
+fn l4_gateway() -> Gateway {
+    from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "postgres", "protocol": "TCP", "port": 5432 },
+            { "name": "dns", "protocol": "UDP", "port": 5353 }
+        ]}
+    }))
+}
+
+/// A Service with one ready pod IP, so an L4 route resolves to a real backend.
+fn l4_service(name: &str, port: i32) -> Service {
+    from_json(json!({
+        "metadata": { "name": name, "namespace": "demo" },
+        "spec": { "ports": [{ "name": "svc", "port": port, "targetPort": port }] }
+    }))
+}
+
+fn l4_slice(name: &str, port: i32, ip: &str) -> EndpointSlice {
+    from_json(json!({
+        "metadata": { "name": format!("{name}-1"), "namespace": "demo",
+            "labels": { "kubernetes.io/service-name": name } },
+        "addressType": "IPv4",
+        "ports": [{ "name": "svc", "port": port }],
+        "endpoints": [{ "addresses": [ip], "conditions": { "ready": true } }]
+    }))
+}
+
+fn tcp_route(name: &str, created: Option<&str>, backend: serde_json::Value) -> TcpRoute {
+    let mut meta = json!({ "name": name, "namespace": "demo",
+        "uid": format!("44444444-4444-4444-4444-{name:0>12}") });
+    if let Some(created) = created {
+        meta["creationTimestamp"] = json!(created);
+    }
+    from_json(json!({
+        "metadata": meta,
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "rules": [{ "backendRefs": backend }]
+        }
+    }))
+}
+
+fn udp_route(name: &str) -> UdpRoute {
+    from_json(json!({
+        "metadata": { "name": name, "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "rules": [{ "backendRefs": [{ "name": "coredns", "port": 53 }] }]
+        }
+    }))
+}
+
+fn l4_inputs(tcp: Vec<TcpRoute>, udp: Vec<UdpRoute>) -> Inputs {
+    Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![l4_gateway()]),
+        tcp_routes: arcs(tcp),
+        udp_routes: arcs(udp),
+        services: arcs(vec![
+            l4_service("postgres", 5432),
+            l4_service("postgres-b", 5432),
+            l4_service("coredns", 53),
+        ]),
+        endpointslices: arcs(vec![
+            l4_slice("postgres", 5432, "10.244.0.10"),
+            l4_slice("postgres-b", 5432, "10.244.0.11"),
+            l4_slice("coredns", 53, "10.244.0.12"),
+        ]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn tcp_and_udp_routes_map_to_l4_frontends() {
+    let inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            Some("2026-01-01T00:00:00Z"),
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![udp_route("dns")],
+    );
+    let out = build(&l4_config(), &inputs);
+
+    assert_eq!(out.ir.l4_frontends.len(), 2, "one TCP + one UDP frontend");
+    let tcp = out
+        .ir
+        .l4_frontends
+        .iter()
+        .find(|f| f.protocol == ir::L4Protocol::Tcp)
+        .expect("a TCP frontend");
+    assert_eq!(tcp.listener.port(), 5432, "the exposure entry's bind");
+    assert_eq!(tcp.cluster_id, "demo.postgres.5432");
+    let udp = out
+        .ir
+        .l4_frontends
+        .iter()
+        .find(|f| f.protocol == ir::L4Protocol::Udp)
+        .expect("a UDP frontend");
+    assert_eq!(udp.cluster_id, "demo.coredns.53");
+
+    // Both routes report themselves accepted on their listener, and each
+    // listener counts its attached route.
+    assert_eq!(out.routes.len(), 2);
+    for r in &out.routes {
+        assert!(r.parents[0].accepted, "{} not accepted", r.name);
+        assert!(r.parents[0].resolved_refs, "{} refs unresolved", r.name);
+        assert!(r.parents[0].problems.is_empty());
+    }
+    for l in &out.gateways[0].listeners {
+        assert!(l.programmed, "listener {} not programmed", l.name);
+        assert_eq!(l.attached_routes, 1, "listener {}", l.name);
+    }
+    assert_eq!(out.gateways[0].listeners[0].supported_kinds, ["TCPRoute"]);
+    assert_eq!(out.gateways[0].listeners[1].supported_kinds, ["UDPRoute"]);
+}
+
+/// Two routes claiming one socket for different Services: the older keeps it,
+/// the younger is dropped with a Problem on its own status — and the build as
+/// a whole still succeeds. That last part is the point: settling this in the
+/// translator returns an error that fails the *entire* reconcile, so one
+/// tenant's second route would stop routing for every other tenant.
+#[test]
+fn the_older_route_keeps_a_contested_socket() {
+    let inputs = l4_inputs(
+        vec![
+            tcp_route(
+                "younger",
+                Some("2026-02-01T00:00:00Z"),
+                json!([{ "name": "postgres-b", "port": 5432 }]),
+            ),
+            tcp_route(
+                "older",
+                Some("2026-01-01T00:00:00Z"),
+                json!([{ "name": "postgres", "port": 5432 }]),
+            ),
+        ],
+        vec![],
+    );
+    let out = build(&l4_config(), &inputs);
+
+    assert_eq!(out.ir.l4_frontends.len(), 1, "a socket carries one route");
+    assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+
+    let younger = out.routes.iter().find(|r| r.name == "younger").unwrap();
+    assert!(!younger.parents[0].accepted);
+    assert_eq!(younger.parents[0].accepted_reason, "RouteConflict");
+    assert!(matches!(
+        younger.parents[0].problems.first(),
+        Some(Problem::L4RouteConflict { port: 5432, protocol: "TCP", winner }) if winner == "demo/older"
+    ));
+    let older = out.routes.iter().find(|r| r.name == "older").unwrap();
+    assert!(older.parents[0].accepted);
+    assert!(older.parents[0].problems.is_empty());
+}
+
+/// `creationTimestamp` has one-second granularity, so two routes applied
+/// together tie routinely. Without the name as a second key the winner would
+/// follow cache iteration order and flip between reconciles.
+#[test]
+fn a_creation_timestamp_tie_is_broken_by_name() {
+    let same = Some("2026-01-01T00:00:00Z");
+    let build_with = |order: [&str; 2]| {
+        let routes = order
+            .iter()
+            .map(|n| {
+                let svc = if *n == "aaa" {
+                    "postgres"
+                } else {
+                    "postgres-b"
+                };
+                tcp_route(n, same, json!([{ "name": svc, "port": 5432 }]))
+            })
+            .collect();
+        build(&l4_config(), &l4_inputs(routes, vec![]))
+    };
+    for order in [["aaa", "zzz"], ["zzz", "aaa"]] {
+        let out = build_with(order);
+        assert_eq!(out.ir.l4_frontends.len(), 1);
+        assert_eq!(
+            out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432",
+            "input order {order:?} must not decide the winner"
+        );
+    }
+}
+
+/// A route with no `creationTimestamp` sorts last: an established route must
+/// not lose its socket to one whose age cannot be established.
+#[test]
+fn a_route_without_a_creation_timestamp_never_evicts_one_with_it() {
+    let inputs = l4_inputs(
+        vec![
+            tcp_route(
+                "aaa-undated",
+                None,
+                json!([{ "name": "postgres-b", "port": 5432 }]),
+            ),
+            tcp_route(
+                "zzz-dated",
+                Some("2026-06-01T00:00:00Z"),
+                json!([{ "name": "postgres", "port": 5432 }]),
+            ),
+        ],
+        vec![],
+    );
+    let out = build(&l4_config(), &inputs);
+    assert_eq!(out.ir.l4_frontends.len(), 1);
+    assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+}
+
+/// The rejections HTTPRoute already applies hold unchanged at layer 4. The
+/// weight-0 drain is the one that is easy to forget: there is no traffic
+/// shaping down here to remind you it exists.
+#[test]
+fn weighted_and_drained_backends_are_refused() {
+    let zero = build(
+        &l4_config(),
+        &l4_inputs(
+            vec![tcp_route(
+                "db",
+                None,
+                json!([{ "name": "postgres", "port": 5432, "weight": 0 }]),
+            )],
+            vec![],
+        ),
+    );
+    assert!(
+        zero.ir.l4_frontends.is_empty(),
+        "a drained backend routes nothing"
+    );
+    assert!(!zero.routes[0].parents[0].resolved_refs);
+    assert!(zero.routes[0].parents[0]
+        .problems
+        .iter()
+        .any(|p| matches!(p, Problem::ZeroWeightBackendUnsupported { .. })));
+
+    let split = build(
+        &l4_config(),
+        &l4_inputs(
+            vec![tcp_route(
+                "db",
+                None,
+                json!([
+                    { "name": "postgres", "port": 5432, "weight": 50 },
+                    { "name": "postgres-b", "port": 5432, "weight": 50 }
+                ]),
+            )],
+            vec![],
+        ),
+    );
+    assert!(
+        split.ir.l4_frontends.is_empty(),
+        "Sōzu cannot weight a split"
+    );
+    assert!(split.routes[0].parents[0]
+        .problems
+        .contains(&Problem::WeightedBackendsUnsupported));
+}
+
+/// A listener serves exactly one route kind. A TCPRoute pointed at an
+/// HTTP-only Gateway has no parent to bind to — it must say so, not attach
+/// silently to a listener that cannot carry it.
+#[test]
+fn a_tcp_route_does_not_bind_to_an_http_listener() {
+    let mut inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![],
+    );
+    inputs.gateways = arcs(vec![http_gateway()]);
+    let out = build(&l4_config(), &inputs);
+
+    assert!(out.ir.l4_frontends.is_empty());
+    // The parentRef did address a listener; that listener just does not serve
+    // TCPRoute — which the Gateway API spells `NotAllowedByListeners`.
+    assert_eq!(
+        out.routes[0].parents[0].accepted_reason,
+        "NotAllowedByListeners"
+    );
+    assert_eq!(out.gateways[0].listeners[0].attached_routes, 0);
+}
+
+/// A layer-4 port the exposure table does not carry has no Service port
+/// routing to it, so a listener on it could never receive traffic.
+#[test]
+fn an_unexposed_l4_listener_port_is_refused() {
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "postgres", "protocol": "TCP", "port": 9999 }
+        ]}
+    }));
+    let mut inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![],
+    );
+    inputs.gateways = arcs(vec![gw]);
+    let out = build(&l4_config(), &inputs);
+
+    assert!(out.ir.l4_frontends.is_empty());
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.accepted);
+    assert_eq!(l.accepted_reason, "PortUnavailable");
+    assert!(out.gateways[0]
+        .problems
+        .iter()
+        .any(|p| matches!(p, Problem::PortNotExposed { declared: 9999, .. })));
+    // The listener still declares which kind it would have served.
+    assert_eq!(l.supported_kinds, ["TCPRoute"]);
+}
+
+/// A layer-4 socket carries exactly one route and has no hostname to
+/// arbitrate with, so the exposure table may name the namespace allowed to
+/// claim it — and a Gateway from anywhere else is refused, not served.
+#[test]
+fn an_l4_listener_honours_the_ports_owner() {
+    let mut cfg = l4_config();
+    cfg.exposure
+        .iter_mut()
+        .find(|e| e.name == "postgres")
+        .unwrap()
+        .owner = Some("infra".to_string());
+    let inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![],
+    );
+    let out = build(&cfg, &inputs);
+
+    assert!(out.ir.l4_frontends.is_empty());
+    let l = &out.gateways[0].listeners[0];
+    assert!(!l.accepted);
+    assert_eq!(l.accepted_reason, "PortUnavailable");
+    assert!(out.gateways[0].problems.iter().any(|p| matches!(
+        p,
+        Problem::ListenerPortNotOwned { port: 5432, owner, claimed_by, .. }
+            if owner == "infra" && claimed_by == "demo"
+    )));
+}
+
+/// The deprecated ConfigMap path and a route can name the same socket. The
+/// route wins — it passed the Gateway's admission controls, the cluster-global
+/// map passed none — and the entry says so instead of vanishing.
+#[test]
+fn a_route_beats_a_tcp_services_entry_on_the_same_socket() {
+    let mut inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![],
+    );
+    inputs.tcp_services = Some(from_json(json!({
+        "metadata": { "name": "tcp-services", "namespace": "sozu-system" },
+        "data": { "5432": "demo/postgres-b:5432" }
+    })));
+    let out = build(&l4_config(), &inputs);
+
+    assert_eq!(out.ir.l4_frontends.len(), 1);
+    assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+    assert!(out.l4_results[0].problems.iter().any(
+        |p| matches!(p, Problem::L4PortClaimedByRoute { port: 5432, route } if route == "demo/db")
+    ));
+}
+
+/// A listener attaches to the exposure entry that serves *its own* port, not
+/// to the first entry of its protocol. With several HTTPS ports exposed,
+/// picking the first would land a Gateway's routes — and its certificate — on
+/// a port it never declared.
+///
+/// Two HTTPS entries is more than the chart will render today (Sōzu's static
+/// listeners are one per protocol, so `validateExposure` caps it), but the
+/// builder is what defines the contract: an entry is looked up, not guessed
+/// from the protocol.
+#[test]
+fn a_listener_binds_to_the_entry_serving_its_own_port() {
+    let cfg = BuildConfig {
+        exposure: vec![
+            ExposedPort {
+                name: "https".to_string(),
+                port: 443,
+                bind: 8443,
+                protocol: ExposedProtocol::Https,
+                transport: Some("TCP".to_string()),
+                owner: None,
+            },
+            ExposedPort {
+                name: "https-alt".to_string(),
+                port: 9443,
+                bind: 9444,
+                protocol: ExposedProtocol::Https,
+                transport: Some("TCP".to_string()),
+                owner: None,
+            },
+        ],
+        ..Default::default()
+    };
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [{
+            "name": "https", "protocol": "HTTPS", "port": 9443,
+            "hostname": "app.example.com",
+            "tls": { "mode": "Terminate", "certificateRefs": [{ "name": "app-tls" }] }
+        }]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
+        ..Default::default()
+    };
+    let out = build(&cfg, &inputs);
+
+    assert_eq!(out.ir.certificates.len(), 1);
+    assert_eq!(out.ir.certificates[0].listener.port(), 9444);
+    assert!(!out.ir.frontends.is_empty());
+    for f in &out.ir.frontends {
+        assert_eq!(f.listener.port(), 9444, "frontends follow their listener");
+    }
 }

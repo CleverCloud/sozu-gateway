@@ -401,11 +401,11 @@ fn l4_frontend_request(f: &ir::L4Frontend) -> Request {
             cluster_id: f.cluster_id.clone(),
             address: f.listener.into(),
             tags: Default::default(),
-            // SNI/ALPN routing (sozu 2.2.0) is not wired: the IR has no place to
-            // carry a hostname for an L4 route, because `tcp-services` has none
-            // to read it from. Absent `sni` is Sōzu's raw-TCP fallback — the
-            // frontend matches whatever the ClientHello says — which is exactly
-            // today's behaviour. Adopting SNI needs a user-facing surface first.
+            // SNI/ALPN routing (sozu 2.2.0) is not wired: no source of layer-4
+            // routes carries a hostname to read it from. `tcp-services` has no
+            // such field, and neither does TCPRoute v1 — only TLSRoute does, and
+            // there `hostnames` is required. Absent `sni` is Sōzu's raw-TCP
+            // fallback: the frontend matches whatever the ClientHello says.
             sni: None,
             alpn: vec![],
         })
@@ -437,6 +437,11 @@ fn unique_l4_frontends(l4: &[ir::L4Frontend]) -> Vec<&ir::L4Frontend> {
 /// cluster, so the fold alone would accept both claims and silently program
 /// an ambiguous route. Expects an exact-deduplicated slice: any repeated
 /// (protocol, listener) key left is a conflict.
+///
+/// **This is a net, not the guard.** It fails the whole reconcile, HTTP
+/// included, so it must never be what settles a dispute between two tenants'
+/// routes. The builder resolves those per route, with a Problem on the loser's
+/// own status; reaching this error means the builder let something through.
 fn check_l4_conflicts(l4: &[&ir::L4Frontend]) -> Result<(), TranslatorError> {
     let mut claims: BTreeMap<(ir::L4Protocol, SocketAddr), &str> = BTreeMap::new();
     for f in l4 {

@@ -43,7 +43,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
-| Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare the advertised ports (default `80`/`443`, configurable via `--gateway-http(s)-port`); a mismatch is rejected with `PortUnavailable`. Status `Accepted`/`Programmed` |
+| Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare a port the chart's `exposure` table advertises for that protocol (default `80`/`443`); a mismatch is rejected with `PortUnavailable`. Status `Accepted`/`Programmed` |
 | Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
@@ -55,9 +55,11 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | Per-`backendRef` filters | ❌ | filters wire onto the frontend, not one backend; reported (`FilterUnsupported`), the rule still routes without them |
 | Gateway API | `rule.timeouts` | ❌ | no Sōzu equivalent; reported (`TimeoutsUnsupported`), the rule still routes without the timeout |
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
-| Gateway API | `GRPCRoute` / `TCPRoute` / `TLSRoute` | ❌ | HTTPRoute only |
+| Gateway API | `Gateway` TCP/UDP listeners | ✅ | the declared port must be a `TCP`/`UDP` entry of the chart's `exposure` table (only Helm can open a Service port); `owner` may reserve it for one namespace |
+| Gateway API | `TCPRoute` / `UDPRoute` | ✅ | one Service `backendRef`; a socket carries exactly one route, and a second claimant loses on `creationTimestamp` then `namespace/name` (`L4RouteConflict`) — never by failing the reconcile |
+| Gateway API | `GRPCRoute` / `TLSRoute` | ❌ | |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
-| Protocols | TCP / UDP ingress (L4) | ✅ | `tcp/udp-services` ConfigMaps (ingress-nginx style); one port → one Service, no host routing; ports > 1024 (unprivileged) |
+| Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` (or the deprecated `tcp/udp-services` ConfigMaps); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
@@ -101,11 +103,52 @@ One annotation is read from the **Ingress** instead (it depends on that Ingress'
 
 ## L4 (TCP/UDP)
 
-Raw TCP/UDP forwarding is configured by ConfigMaps (the ingress-nginx convention),
-pointed to by `--tcp-services-configmap` / `--udp-services-configmap` (Helm
-`l4.tcpServices` / `l4.udpServices`). Each entry maps a gateway port to a Service;
-the Helm chart also opens that port on the LoadBalancer Service. There is **no host
-multiplexing at L4** — one port forwards to exactly one Service.
+Raw TCP/UDP forwarding has **two** front ends. There is no host multiplexing at
+layer 4 either way: one port forwards to exactly one Service.
+
+### TCPRoute / UDPRoute (supported)
+
+Declare the port in the chart's `exposure` table — only Helm can open a port on
+the Service — then point a `Gateway` listener and a route at it:
+
+```yaml
+exposure:                        # values.yaml
+  - { name: http,     port: 80,   bind: 8080, protocol: HTTP,  transport: TCP }
+  - { name: https,    port: 443,  bind: 8443, protocol: HTTPS, transport: TCP }
+  - { name: postgres, port: 5432, bind: 5432, protocol: TCP,   transport: TCP, owner: demo }
+```
+
+```yaml
+listeners:                       # Gateway
+  - { name: postgres, protocol: TCP, port: 5432 }
+---
+rules:                           # TCPRoute
+  - backendRefs: [{ name: postgres, port: 5432 }]
+```
+
+A full example is in [`examples/api-gateway/l4-routes.yaml`](../examples/api-gateway/l4-routes.yaml).
+
+- A socket carries exactly one route. Two routes claiming it are settled by
+  oldest `creationTimestamp`, then `namespace/name`; the loser reports
+  `L4RouteConflict` on its own status and **the rest of the routing is
+  untouched** — a port dispute between two tenants must never fail the reconcile
+  for everyone else.
+- The exposure entry's optional `owner` names the only namespace whose Gateways
+  may declare that port. Down here there is no hostname to arbitrate with, so
+  the alternative would be a race.
+- Weighted splits and `weight: 0` drains are refused exactly as they are for
+  HTTPRoute — Sōzu cannot express either.
+- **Ports must be > 1024, and 443 is impossible.** Both containers run as uid
+  1000 with every capability dropped, and the Service already publishes 443/TCP
+  for `https` — a Service cannot expose one `(port, protocol)` twice. The chart
+  fails the render with that explanation rather than letting the apiserver
+  reject it obscurely. Layer-4 traffic therefore lives on a port TLS clients do
+  not dial by default.
+
+### `tcp/udp-services` ConfigMaps (deprecated)
+
+The ingress-nginx convention, pointed to by `--tcp-services-configmap` /
+`--udp-services-configmap` (Helm `l4.tcpServices` / `l4.udpServices`):
 
 ```yaml
 # ConfigMap data — "<gateway-port>": "<namespace>/<service>:<service-port>"
@@ -113,7 +156,14 @@ data:
   "5432": "demo/postgres:5432"   # TCP :5432 -> the postgres Service
 ```
 
-Notes: listen ports must be **> 1024** (the data plane runs unprivileged); a port
-already used by the HTTP/HTTPS listeners is rejected; an unparseable entry is
-reported and skipped. The cluster + backends are resolved to pod IPs exactly like
-HTTP, so hot reload and pruning work the same way.
+It still works, and will be removed. The reason is not tidiness: the map is
+cluster-global and has no admission control whatsoever — anyone who can edit it
+routes any port to any Service in any namespace, with no ReferenceGrant and no
+Gateway to consent. Where a route and an entry name the same socket, the route
+wins and the entry is reported (`L4PortClaimedByRoute`).
+
+Both paths resolve the cluster + backends to pod IPs exactly like HTTP, so hot
+reload and pruning work the same way. An entry mapping a port the `exposure`
+table does not carry is reported (`L4PortNotExposed`) and not programmed: the
+Service would have no port routing to it, so a listener nobody can dial reads as
+working while serving nobody.

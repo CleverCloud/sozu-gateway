@@ -1,15 +1,23 @@
-# Raw TCP (L4) forwarding — expose a non-HTTP Service through the gateway.
+# Raw TCP (L4) forwarding through the DEPRECATED tcp-services ConfigMap.
+#
+# Prefer a TCPRoute — see ../api-gateway/l4-routes.yaml. This path is
+# cluster-global with no admission control: anyone able to edit the map routes
+# any port to any Service in any namespace.
 #
 # L4 is configured by the chart, not by an Ingress object: a port is mapped to a
 # Service, opened on the LoadBalancer, and forwarded by Sōzu (one port -> one
-# Service, no host routing). Enable it on install/upgrade with:
+# Service, no host routing). Two values are needed — the exposure entry opens
+# the port, the map says where it routes:
 #
 #   helm upgrade --install sozu-gateway charts/sozu-gateway -n sozu-system \
-#     --set l4.tcpServices.9000="sozu-demo/echo-tcp:9000"
+#     --set l4.tcpServices.9000="sozu-demo/echo-tcp:9000" \
+#     --set-json 'exposure=[
+#       {"name":"http", "port":80, "bind":8080,"protocol":"HTTP", "transport":"TCP"},
+#       {"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},
+#       {"name":"echo-tcp","port":9000,"bind":9000,"protocol":"TCP","transport":"TCP"}]'
 #
-# That renders a `tcp-services` ConfigMap, opens port 9000 on the Service, and
-# points the controller at it. This file is just the backend the port forwards to
-# (a tiny TCP echo). Listen ports must be > 1024 (the data plane is unprivileged).
+# This file is just the backend the port forwards to (a tiny TCP echo). Listen
+# ports must be > 1024 (the data plane is unprivileged).
 #
 # Verify (no HTTP — raw TCP):
 #   printf 'hello-l4\n' | nc <lb-ip> 9000      # echoes: hello-l4

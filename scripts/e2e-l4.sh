@@ -9,8 +9,17 @@ PORT=9000
 
 echo "==> context: $(kubectl config current-context)"
 ensure_image
-# Open the L4 port on the Service + point the controller at the tcp-services map.
-ensure_addon --set "l4.tcpServices.${PORT}=${DEMO_NS}/echo-tcp:${PORT}"
+# Point the controller at the tcp-services map, and declare the port in the
+# exposure table. Both are needed: the map says where the port routes, the table
+# says the port exists at all — a mapping the table does not carry is reported
+# (`L4PortNotExposed`) and not programmed, because the Service would have no
+# port routing to it.
+ensure_addon \
+  --set "l4.tcpServices.${PORT}=${DEMO_NS}/echo-tcp:${PORT}" \
+  --set-json "exposure=[
+    {\"name\":\"http\",\"port\":80,\"bind\":8080,\"protocol\":\"HTTP\",\"transport\":\"TCP\"},
+    {\"name\":\"https\",\"port\":443,\"bind\":8443,\"protocol\":\"HTTPS\",\"transport\":\"TCP\"},
+    {\"name\":\"echo-tcp\",\"port\":${PORT},\"bind\":${PORT},\"protocol\":\"TCP\",\"transport\":\"TCP\"}]"
 ensure_demo_ns
 
 echo "==> deploy the TCP echo backend (examples/ingress/l4-tcp.yaml)"

@@ -58,10 +58,17 @@ ensure_addon() {
 }
 
 # Install the Gateway API standard-channel CRDs (idempotent).
+#
+# v1.6.1 is the version the generated types in crates/gateway-api are built
+# from, and — since v1.6 — the version whose *standard* channel ships
+# tcproutes/udproutes/tlsroutes, which the layer-4 suites need. Override
+# GWAPI_VERSION to check the controller against an older bundle.
+GWAPI_VERSION="${GWAPI_VERSION:-v1.6.1}"
+
 ensure_gateway_api_crds() {
-  echo "==> Gateway API CRDs (v1.2.1 standard channel)"
+  echo "==> Gateway API CRDs ($GWAPI_VERSION standard channel)"
   kubectl apply -f \
-    "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml" >/dev/null
+    "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GWAPI_VERSION}/standard-install.yaml" >/dev/null
   # On the very first install `kubectl wait` can race the apiserver: it errors
   # out on a still-nil .status.conditions instead of waiting. Retry briefly.
   for _ in 1 2 3 4 5; do

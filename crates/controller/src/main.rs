@@ -38,7 +38,7 @@ use tracing_subscriber::EnvFilter;
 
 use sozu_gw_agent::SozuAgentHandle;
 use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
-use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
 
 mod events;
@@ -151,6 +151,8 @@ struct Stores {
     gateways: Store<Gateway>,
     http_routes: Store<HttpRoute>,
     reference_grants: Store<ReferenceGrant>,
+    tcp_routes: Store<TcpRoute>,
+    udp_routes: Store<UdpRoute>,
 }
 
 /// Spawn a watcher+reflector that keeps `writer`'s store fresh and pings `tx`
@@ -331,11 +333,41 @@ fn mark_ready(ready: &AtomicBool) {
     }
 }
 
-/// The Gateway API kinds the controller watches. Gateway mode requires *all*
-/// of them: watching a missing kind would never sync its cache, and the sync
-/// gate would kill the process — a partial install must run Ingress-only, not
-/// crash-loop.
-const GATEWAY_API_KINDS: [&str; 4] = ["GatewayClass", "Gateway", "HTTPRoute", "ReferenceGrant"];
+/// The Gateway API kinds gateway mode *requires*. All of them: watching a
+/// missing kind would never sync its cache, and the sync gate would kill the
+/// process — a partial install must run Ingress-only, not crash-loop.
+///
+/// GatewayClass belongs here and is not optional: without it `our_classes` is
+/// empty and every Gateway is skipped, so "core installed, GatewayClass
+/// missing" is not a degraded mode, it is no mode at all.
+const REQUIRED_GATEWAY_API_KINDS: [&str; 4] =
+    ["GatewayClass", "Gateway", "HTTPRoute", "ReferenceGrant"];
+
+/// Route kinds that are genuinely optional: their absence costs layer-4
+/// routing and nothing else. Probed independently of the required set, so a
+/// cluster with "core yes, layer 4 no" does not read as "Gateway API not
+/// installed".
+const OPTIONAL_GATEWAY_API_KINDS: [&str; 2] = ["TCPRoute", "UDPRoute"];
+
+/// Which Gateway API kinds this cluster serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct GatewayApiSupport {
+    /// Every required kind is served: the Gateway API path can run at all.
+    core: bool,
+    tcp_routes: bool,
+    udp_routes: bool,
+}
+
+impl GatewayApiSupport {
+    /// Everything served — nothing left for a re-probe to discover.
+    fn full() -> Self {
+        Self {
+            core: true,
+            tcp_routes: true,
+            udp_routes: true,
+        }
+    }
+}
 
 /// Are the Gateway API CRDs installed? Probed by a tiny list against **every**
 /// kind the controller watches — a partial install (e.g. GatewayClass served
@@ -347,7 +379,13 @@ const GATEWAY_API_KINDS: [&str; 4] = ["GatewayClass", "Gateway", "HTTPRoute", "R
 /// fast and
 /// Kubernetes restarts us, instead of silently locking the whole process into
 /// Ingress-only mode for its lifetime.
-async fn gateway_api_available(client: &Client) -> Result<bool> {
+///
+/// The optional kinds are probed too, and a **403 on them is fatal, not
+/// "absent"** — the v1.6.1 standard-channel bundle ships tcproutes/udproutes,
+/// so a ClusterRole that predates this grant answers 403 where the CRD is
+/// plainly installed. Reading that as absence would silently drop layer-4
+/// routing on exactly the clusters that have it.
+async fn gateway_api_available(client: &Client) -> Result<GatewayApiSupport> {
     let served = [
         crd_served::<GatewayClass>(client).await?,
         crd_served::<Gateway>(client).await?,
@@ -355,21 +393,37 @@ async fn gateway_api_available(client: &Client) -> Result<bool> {
         crd_served::<ReferenceGrant>(client).await?,
     ];
     let missing = missing_gateway_crds(served);
-    if missing.is_empty() {
-        Ok(true)
-    } else {
-        if missing.len() == GATEWAY_API_KINDS.len() {
+    if !missing.is_empty() {
+        if missing.len() == REQUIRED_GATEWAY_API_KINDS.len() {
             // No Gateway API at all: the ordinary Ingress-only cluster.
             debug!("Gateway API CRDs not installed");
         } else {
             warn!(
                 ?missing,
-                "partial Gateway API install: some watched CRDs are not served; \
+                "partial Gateway API install: some required CRDs are not served; \
                  running in Ingress-only mode until all of them are installed"
             );
         }
-        Ok(false)
+        return Ok(GatewayApiSupport::default());
     }
+    let support = GatewayApiSupport {
+        core: true,
+        tcp_routes: crd_served::<TcpRoute>(client).await?,
+        udp_routes: crd_served::<UdpRoute>(client).await?,
+    };
+    let absent: Vec<&str> = OPTIONAL_GATEWAY_API_KINDS
+        .iter()
+        .zip([support.tcp_routes, support.udp_routes])
+        .filter_map(|(kind, served)| (!served).then_some(*kind))
+        .collect();
+    if !absent.is_empty() {
+        info!(
+            ?absent,
+            "Gateway API layer-4 route CRDs are not installed; TCP/UDP routing via the \
+             Gateway API is unavailable (the rest of the Gateway API is unaffected)"
+        );
+    }
+    Ok(support)
 }
 
 /// Probe one watched kind with a tiny list: `Ok(true)` = served, `Ok(false)` =
@@ -404,11 +458,11 @@ where
     }
 }
 
-/// Pure classifier: which watched Gateway API kinds are missing, given the
-/// per-kind probe results (in [`GATEWAY_API_KINDS`] order). Any missing kind
-/// forces Ingress-only mode.
+/// Pure classifier: which *required* Gateway API kinds are missing, given the
+/// per-kind probe results (in [`REQUIRED_GATEWAY_API_KINDS`] order). Any
+/// missing one forces Ingress-only mode.
 fn missing_gateway_crds(served: [bool; 4]) -> Vec<&'static str> {
-    GATEWAY_API_KINDS
+    REQUIRED_GATEWAY_API_KINDS
         .iter()
         .zip(served)
         .filter_map(|(kind, served)| (!served).then_some(*kind))
@@ -493,6 +547,8 @@ async fn reconcile(
         gateways: stores.gateways.state(),
         http_routes: stores.http_routes.state(),
         reference_grants: stores.reference_grants.state(),
+        tcp_routes: stores.tcp_routes.state(),
+        udp_routes: stores.udp_routes.state(),
         tcp_services: lookup_configmap(&stores.config_maps, &args.tcp_services_configmap),
         udp_services: lookup_configmap(&stores.config_maps, &args.udp_services_configmap),
     };
@@ -785,7 +841,10 @@ async fn main() -> Result<()> {
     let (gateways, gw_w) = reflector::store();
     let (http_routes, hr_w) = reflector::store();
     let (reference_grants, rg_w) = reflector::store();
-    let gateway_api_enabled = gateway_api_available(&ops_client).await?;
+    let (tcp_routes, tcp_w) = reflector::store();
+    let (udp_routes, udp_w) = reflector::store();
+    let gw_api = gateway_api_available(&ops_client).await?;
+    let gateway_api_enabled = gw_api.core;
     if gateway_api_enabled {
         info!("Gateway API detected; watching gateway.networking.k8s.io resources");
         spawn_watch::<GatewayClass>(
@@ -816,9 +875,32 @@ async fn main() -> Result<()> {
             tx.clone(),
             "referencegrant",
         );
+        // Layer-4 route kinds, each watched only when its CRD is served.
+        if gw_api.tcp_routes {
+            spawn_watch::<TcpRoute>(
+                Api::all(client.clone()),
+                watch_all(),
+                tcp_w,
+                tx.clone(),
+                "tcproute",
+            );
+        } else {
+            drop(tcp_w);
+        }
+        if gw_api.udp_routes {
+            spawn_watch::<UdpRoute>(
+                Api::all(client.clone()),
+                watch_all(),
+                udp_w,
+                tx.clone(),
+                "udproute",
+            );
+        } else {
+            drop(udp_w);
+        }
     } else {
         info!("Gateway API CRDs not found; running in Ingress-only mode");
-        drop((gc_w, gw_w, hr_w, rg_w));
+        drop((gc_w, gw_w, hr_w, rg_w, tcp_w, udp_w));
     }
 
     let stores = Stores {
@@ -832,6 +914,8 @@ async fn main() -> Result<()> {
         gateways,
         http_routes,
         reference_grants,
+        tcp_routes,
+        udp_routes,
     };
 
     // Wait for the caches to fill so the first reconcile sees a complete picture.
@@ -855,6 +939,8 @@ async fn main() -> Result<()> {
             ready_when(gateway_api_enabled, &stores.gateways),
             ready_when(gateway_api_enabled, &stores.http_routes),
             ready_when(gateway_api_enabled, &stores.reference_grants),
+            ready_when(gateway_api_enabled && gw_api.tcp_routes, &stores.tcp_routes),
+            ready_when(gateway_api_enabled && gw_api.udp_routes, &stores.udp_routes),
         )
     };
     tokio::time::timeout(Duration::from_secs(120), sync)
@@ -973,16 +1059,22 @@ async fn main() -> Result<()> {
                 // the thing that already solves it: Kubernetes restarts us, and
                 // the fresh process wires the watches. Same reflex as a watch
                 // stream ending — fail fast rather than run blind.
-                if !gateway_api_enabled {
+                //
+                // This covers the layer-4 kinds as well as the core: installing
+                // TCPRoute under a live controller must not leave it blind to
+                // the kind for the rest of the process's life either.
+                if gw_api != GatewayApiSupport::full() {
                     match gateway_api_available(&ops_client).await {
-                        Ok(true) => {
+                        Ok(now) if now != gw_api => {
                             info!(
+                                before = ?gw_api,
+                                after = ?now,
                                 "Gateway API CRDs have appeared since startup; exiting so the \
                                  restarted process watches them"
                             );
                             std::process::exit(0);
                         }
-                        Ok(false) => {}
+                        Ok(_) => {}
                         // A probe failure here is not fatal: we are already
                         // serving Ingress, and the next tick retries.
                         Err(e) => debug!(error = ?e, "Gateway API re-probe failed; will retry"),
@@ -1236,7 +1328,35 @@ mod tests {
         // Nothing installed: the ordinary Ingress-only cluster.
         assert_eq!(
             missing_gateway_crds([false, false, false, false]),
-            GATEWAY_API_KINDS.to_vec()
+            REQUIRED_GATEWAY_API_KINDS.to_vec()
+        );
+    }
+
+    /// The layer-4 kinds are optional, the rest is not. A cluster with the
+    /// core installed and no TCPRoute/UDPRoute must keep serving the Gateway
+    /// API — reading it as "Gateway API not installed" would take HTTPRoute
+    /// down with it.
+    #[test]
+    fn layer4_kinds_are_optional_and_the_core_is_not() {
+        let core_only = GatewayApiSupport {
+            core: true,
+            tcp_routes: false,
+            udp_routes: false,
+        };
+        assert!(core_only.core, "core stays enabled without the L4 kinds");
+        assert_ne!(
+            core_only,
+            GatewayApiSupport::full(),
+            "a re-probe must still have something to discover"
+        );
+        assert_eq!(
+            GatewayApiSupport::default(),
+            GatewayApiSupport {
+                core: false,
+                tcp_routes: false,
+                udp_routes: false
+            },
+            "the Ingress-only default watches nothing"
         );
     }
 
