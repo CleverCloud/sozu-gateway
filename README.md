@@ -31,11 +31,12 @@ command socket — there is no external dependency and no API token.
 
 ## Features
 
-**Ingress** and **Gateway API** (`GatewayClass` / `Gateway` / `HTTPRoute` / `ReferenceGrant`, with
-`Accepted` / `Programmed` / `ResolvedRefs` status) routing through one shared IR; exact + wildcard
-hosts; `Prefix` / `Exact` / regex paths; TLS termination from Secrets with SNI and zero-gap rotation;
-pod-IP backends from `EndpointSlice`s; HTTPRoute filters (header edits and redirects); raw TCP / UDP
-(L4) forwarding; opt-in Prometheus `/metrics`; and idempotent hot reload with no proxy restart.
+**Ingress** and **Gateway API** (`GatewayClass` / `Gateway` / `HTTPRoute` / `TCPRoute` / `UDPRoute` /
+`ReferenceGrant`, with `Accepted` / `Programmed` / `ResolvedRefs` status) routing through one shared
+IR; exact + wildcard hosts; `Prefix` / `Exact` / regex paths; TLS termination from Secrets with SNI
+and zero-gap rotation; pod-IP backends from `EndpointSlice`s; HTTPRoute filters (header edits and
+redirects); raw TCP / UDP (L4) forwarding; opt-in Prometheus `/metrics`; and idempotent hot reload
+with no proxy restart.
 
 > **Note:** Basic auth and per-IP rate limiting exist in Sōzu but have no core Gateway API filter, so
 > they are not wired yet. See the full support matrix — supported / planned / not supported, with
@@ -77,11 +78,11 @@ The controller is configured entirely through the Helm chart
 | `ingressClass.name` | `sozu` | Name of the created `IngressClass` (and `GatewayClass`) |
 | `ingressClass.default` | `false` | Make it the cluster's default `IngressClass` |
 | `service.type` | `LoadBalancer` | How the proxy is exposed |
-| `sozu.httpPort` / `httpsPort` | `8080` / `8443` | In-pod listener ports (the Service maps 80 / 443 to these) |
+| `exposure` | `80→8080` HTTP, `443→8443` HTTPS | Every port the gateway serves: advertised port, in-pod bind, listener protocol. Add a `TCP`/`UDP` entry to make a layer-4 `Gateway` listener possible |
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
-| `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status) |
+| `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status for **every** route kind) |
 | `metrics.enabled` | `false` | Serve Prometheus `/metrics` (pulled from Sōzu over the socket) |
-| `l4.tcpServices` / `udpServices` | `{}` | Map `"<port>": "<ns>/<svc>:<port>"` for raw TCP / UDP forwarding |
+| `l4.tcpServices` / `udpServices` | `{}` | **Deprecated** (use `TCPRoute`/`UDPRoute`): map `"<port>": "<ns>/<svc>:<port>"` for raw TCP / UDP forwarding |
 
 A few behaviours worth knowing:
 

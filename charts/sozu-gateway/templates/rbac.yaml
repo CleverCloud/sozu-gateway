@@ -24,14 +24,32 @@ rules:
   # Gateway API (Phase 2). Read the objects + report their status. The controller
   # tolerates these CRDs being absent (Ingress-only mode), so the grant is inert
   # on clusters without Gateway API installed.
+  #
+  # tcproutes/udproutes are listed even though the controller treats them as
+  # optional, and that is not belt-and-braces: its CRD probe reads only a 404 as
+  # "not installed". The v1.6.1 standard channel ships both kinds, so on a
+  # current cluster an ungranted probe answers 403 — which is fatal by design,
+  # because reading "forbidden" as "absent" would silently drop layer-4 routing
+  # wherever someone tightened this role.
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses", "gateways", "httproutes", "referencegrants"]
+    resources:
+      - gatewayclasses
+      - gateways
+      - httproutes
+      - referencegrants
+      - tcproutes
+      - udproutes
     verbs: ["get", "list", "watch"]
 {{- if .Values.rbac.allowGatewayStatusWrites }}
   # Gateway API status conditions — on by default, they are the API's UX
   # (see rbac.allowGatewayStatusWrites in values.yaml).
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status"]
+    resources:
+      - gatewayclasses/status
+      - gateways/status
+      - httproutes/status
+      - tcproutes/status
+      - udproutes/status
     verbs: ["update", "patch"]
 {{- end }}
   # Problem reporting as Events on the owning Ingress/Gateway/HTTPRoute

@@ -26,7 +26,8 @@ just image          # docker build the controller image
 just chart-lint     # helm lint + template (also rbac.allowStatusWrites + metrics/ServiceMonitor)
 just e2e            # in-cluster end-to-end (Ingress + TLS) on the current kube-context
 just e2e-gateway    # Gateway API + HTTPRoute filters (header/redirect) end-to-end
-just e2e-l4         # raw TCP (L4) forwarding end-to-end
+just e2e-l4         # raw TCP (L4) via the deprecated tcp-services ConfigMap
+just e2e-l4-routes  # layer-4 through the Gateway API (TCPRoute + UDPRoute)
 just e2e-all        # every e2e suite, sharing one freshly-built image
 ```
 
@@ -135,7 +136,11 @@ templates, so a literal Gateway rewrite 408s — verified end-to-end. The transl
 `ir::Rewrite` mapping, so re-wiring it is a one-line builder change if Sōzu's rewrite semantics are
 reconciled later.
 
-The CRDs are **optional**: the controller probes for them and runs Ingress-only if absent. Status
+The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
+*required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no
+layer-4 routing, everything else unaffected). `crd_served` reads **only a 404** as absent, so the
+RBAC grant must cover every probed kind: the v1.6.1 standard channel ships tcproutes/udproutes, and
+an ungranted probe answers **403**, which is fatal by design. Status
 (`Accepted`/`Programmed`/`ResolvedRefs`) is written by [`controller/src/status.rs`](crates/controller/src/status.rs),
 which is **loop-safe** — it reuses `lastTransitionTime` for unchanged conditions and skips no-op
 patches, so the controller's own status writes never re-trigger it. Status writes are best-effort.
@@ -164,11 +169,24 @@ changes.
 
 - **HTTP/HTTPS listeners are NOT modelled in the IR.** They are declared
   statically in Sōzu's `config.toml` ([deploy/sozu/config.toml](deploy/sozu/config.toml)) and
-  activated at boot; their addresses come from CLI flags (`--http-listener` / `--https-listener`)
-  and must match `config.toml`. **L4 (TCP/UDP) listeners are the exception**: their ports are
-  user-defined (`tcp/udp-services` ConfigMaps), so the IR carries `ir::L4Frontend`s and the
-  translator adds + activates the listeners dynamically over the socket — `ConfigState::diff`
-  emits `Add{Tcp,Udp}Listener` + `ActivateListener` (and the reverse on removal) for free.
+  activated at boot; their addresses come from the chart's `exposure` table. **L4 (TCP/UDP)
+  listeners are the exception**: their ports are user-defined, so the IR carries
+  `ir::L4Frontend`s and the translator adds + activates the listeners dynamically over the socket —
+  `ConfigState::diff` emits `Add{Tcp,Udp}Listener` + `ActivateListener` (and the reverse on removal)
+  for free.
+- **Layer-4 routes have two sources, and conflicts are settled in the builder.** `TCPRoute`/
+  `UDPRoute` attached to a `protocol: TCP`/`UDP` Gateway listener are the supported path; the
+  cluster-global `tcp/udp-services` ConfigMaps are deprecated and lose any socket a route also
+  claims. Two routes contesting a socket are settled by oldest `creationTimestamp` **then**
+  `namespace/name` — the timestamp has one-second granularity, so without the second key the winner
+  would follow cache iteration order and flip between reconciles. The translator's
+  `check_l4_conflicts` stays as a net, but it must never be what settles this: it returns an error
+  that `reconcile` propagates with `?`, so one tenant's second route would fail the whole reconcile,
+  HTTP included.
+- **A layer-4 port can never be 443** — the Service already publishes `443/TCP` for `https` and a
+  Service cannot expose one `(port, protocol)` twice — and no bind may be privileged (uid 1000,
+  all capabilities dropped). Both are `fail`ed by the chart's `validateExposure` helper rather than
+  left to a raw apiserver rejection.
 - **Backends are pod IP:port resolved from EndpointSlices — never the Service ClusterIP.** When a
   Service has multiple ports, match the EndpointSlice port by name; only fall back to the sole port
   when there is exactly one (don't guess `first()`).

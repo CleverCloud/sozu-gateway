@@ -32,7 +32,7 @@ use sozu_gw_builder::{
 use sozu_gw_gateway_api::gateway::{
     GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
 };
-use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, TcpRoute, UdpRoute};
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
 
@@ -89,6 +89,8 @@ pub async fn write_status(
         // concrete type, so the kind carried by the build result picks it.
         let written = match route.kind {
             RouteKind::HttpRoute => write_route::<HttpRoute>(client, controller_name, route).await,
+            RouteKind::TcpRoute => write_route::<TcpRoute>(client, controller_name, route).await,
+            RouteKind::UdpRoute => write_route::<UdpRoute>(client, controller_name, route).await,
         };
         if let Err(e) = written {
             warn!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, error = %e, "failed to write route status");
@@ -404,26 +406,37 @@ pub trait RouteParents {
     fn route_parents(&self) -> Vec<RouteParentStatus>;
 }
 
-impl RouteParents for HttpRoute {
-    fn route_parents(&self) -> Vec<RouteParentStatus> {
-        self.status
-            .iter()
-            .flat_map(|s| s.parents.iter())
-            .map(|p| RouteParentStatus {
-                conditions: p.conditions.clone(),
-                controller_name: p.controller_name.clone(),
-                parent_ref: RouteParentRef {
-                    group: p.parent_ref.group.clone(),
-                    kind: p.parent_ref.kind.clone(),
-                    name: p.parent_ref.name.clone(),
-                    namespace: p.parent_ref.namespace.clone(),
-                    port: p.parent_ref.port,
-                    section_name: p.parent_ref.section_name.clone(),
-                },
-            })
-            .collect()
-    }
+/// Implement [`RouteParents`] for one kopium-generated route kind. The bodies
+/// are identical; only the types differ, and they have no trait in common to
+/// abstract over.
+macro_rules! impl_route_parents {
+    ($kind:ty) => {
+        impl RouteParents for $kind {
+            fn route_parents(&self) -> Vec<RouteParentStatus> {
+                self.status
+                    .iter()
+                    .flat_map(|s| s.parents.iter())
+                    .map(|p| RouteParentStatus {
+                        conditions: p.conditions.clone(),
+                        controller_name: p.controller_name.clone(),
+                        parent_ref: RouteParentRef {
+                            group: p.parent_ref.group.clone(),
+                            kind: p.parent_ref.kind.clone(),
+                            name: p.parent_ref.name.clone(),
+                            namespace: p.parent_ref.namespace.clone(),
+                            port: p.parent_ref.port,
+                            section_name: p.parent_ref.section_name.clone(),
+                        },
+                    })
+                    .collect()
+            }
+        }
+    };
 }
+
+impl_route_parents!(HttpRoute);
+impl_route_parents!(TcpRoute);
+impl_route_parents!(UdpRoute);
 
 /// The `status.parents[]` we want on a route: every entry owned by another
 /// controller kept verbatim, followed by one entry per parentRef we resolved.

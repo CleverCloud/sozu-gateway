@@ -88,6 +88,21 @@ rbac:
 #
 # `bind` values must be unique — two entries on one socket cannot both be added,
 # and the failure takes the whole reconcile with it.
+#
+# A TCP or UDP entry is what makes a `protocol: TCP` / `protocol: UDP` Gateway
+# listener — and the TCPRoute/UDPRoute attached to it — possible at all. Add one
+# per layer-4 port you intend to serve:
+#
+#   - name: postgres
+#     port: 5432
+#     bind: 5432
+#     protocol: TCP
+#     transport: TCP
+#     owner: demo          # optional: only Gateways in `demo` may declare it
+#
+# Ports must be > 1024: the data plane runs unprivileged. 443 in particular
+# cannot be added — the Service already publishes 443/TCP for `https`, and a
+# Service cannot expose one (port, protocol) twice.
 exposure:
   - name: http
     port: 80
@@ -145,15 +160,26 @@ service:
   # Ports come from `exposure` above — this is the single source.
   annotations: {}
 
-# Layer-4 (TCP/UDP) passthrough. Each entry maps a gateway port to a Service;
-# the port is exposed on the LoadBalancer and routed by Sōzu (one port → one
-# Service, no host routing). Ports must be > 1024 (the data plane runs
-# unprivileged). Enabling either map grants the controller ConfigMap read access
-# and points it at the rendered map(s).
-# During the transition to `exposure` these still render their own Service
-# ports, so nothing breaks — but a mapping whose port is not also in `exposure`
-# is reported (`L4PortNotExposed`) and not programmed, because the Service would
-# have no port routing to it. Add the matching `exposure` entry alongside.
+# DEPRECATED — use TCPRoute/UDPRoute instead; these maps will be removed.
+#
+# Layer-4 (TCP/UDP) passthrough, ingress-nginx style. Each entry maps a gateway
+# port to a Service; the port is exposed on the LoadBalancer and routed by Sōzu
+# (one port → one Service, no host routing). Ports must be > 1024 (the data
+# plane runs unprivileged). Enabling either map grants the controller ConfigMap
+# read access and points it at the rendered map(s).
+#
+# Why it is going away: this map is cluster-global and has no admission control
+# at all. Anyone who can edit it routes any port to any Service in any
+# namespace, with no ReferenceGrant and no Gateway to consent. A
+# TCPRoute/UDPRoute goes through the Gateway's listener, its `owner`, and
+# ReferenceGrant — so where both name the same socket, the route wins and the
+# map entry is reported (`L4PortClaimedByRoute`), not silently dropped.
+#
+# Every mapped port must also be an `exposure` entry: `exposure` is the single
+# source of the Service's ports, and the controller refuses to program a mapping
+# the table does not carry (`L4PortNotExposed`) because nothing would route to
+# it. The chart fails the render rather than letting you discover that at
+# runtime.
 l4:
   tcpServices: {}   # "5432": "demo/postgres:5432"
   udpServices: {}   # "5353": "demo/coredns:53"

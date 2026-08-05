@@ -1,0 +1,169 @@
+# Layer-4 routing through the Gateway API: TCPRoute and UDPRoute.
+#
+# This is the supported way to expose a non-HTTP Service. It replaces the
+# `l4.tcpServices` / `l4.udpServices` ConfigMaps, which are deprecated: that map
+# is cluster-global with no admission control, so anyone able to edit it can
+# route any port to any Service in any namespace. A route goes through the
+# Gateway's listener, its `owner`, and ReferenceGrant.
+#
+# A layer-4 port has to be exposed by the chart first — only Helm can open a
+# port on the Service, and Sōzu binds the pod-side one:
+#
+#   helm upgrade --install sozu-gateway charts/sozu-gateway -n sozu-system \
+#     --set-json 'exposure=[
+#       {"name":"http", "port":80,  "bind":8080,"protocol":"HTTP", "transport":"TCP"},
+#       {"name":"https","port":443, "bind":8443,"protocol":"HTTPS","transport":"TCP"},
+#       {"name":"echo-tcp","port":9000,"bind":9000,"protocol":"TCP","transport":"TCP"},
+#       {"name":"echo-udp","port":9001,"bind":9001,"protocol":"UDP","transport":"UDP"}]'
+#
+# The whole list has to be restated: `--set exposure[N].x` replaces the list
+# rather than appending to it, and the chart fails loudly if you try.
+#
+# Ports must be > 1024: both containers run as uid 1000 with every capability
+# dropped. 443 in particular can never carry a layer-4 route — the Service
+# already publishes 443/TCP for `https`, and a Service cannot expose one
+# (port, protocol) twice.
+#
+# A socket carries exactly one route: there is no hostname to multiplex on. If
+# two routes claim one socket, the older (by creationTimestamp, then
+# namespace/name) keeps it and the other reports `L4RouteConflict` on its own
+# status — `kubectl describe tcproute` says so.
+#
+# Verify (raw TCP, no HTTP):
+#   printf 'hello-l4\n' | nc <lb-ip> 9000      # echoes: hello-l4
+---
+# Cluster-scoped and shared with the other examples — applying it twice is a
+# no-op, but keep the two definitions identical.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: sozu
+spec:
+  controllerName: sozu.io/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: l4
+  namespace: sozu-demo
+spec:
+  gatewayClassName: sozu
+  listeners:
+    - name: echo-tcp
+      protocol: TCP
+      port: 9000
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+    - name: echo-udp
+      protocol: UDP
+      port: 9001
+      allowedRoutes:
+        kinds:
+          - kind: UDPRoute
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: echo-tcp
+  namespace: sozu-demo
+spec:
+  parentRefs:
+    - name: l4
+      sectionName: echo-tcp
+  rules:
+    - backendRefs:
+        - name: echo-tcp
+          port: 9000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: UDPRoute
+metadata:
+  name: echo-udp
+  namespace: sozu-demo
+spec:
+  parentRefs:
+    - name: l4
+      sectionName: echo-udp
+  rules:
+    - backendRefs:
+        - name: echo-udp
+          port: 9001
+---
+# The backends: a TCP echo and a UDP echo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tcp
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-tcp
+  template:
+    metadata:
+      labels:
+        app: echo-tcp
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["TCP-LISTEN:9000,fork,reuseaddr", "EXEC:/bin/cat"]
+          ports:
+            - name: tcp
+              containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: tcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-tcp
+  namespace: sozu-demo
+spec:
+  selector:
+    app: echo-tcp
+  ports:
+    - name: tcp
+      port: 9000
+      targetPort: tcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-udp
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-udp
+  template:
+    metadata:
+      labels:
+        app: echo-udp
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["UDP-RECVFROM:9001,fork", "EXEC:/bin/cat"]
+          ports:
+            - name: udp
+              containerPort: 9001
+              protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-udp
+  namespace: sozu-demo
+spec:
+  selector:
+    app: echo-udp
+  ports:
+    - name: udp
+      port: 9001
+      protocol: UDP
+      targetPort: udp

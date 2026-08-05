@@ -1,3 +1,4 @@
+{{- include "sozu-gateway.validateExposure" . }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -15,22 +16,15 @@ spec:
   {{- end }}
   selector:
     {{- include "sozu-gateway.selectorLabels" . | nindent 4 }}
+  # `exposure` is the single source of this Service's ports, layer 4 included.
+  # `l4.tcpServices`/`udpServices` used to render their own entries too, which
+  # could not work: the controller only programs a mapping whose port the
+  # exposure table carries, and a port in both places is the same
+  # (port, protocol) twice — which the apiserver rejects outright.
   ports:
     {{- range .Values.exposure }}
     - name: {{ .name }}
       port: {{ .port }}
       targetPort: {{ .bind }}
       protocol: {{ .transport | default "TCP" }}
-    {{- end }}
-    {{- range $port, $svc := .Values.l4.tcpServices }}
-    - name: tcp-{{ $port }}
-      port: {{ $port }}
-      targetPort: {{ $port }}
-      protocol: TCP
-    {{- end }}
-  {{- range $port, $svc := .Values.l4.udpServices }}
-    - name: udp-{{ $port }}
-      port: {{ $port }}
-      targetPort: {{ $port }}
-      protocol: UDP
     {{- end }}

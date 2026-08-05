@@ -15,7 +15,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use serde::Serialize;
-use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant};
+use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
 
 mod gateway;
@@ -223,6 +223,11 @@ pub struct Inputs {
     pub gateways: Vec<Arc<Gateway>>,
     pub http_routes: Vec<Arc<HttpRoute>>,
     pub reference_grants: Vec<Arc<ReferenceGrant>>,
+    // Layer-4 route kinds. Optional even when the Gateway API is installed:
+    // the controller probes for them separately and leaves these empty when
+    // their CRDs are absent.
+    pub tcp_routes: Vec<Arc<TcpRoute>>,
+    pub udp_routes: Vec<Arc<UdpRoute>>,
     // L4 (TCP/UDP) port→service maps, ingress-nginx style (`"<port>": "ns/svc:port"`).
     pub tcp_services: Option<ConfigMap>,
     pub udp_services: Option<ConfigMap>,
@@ -321,6 +326,36 @@ pub enum Problem {
         owner: String,
         claimed_by: String,
     },
+    /// A Gateway declares a layer-4 listener on a port the exposure table
+    /// reserves for another namespace. Same rule as [`Problem::L4PortNotOwned`],
+    /// on the Gateway API side of it: down here there is no hostname to
+    /// arbitrate with, so the table names who may claim the socket rather than
+    /// letting two Gateways race for it.
+    ListenerPortNotOwned {
+        listener: String,
+        port: u16,
+        owner: String,
+        claimed_by: String,
+    },
+    /// Two layer-4 routes claim one listen socket for different Services. A
+    /// socket carries exactly one route, so the older one (by
+    /// `creationTimestamp`, then `namespace/name`) keeps it and this one is
+    /// dropped. Settled here rather than in the translator on purpose: a
+    /// translator error fails the whole reconcile, so one tenant's second route
+    /// would stop routing for every other tenant.
+    L4RouteConflict {
+        port: u16,
+        protocol: &'static str,
+        winner: String,
+    },
+    /// A `tcp/udp-services` entry maps a socket a TCPRoute/UDPRoute already
+    /// claims. The route wins: it went through the Gateway's own admission
+    /// controls (listener, `owner`, ReferenceGrant), whereas the ConfigMap path
+    /// is cluster-global and has none. The entry is reported, not served.
+    L4PortClaimedByRoute {
+        port: u16,
+        route: String,
+    },
     WeightedBackendsUnsupported,
     /// A single `backendRef` with `weight: 0` (the standard drain pattern)
     /// must receive no traffic; with every weight zero the spec even calls
@@ -388,6 +423,9 @@ impl Problem {
             Problem::PortNotExposed { .. } => "PortNotExposed",
             Problem::L4PortNotExposed { .. } => "L4PortNotExposed",
             Problem::L4PortNotOwned { .. } => "L4PortNotOwned",
+            Problem::ListenerPortNotOwned { .. } => "ListenerPortNotOwned",
+            Problem::L4RouteConflict { .. } => "L4RouteConflict",
+            Problem::L4PortClaimedByRoute { .. } => "L4PortClaimedByRoute",
             Problem::WeightedBackendsUnsupported => "WeightedBackendsUnsupported",
             Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
             Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
@@ -406,6 +444,7 @@ impl Problem {
     pub fn listener(&self) -> Option<&str> {
         match self {
             Problem::PortNotExposed { listener, .. }
+            | Problem::ListenerPortNotOwned { listener, .. }
             | Problem::NamespaceSelectorUnsupported { listener } => Some(listener),
             _ => None,
         }
@@ -456,9 +495,10 @@ impl std::fmt::Display for Problem {
             Problem::UnsupportedTlsMode { mode } => {
                 write!(f, "TLS mode {mode:?} is not supported (Terminate only)")
             }
-            Problem::UnsupportedProtocol { protocol } => {
-                write!(f, "listener protocol {protocol:?} is not supported (HTTP/HTTPS only)")
-            }
+            Problem::UnsupportedProtocol { protocol } => write!(
+                f,
+                "listener protocol {protocol:?} is not supported (HTTP, HTTPS, TCP and UDP are)"
+            ),
             Problem::PortNotExposed {
                 listener,
                 declared,
@@ -482,6 +522,31 @@ impl std::fmt::Display for Problem {
                 f,
                 "L4 port {port} is reserved for namespace {owner}, but this entry targets \
                  {claimed_by}"
+            ),
+            Problem::ListenerPortNotOwned {
+                listener,
+                port,
+                owner,
+                claimed_by,
+            } => write!(
+                f,
+                "listener {listener} declares L4 port {port}, which is reserved for namespace \
+                 {owner}; this Gateway is in {claimed_by}"
+            ),
+            Problem::L4RouteConflict {
+                port,
+                protocol,
+                winner,
+            } => write!(
+                f,
+                "{protocol} port {port} is already claimed by route {winner} (older, or first by \
+                 name); this route was dropped"
+            ),
+            Problem::L4PortClaimedByRoute { port, route } => write!(
+                f,
+                "L4 port {port} is claimed by route {route}; this tcp/udp-services entry was \
+                 ignored (route attachment goes through the Gateway's admission controls, a \
+                 ConfigMap entry does not)"
             ),
             Problem::WeightedBackendsUnsupported => write!(
                 f,
@@ -1168,6 +1233,7 @@ fn l4_protocol(protocol: ir::L4Protocol) -> ExposedProtocol {
 /// Compile the `tcp/udp-services` ConfigMaps into L4 frontends (+ per-port
 /// results), resolving each target Service to pod-IP backends via the same path
 /// as HTTP. L4 has no host multiplexing: one listen port → one Service.
+#[allow(clippy::too_many_arguments)]
 fn build_l4(
     cfg: &BuildConfig,
     index: &Index,
@@ -1175,6 +1241,7 @@ fn build_l4(
     backends: &mut BTreeMap<String, ir::Backend>,
     referenced: &mut BTreeSet<String>,
     inputs: &Inputs,
+    claimed_by_routes: &BTreeMap<(ir::L4Protocol, SocketAddr), String>,
 ) -> (Vec<ir::L4Frontend>, Vec<L4Result>) {
     let mut l4_frontends = Vec::new();
     let mut results = Vec::new();
@@ -1220,6 +1287,25 @@ fn build_l4(
                         .expect("checked exposed above");
                     let bind = entry.bind;
                     let owner = entry.owner.as_deref();
+                    // A TCPRoute/UDPRoute on this socket wins. It passed the
+                    // Gateway's admission controls; this map is cluster-global
+                    // and passed none. Reported, so a half-migrated cluster
+                    // says which object is serving the port.
+                    if let Some(route) =
+                        claimed_by_routes.get(&(protocol, BuildConfig::bind_addr(bind)))
+                    {
+                        problems.push(Problem::L4PortClaimedByRoute {
+                            port,
+                            route: route.clone(),
+                        });
+                        results.push(L4Result {
+                            protocol: label.to_string(),
+                            listen_port: key.trim().parse().unwrap_or(0),
+                            target: value.clone(),
+                            problems,
+                        });
+                        continue;
+                    }
                     if let Some(owner) = owner.filter(|o| *o != ns) {
                         problems.push(Problem::L4PortNotOwned {
                             port,
@@ -1562,15 +1648,22 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         (&a.listener, &a.names, &a.certificate).cmp(&(&b.listener, &b.names, &b.certificate))
     });
 
-    // L4 (TCP/UDP): same Service→pod-IP resolver, into the same clusters/backends.
-    let (mut l4_frontends, l4_results) = build_l4(
+    // L4 (TCP/UDP). Two sources, and the route one wins any socket both claim:
+    // a TCPRoute/UDPRoute went through the Gateway's admission controls, a
+    // cluster-global ConfigMap entry went through none. The `tcp/udp-services`
+    // path is deprecated and will be removed; until then both are served, and
+    // an entry that loses says so instead of vanishing.
+    let (configmap_l4, l4_results) = build_l4(
         cfg,
         &index,
         &mut clusters,
         &mut backends,
         &mut referenced,
         inputs,
+        &gw.l4_claims,
     );
+    let mut l4_frontends = std::mem::take(&mut gw.l4_frontends);
+    l4_frontends.extend(configmap_l4);
     l4_frontends.sort_by_key(|f| (f.protocol, f.listener));
 
     BuildOutput {

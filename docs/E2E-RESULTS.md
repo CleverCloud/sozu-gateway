@@ -102,6 +102,36 @@ against the `whoami` demo (which echoes the request it received):
 The redirect route has no `backendRef` (the Gateway API forbids combining `RequestRedirect` with
 backends), so it maps to a frontend with no cluster — Sōzu answers the 301 itself.
 
+## 5b. Layer-4 routing through the Gateway API (TCPRoute / UDPRoute)
+
+`just e2e-l4-routes`, on Gateway API **v1.6.1** standard-channel CRDs (which is where
+`tcproutes`/`udproutes` live from v1.6 on — they are no longer experimental-only). A `Gateway`
+with a `protocol: TCP` listener on 9000 and a `protocol: UDP` listener on 9001, both declared in
+the chart's `exposure` table, with a TCPRoute and a UDPRoute attached by `sectionName`.
+
+Probed by an **in-cluster** socat client rather than `kubectl port-forward`: port-forward is
+TCP-only, so a UDPRoute cannot be exercised through it at all, and talking to the Service also
+covers the Service-port → in-pod-bind mapping the exposure table exists for.
+
+| Check | Result |
+| ----- | ------ |
+| TCPRoute `Accepted` / `ResolvedRefs` | **True** / **True** |
+| UDPRoute `Accepted` / `ResolvedRefs` | **True** / **True** |
+| `status.parents[].parentRef.sectionName` | preserved (`echo-tcp`) — see the parentRef-fidelity fix |
+| Listener `Programmed`, `attachedRoutes` | **True**, `1` on each of the two listeners |
+| Raw TCP round-trip through Sōzu | echo returned (`hello-tcproute`) |
+| Raw **UDP** round-trip through Sōzu | echo returned (`hello-udproute`) |
+| Second TCPRoute claiming port 9000 | `Accepted=False`, reason `RouteConflict`, incumbent untouched |
+| Traffic during that conflict | **still served** — the losing route does not fail the reconcile |
+
+The last two rows are the point of settling layer-4 port conflicts in the builder rather than in
+the translator: a `TranslatorError` is propagated by `?` out of `reconcile`, so one tenant's second
+route would have stopped routing for every other tenant, HTTP included.
+
+The UDP round-trip is worth calling out separately: nothing in this repo had ever exercised Sōzu's
+UDP proxy before, so "UDPRoute programs a UDP frontend" and "a datagram comes back" were two
+different claims. Both are now measured.
+
 ## 6. Gateway API conformance (GATEWAY-HTTP)
 
 The **official** `kubernetes-sigs/gateway-api` conformance suite, `GATEWAY-HTTP` profile, run
@@ -218,10 +248,11 @@ The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` Gat
 ## Reproduce
 
 ```sh
-just e2e          # section 1: Ingress + TLS — install + demo app + HTTP/HTTPS + hot removal
-just e2e-gateway  # sections 4–5: Gateway API routing + header/redirect filters
-just e2e-l4       # raw TCP (L4) forwarding through Sōzu
-just e2e-all      # all three, sharing one freshly-built image
+just e2e            # section 1: Ingress + TLS — install + demo app + HTTP/HTTPS + hot removal
+just e2e-gateway    # sections 4–5: Gateway API routing + header/redirect filters
+just e2e-l4         # raw TCP (L4) via the deprecated tcp-services ConfigMap
+just e2e-l4-routes  # section 5b: TCPRoute + UDPRoute through the Gateway API
+just e2e-all        # all four, sharing one freshly-built image
 ```
 
 Each suite builds + pushes the controller image to the anonymous `ttl.sh` registry by default (no

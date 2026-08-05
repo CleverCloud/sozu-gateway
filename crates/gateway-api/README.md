@@ -12,7 +12,7 @@ versions with [`kopium`](https://github.com/kube-rs/kopium) instead.
 ```sh
 GWVER=v1.6.1
 base="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$GWVER/config/crd/standard"
-for f in gatewayclasses gateways httproutes referencegrants; do
+for f in gatewayclasses gateways httproutes referencegrants tcproutes udproutes; do
   curl -sSL "$base/gateway.networking.k8s.io_${f}.yaml" -o "/tmp/${f}.yaml"
 done
 
@@ -20,11 +20,30 @@ cargo install kopium --version 0.24.0
 kopium -f /tmp/gatewayclasses.yaml  > src/gatewayclass.rs
 kopium -f /tmp/gateways.yaml        > src/gateway.rs
 kopium -f /tmp/httproutes.yaml      > src/httproute.rs
-kopium -f /tmp/referencegrants.yaml > src/referencegrant.rs
+kopium -f /tmp/tcproutes.yaml       > src/tcproute.rs
+kopium -f /tmp/udproutes.yaml       > src/udproute.rs
+# NOT bare: see "Pin the served version" below.
+kopium --api-version=v1beta1 -f /tmp/referencegrants.yaml > src/referencegrant.rs
 
 # Required post-processing — see below. Not optional.
 python3 scripts/add-unknown-variants.py
+cargo fmt
 ```
+
+## Pin the served version
+
+Without `--api-version`, kopium generates from the **highest-priority** version
+the CRD declares — not the one every supported cluster serves.
+
+`referencegrants` is the one that bites. Up to Gateway API v1.4 it served only
+`v1beta1`; v1.5 added `v1` as a non-storage version. The bare command therefore
+silently emits `version = "v1"`, nothing fails to compile, and on any cluster
+running Gateway API < v1.5 the controller's `crd_served::<ReferenceGrant>` probe
+takes a genuine 404 — so the whole Gateway API path drops to Ingress-only mode
+behind a single `warn!` line. `v1beta1` is served across the entire range and is
+still the storage version at v1.6.1.
+
+Check the `version = "…"` line of every regenerated file in review.
 
 ## Post-processing: `Unknown` variants
 
