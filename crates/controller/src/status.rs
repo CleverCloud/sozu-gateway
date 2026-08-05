@@ -1,27 +1,37 @@
 //! Gateway API status reporting (Phase 2).
 //!
 //! Writes Accepted/Programmed (Gateway, GatewayClass) and Accepted/ResolvedRefs
-//! (HTTPRoute, per parent) conditions back to the objects.
+//! (routes, per parent) conditions back to the objects.
 //!
 //! **Loop-safe:** it reads the current status, reuses `lastTransitionTime` for
 //! conditions whose (status, reason, message) are unchanged, and skips the PATCH
 //! entirely when nothing changed — so the controller's own status writes never
 //! re-trigger a reconcile. **Best-effort:** every failure is logged, never
 //! propagated, so status reporting can never break routing.
+//!
+//! The route writer is generic over the route kind. Every Gateway API route
+//! carries the same `status.parents[]` shape, but kopium generates a separate
+//! `…Status` / `…StatusParents` / `…StatusParentsParentRef` triple per kind with
+//! nothing in common — they are foreign types, so the trait tying them together
+//! ([`RouteParents`]) is declared here and implemented once per kind.
 
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::{Ingress, IngressLoadBalancerIngress};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
-use kube::{Api, Client};
+use kube::core::NamespaceResourceScope;
+use kube::{Api, Client, Resource};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{debug, warn};
 
-use sozu_gw_builder::{GatewayClassResult, GatewayResult, IngressResult, Problem, RouteResult};
+use sozu_gw_builder::{
+    GatewayClassResult, GatewayResult, IngressResult, Problem, RouteKind, RouteResult,
+};
 use sozu_gw_gateway_api::gateway::{
     GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
 };
-use sozu_gw_gateway_api::httproute::{HttpRouteStatusParents, HttpRouteStatusParentsParentRef};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -75,8 +85,13 @@ pub async fn write_status(
         }
     }
     for route in routes {
-        if let Err(e) = write_route(client, controller_name, route).await {
-            warn!(namespace = %route.namespace, name = %route.name, error = %e, "failed to write HTTPRoute status");
+        // One arm per route kind: the writer is generic, but `Api<K>` needs a
+        // concrete type, so the kind carried by the build result picks it.
+        let written = match route.kind {
+            RouteKind::HttpRoute => write_route::<HttpRoute>(client, controller_name, route).await,
+        };
+        if let Err(e) = written {
+            warn!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, error = %e, "failed to write route status");
         }
     }
 }
@@ -339,30 +354,112 @@ pub(crate) fn gateway_addresses(svc: &Service) -> Vec<GatewayStatusAddresses> {
         .collect()
 }
 
-async fn write_route(
-    client: &Client,
+/// One entry of a route's `status.parents[]`, in the shape **every** Gateway
+/// API route kind shares.
+///
+/// kopium emits a distinct struct per kind with no trait in common, so this is
+/// the controller-side neutral one. It serialises to byte-identical JSON (same
+/// field names, same `skip_serializing_if`), which is what makes it usable both
+/// as what we read the current status into and as what we patch back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteParentStatus {
+    pub conditions: Vec<Condition>,
+    #[serde(rename = "controllerName")]
+    pub controller_name: String,
+    #[serde(rename = "parentRef")]
+    pub parent_ref: RouteParentRef,
+}
+
+/// The `parentRef` a status entry answers for. Its identity is the **whole**
+/// reference, `sectionName` and `port` included: a route may legally name the
+/// same Gateway several times, once per listener, and each of those parentRefs
+/// gets its own entry. Matching on `(name, namespace)` alone collapses them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteParentRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "sectionName"
+    )]
+    pub section_name: Option<String>,
+}
+
+/// A Gateway API route kind that reports per-parent status.
+///
+/// The one thing a route object must offer the writer is its current
+/// `status.parents[]` — everything else (condition building, the loop-safety
+/// comparison, the patch) is kind-independent. Implementations are mechanical
+/// field copies rather than a serde round-trip so the compiler, not a runtime
+/// shape mismatch, catches a generated struct that drifts.
+pub trait RouteParents {
+    fn route_parents(&self) -> Vec<RouteParentStatus>;
+}
+
+impl RouteParents for HttpRoute {
+    fn route_parents(&self) -> Vec<RouteParentStatus> {
+        self.status
+            .iter()
+            .flat_map(|s| s.parents.iter())
+            .map(|p| RouteParentStatus {
+                conditions: p.conditions.clone(),
+                controller_name: p.controller_name.clone(),
+                parent_ref: RouteParentRef {
+                    group: p.parent_ref.group.clone(),
+                    kind: p.parent_ref.kind.clone(),
+                    name: p.parent_ref.name.clone(),
+                    namespace: p.parent_ref.namespace.clone(),
+                    port: p.parent_ref.port,
+                    section_name: p.parent_ref.section_name.clone(),
+                },
+            })
+            .collect()
+    }
+}
+
+/// The `status.parents[]` we want on a route: every entry owned by another
+/// controller kept verbatim, followed by one entry per parentRef we resolved.
+///
+/// Pure, so the loop-safety property is testable without an apiserver: feeding
+/// this function its own output must be a fixed point, or the controller
+/// re-patches on every reconcile.
+fn route_parents(
     controller_name: &str,
     route: &RouteResult,
-) -> Result<(), kube::Error> {
-    let api: Api<HttpRoute> = Api::namespaced(client.clone(), &route.namespace);
-    let current = api.get(&route.name).await?;
-    let generation = current.metadata.generation;
-    let current_parents: Vec<HttpRouteStatusParents> =
-        current.status.map(|s| s.parents).unwrap_or_default();
-
-    // Keep parent entries owned by other controllers untouched.
-    let mut parents: Vec<HttpRouteStatusParents> = current_parents
+    current: &[RouteParentStatus],
+    generation: Option<i64>,
+) -> Vec<RouteParentStatus> {
+    let mut parents: Vec<RouteParentStatus> = current
         .iter()
         .filter(|p| p.controller_name != controller_name)
         .cloned()
         .collect();
 
     for parent in &route.parents {
-        let existing = current_parents.iter().find(|p| {
-            p.controller_name == controller_name
-                && p.parent_ref.name == parent.gateway_name
-                && p.parent_ref.namespace.as_deref() == Some(parent.gateway_namespace.as_str())
-        });
+        let parent_ref = RouteParentRef {
+            group: Some(GW_GROUP.to_string()),
+            kind: Some("Gateway".to_string()),
+            name: parent.gateway_name.clone(),
+            namespace: Some(parent.gateway_namespace.clone()),
+            port: parent.port,
+            section_name: parent.section_name.clone(),
+        };
+        // Matched on the full reference. Keying on (name, namespace) made two
+        // parentRefs to one Gateway that differ only by `sectionName` share a
+        // single entry: each pass rebuilt the second one against the first
+        // one's conditions, `lastTransitionTime` moved, the no-op guard never
+        // held, and the controller re-patched forever.
+        let existing = current
+            .iter()
+            .find(|p| p.controller_name == controller_name && p.parent_ref == parent_ref);
         let parent_problems: Vec<&Problem> = parent.problems.iter().collect();
         let conditions = build_conditions(
             &[
@@ -393,28 +490,39 @@ async fn write_route(
             existing.map(|p| p.conditions.as_slice()),
             generation,
         );
-        parents.push(HttpRouteStatusParents {
+        parents.push(RouteParentStatus {
             conditions,
             controller_name: controller_name.to_string(),
-            parent_ref: HttpRouteStatusParentsParentRef {
-                group: Some(GW_GROUP.to_string()),
-                kind: Some("Gateway".to_string()),
-                name: parent.gateway_name.clone(),
-                namespace: Some(parent.gateway_namespace.clone()),
-                port: None,
-                section_name: None,
-            },
+            parent_ref,
         });
     }
+    parents
+}
+
+async fn write_route<K>(
+    client: &Client,
+    controller_name: &str,
+    route: &RouteResult,
+) -> Result<(), kube::Error>
+where
+    K: RouteParents + Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned,
+    K: std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    let api: Api<K> = Api::namespaced(client.clone(), &route.namespace);
+    let current = api.get(&route.name).await?;
+    let generation = current.meta().generation;
+    let current_parents = current.route_parents();
+    let parents = route_parents(controller_name, route, &current_parents, generation);
 
     // Skip the write when the full parents list is unchanged (loop-safety).
-    if serde_json::to_value(&current_parents).ok() == serde_json::to_value(&parents).ok() {
+    if current_parents == parents {
         return Ok(());
     }
     let patch = json!({ "status": { "parents": parents } });
     api.patch_status(&route.name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
-    debug!(namespace = %route.namespace, name = %route.name, "HTTPRoute status updated");
+    debug!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, "route status updated");
     Ok(())
 }
 
@@ -494,6 +602,96 @@ async fn write_one_ingress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sozu_gw_builder::RouteParentResult;
+
+    fn parent(section: Option<&str>, accepted: bool) -> RouteParentResult {
+        RouteParentResult {
+            gateway_namespace: "sozu-system".to_string(),
+            gateway_name: "gw".to_string(),
+            section_name: section.map(str::to_string),
+            port: None,
+            accepted,
+            accepted_reason: if accepted {
+                "Accepted"
+            } else {
+                "NoMatchingParent"
+            },
+            resolved_refs: true,
+            resolved_refs_reason: "ResolvedRefs",
+            problems: vec![],
+        }
+    }
+
+    fn route(parents: Vec<RouteParentResult>) -> RouteResult {
+        RouteResult {
+            kind: RouteKind::HttpRoute,
+            namespace: "demo".to_string(),
+            name: "web".to_string(),
+            uid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            parents,
+        }
+    }
+
+    /// Two parentRefs to one Gateway that differ only by `sectionName` must
+    /// produce two *distinguishable* status entries, or neither can be matched
+    /// back to its own conditions on the next pass. This is the normal shape
+    /// for a layer-4 route, where a Gateway may declare several listeners on
+    /// one port and `sectionName` is the only way to pick one.
+    #[test]
+    fn parent_entries_carry_section_name_and_port() {
+        let mut with_port = parent(Some("b"), true);
+        with_port.port = Some(8443);
+        let r = route(vec![parent(Some("a"), true), with_port]);
+        let parents = route_parents("sozu.io/gateway-controller", &r, &[], Some(3));
+
+        assert_eq!(parents.len(), 2);
+        assert_eq!(parents[0].parent_ref.section_name.as_deref(), Some("a"));
+        assert_eq!(parents[1].parent_ref.section_name.as_deref(), Some("b"));
+        assert_eq!(parents[1].parent_ref.port, Some(8443));
+        assert_ne!(parents[0].parent_ref, parents[1].parent_ref);
+    }
+
+    /// The loop-safety contract, mechanically: feeding the writer its own
+    /// output must change nothing, so the PATCH is skipped. With two parents
+    /// differing only by `sectionName` and *different* conditions this used to
+    /// fail — both matched the first stored entry, the second one's
+    /// `lastTransitionTime` moved every pass, and the controller re-patched on
+    /// every reconcile forever.
+    #[test]
+    fn rebuilding_from_our_own_status_is_a_fixed_point() {
+        let controller = "sozu.io/gateway-controller";
+        let r = route(vec![parent(Some("a"), true), parent(Some("b"), false)]);
+        let first = route_parents(controller, &r, &[], Some(3));
+        let second = route_parents(controller, &r, &first, Some(3));
+        assert_eq!(first, second, "a second pass must be a no-op");
+    }
+
+    /// Entries written by another controller are carried through untouched:
+    /// a route may be attached to somebody else's Gateway as well as ours.
+    #[test]
+    fn other_controllers_entries_are_preserved() {
+        let controller = "sozu.io/gateway-controller";
+        let theirs = RouteParentStatus {
+            conditions: vec![],
+            controller_name: "example.net/other".to_string(),
+            parent_ref: RouteParentRef {
+                group: Some(GW_GROUP.to_string()),
+                kind: Some("Gateway".to_string()),
+                name: "other-gw".to_string(),
+                namespace: Some("other".to_string()),
+                port: None,
+                section_name: None,
+            },
+        };
+        let parents = route_parents(
+            controller,
+            &route(vec![parent(None, true)]),
+            std::slice::from_ref(&theirs),
+            None,
+        );
+        assert_eq!(parents.len(), 2);
+        assert!(parents.contains(&theirs));
+    }
 
     #[test]
     fn problems_message_is_deterministic_deduped_and_capped() {

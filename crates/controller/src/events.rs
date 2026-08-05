@@ -17,8 +17,14 @@
 //! a new occurrence, users should see it again.
 //!
 //! **Best-effort:** like status writes, a publish failure is logged and
-//! swallowed — events can never break routing. L4 problems are out of scope:
-//! their "owner" is a ConfigMap entry, not an object users describe.
+//! swallowed — events can never break routing.
+//!
+//! Every problem an *object* owns is published on that object, whatever its
+//! kind: the route kinds carry theirs on the route, which is why the owner's
+//! kind travels in the build result instead of being a literal here. The one
+//! exception is the `tcp/udp-services` ConfigMap path, whose "owner" is a map
+//! entry rather than an object anybody can describe — those problems reach
+//! controller logs only.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +36,7 @@ use tracing::debug;
 
 const GW_API_VERSION: &str = "gateway.networking.k8s.io/v1";
 
-/// A namespaced object that owns problems (Ingress, Gateway or HTTPRoute).
+/// A namespaced object that owns problems (Ingress, Gateway or a route).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Owner {
     api_version: &'static str,
@@ -154,7 +160,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
             add(
                 Owner {
                     api_version: GW_API_VERSION,
-                    kind: "HTTPRoute",
+                    kind: route.kind.as_str(),
                     namespace: route.namespace.clone(),
                     name: route.name.clone(),
                     uid: route.uid.clone(),

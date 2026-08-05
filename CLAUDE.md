@@ -139,8 +139,13 @@ The CRDs are **optional**: the controller probes for them and runs Ingress-only 
 (`Accepted`/`Programmed`/`ResolvedRefs`) is written by [`controller/src/status.rs`](crates/controller/src/status.rs),
 which is **loop-safe** — it reuses `lastTransitionTime` for unchanged conditions and skips no-op
 patches, so the controller's own status writes never re-trigger it. Status writes are best-effort.
+The route writer is **generic over the route kind** (kopium emits one status triple per kind with no
+trait in common, so `RouteParents` is declared controller-side and implemented per kind) and keys a
+`status.parents[]` entry on the **whole** parentRef, `sectionName` and `port` included: one route may
+name a Gateway once per listener, and matching on `(name, namespace)` alone collapses those entries
+into one whose `lastTransitionTime` then moves on every pass.
 `Problem`s also surface to users: as the detail in `False` condition messages, and as Warning
-**Events** on the owning Ingress/Gateway/HTTPRoute ([`controller/src/events.rs`](crates/controller/src/events.rs),
+**Events** on the owning Ingress/Gateway/route ([`controller/src/events.rs`](crates/controller/src/events.rs),
 diffed against the previous pass so resyncs never flood etcd).
 
 **Conformance is a documented partial, by design.** The official Gateway API v1.2.1 `GATEWAY-HTTP`
