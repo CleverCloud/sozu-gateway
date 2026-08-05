@@ -99,12 +99,33 @@ pub struct RouteParentResult {
     pub problems: Vec<Problem>,
 }
 
-/// Status of one `HTTPRoute` across all of its parents.
+/// Which Gateway API route kind a [`RouteResult`] describes.
+///
+/// Status conditions and Events are written back onto the *object*, so the
+/// kind has to travel with the result: the controller reads it to pick the
+/// `Api<K>` to patch and the Event's `involvedObject.kind`. Today HTTPRoute is
+/// the only member; the layer-4 kinds join it without touching either writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RouteKind {
+    HttpRoute,
+}
+
+impl RouteKind {
+    /// The kind's Kubernetes spelling (`kind:` in the manifest).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RouteKind::HttpRoute => "HTTPRoute",
+        }
+    }
+}
+
+/// Status of one route object across all of its parents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RouteResult {
+    pub kind: RouteKind,
     pub namespace: String,
     pub name: String,
-    /// `metadata.uid` of the source HTTPRoute (see `IngressResult::uid`).
+    /// `metadata.uid` of the source route (see `IngressResult::uid`).
     pub uid: Option<String>,
     pub parents: Vec<RouteParentResult>,
 }
@@ -499,6 +520,7 @@ pub(crate) fn build_gateway(
 
         if !parents.is_empty() {
             routes.push(RouteResult {
+                kind: RouteKind::HttpRoute,
                 namespace: rns,
                 name: rname,
                 uid: crate::obj_uid(&route.metadata),

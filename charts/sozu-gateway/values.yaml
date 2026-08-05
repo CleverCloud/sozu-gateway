@@ -60,6 +60,13 @@ rbac:
   # defaults to on. Turn it off for least-privilege deployments that accept
   # degraded status; the chart then also tells the controller to skip the
   # writes (they are best-effort either way).
+  #
+  # What "degraded status" means, spelled out: this switch covers EVERY route
+  # kind, not just HTTPRoute. With it off, a route that this controller refuses
+  # — an unsupported filter, an unresolvable backend, a port nobody exposes —
+  # reads exactly like one it serves. The only remaining signal is the Warning
+  # Event on the object (`kubectl describe`), which is granted separately and
+  # unconditionally.
   allowGatewayStatusWrites: true
 
 # Ports this gateway exposes. Single source of truth for the Service's ports,

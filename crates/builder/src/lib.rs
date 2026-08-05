@@ -20,7 +20,7 @@ use sozu_gw_ir as ir;
 
 mod gateway;
 pub use gateway::{
-    GatewayClassResult, GatewayResult, ListenerStatus, RouteParentResult, RouteResult,
+    GatewayClassResult, GatewayResult, ListenerStatus, RouteKind, RouteParentResult, RouteResult,
 };
 
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
