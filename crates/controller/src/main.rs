@@ -1,7 +1,7 @@
 //! Sōzu gateway controller binary.
 //!
 //! A singleton controller: it maintains reflector caches for Ingress,
-//! IngressClass, Service, EndpointSlice and Secret; any relevant change (or a
+//! IngressClass, Namespace, Service, EndpointSlice and Secret; any change (or a
 //! periodic resync) triggers one debounced **global** reconcile that rebuilds
 //! the whole desired state from the caches, diffs it against the last-applied
 //! shadow `ConfigState`, and pushes only the minimal mutations to Sōzu.
@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use kube::api::ListParams;
@@ -132,6 +132,7 @@ struct Args {
 /// Reflector read handles for every watched resource type.
 struct Stores {
     ingresses: Store<Ingress>,
+    namespaces: Store<Namespace>,
     ingress_classes: Store<IngressClass>,
     services: Store<Service>,
     endpointslices: Store<EndpointSlice>,
@@ -502,6 +503,7 @@ async fn reconcile(
     // them as-is, so a reconcile never deep-clones the whole cluster state.
     let inputs = Inputs {
         ingresses: stores.ingresses.state(),
+        namespaces: stores.namespaces.state(),
         services: stores.services.state(),
         endpointslices: stores.endpointslices.state(),
         secrets: stores.secrets.state(),
@@ -730,6 +732,17 @@ async fn main() -> Result<()> {
         tx.clone(),
         "ingress",
     );
+    // Namespaces are watched for their **labels**: that is what
+    // `allowedRoutes.namespaces.selector` selects on, and a label edit changes
+    // which routes a listener admits, so it has to wake the loop.
+    let (namespaces, w) = reflector::store();
+    spawn_watch::<Namespace>(
+        Api::all(client.clone()),
+        watch_all(),
+        w,
+        tx.clone(),
+        "namespace",
+    );
     let (ingress_classes, w) = reflector::store();
     spawn_watch::<IngressClass>(
         Api::all(client.clone()),
@@ -842,6 +855,7 @@ async fn main() -> Result<()> {
 
     let stores = Stores {
         ingresses,
+        namespaces,
         ingress_classes,
         services,
         endpointslices,
@@ -865,6 +879,7 @@ async fn main() -> Result<()> {
     let sync = async {
         tokio::try_join!(
             stores.ingresses.wait_until_ready(),
+            stores.namespaces.wait_until_ready(),
             stores.ingress_classes.wait_until_ready(),
             stores.services.wait_until_ready(),
             stores.endpointslices.wait_until_ready(),

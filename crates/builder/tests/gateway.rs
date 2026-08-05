@@ -1125,13 +1125,20 @@ fn cross_namespace_route_to_all_listener_is_accepted() {
     assert_eq!(p.accepted_reason, "Accepted");
 }
 
+/// A Namespace carrying `labels`, so a selector has something to match on.
+fn namespace(name: &str, labels: &[(&str, &str)]) -> k8s_openapi::api::core::v1::Namespace {
+    let labels: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), json!(v)))
+        .collect();
+    from_json(json!({ "metadata": { "name": name, "labels": labels } }))
+}
+
 #[test]
-fn selector_listener_fails_closed_and_is_reported() {
-    // `allowedRoutes.namespaces.from: Selector` cannot be evaluated (no
-    // Namespace label index). It must fail CLOSED: no route is admitted from
-    // ANY namespace (a selector replaces Same, it does not extend it), the
-    // listener must not read cleanly Programmed, and the gap is reported —
-    // never silently widened to All.
+fn a_selector_listener_admits_exactly_the_namespaces_it_selects() {
+    // `from: Selector` is evaluated against the Namespace cache's labels. It
+    // *replaces* `Same` rather than extending it, so the Gateway's own
+    // namespace is admitted only if its labels match — like any other.
     let gw: Gateway = from_json(json!({
         "metadata": { "name": "gw", "namespace": "demo" },
         "spec": { "gatewayClassName": "sozu", "listeners": [
@@ -1140,15 +1147,15 @@ fn selector_listener_fails_closed_and_is_reported() {
                   "selector": { "matchLabels": { "team": "web" } } } } }
         ]}
     }));
-    let cross_ns_route: HttpRoute = from_json(json!({
-        "metadata": { "name": "cross", "namespace": "other" },
+    let admitted: HttpRoute = from_json(json!({
+        "metadata": { "name": "admitted", "namespace": "other" },
         "spec": {
             "parentRefs": [{ "name": "gw", "namespace": "demo" }],
             "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
         }
     }));
-    let same_ns_route: HttpRoute = from_json(json!({
-        "metadata": { "name": "same", "namespace": "demo" },
+    let refused: HttpRoute = from_json(json!({
+        "metadata": { "name": "refused", "namespace": "demo" },
         "spec": {
             "parentRefs": [{ "name": "gw" }],
             "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
@@ -1157,35 +1164,64 @@ fn selector_listener_fails_closed_and_is_reported() {
     let inputs = Inputs {
         gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
         gateways: arcs(vec![gw]),
-        http_routes: arcs(vec![cross_ns_route, same_ns_route]),
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
+        http_routes: arcs(vec![admitted, refused]),
+        // `other` carries the label; `demo` — the Gateway's own namespace —
+        // does not.
+        namespaces: arcs(vec![
+            namespace("other", &[("team", "web")]),
+            namespace("demo", &[("team", "infra")]),
+        ]),
+        // The admitted route lives in `other`, so its backendRef resolves
+        // there: give that namespace its own Service, or the route would be
+        // admitted and then route nowhere.
+        services: arcs(vec![
+            web_service(),
+            from_json(json!({
+                "metadata": { "name": "web", "namespace": "other" },
+                "spec": { "ports": [{ "name": "http", "port": 80, "targetPort": 8080 }] }
+            })),
+        ]),
+        endpointslices: arcs(vec![
+            web_slice(),
+            from_json(json!({
+                "metadata": { "name": "web-1", "namespace": "other",
+                    "labels": { "kubernetes.io/service-name": "web" } },
+                "addressType": "IPv4",
+                "ports": [{ "name": "http", "port": 8080 }],
+                "endpoints": [{ "addresses": ["10.244.1.5"], "conditions": { "ready": true } }]
+            })),
+        ]),
         ..Default::default()
     };
     let out = build(&BuildConfig::default(), &inputs);
 
-    assert!(out.ir.frontends.is_empty(), "no route admitted");
-    for route in &out.routes {
-        let p = &route.parents[0];
-        assert!(!p.accepted, "{} must not be admitted", route.name);
-        assert_eq!(p.accepted_reason, "NotAllowedByListeners");
-    }
-    assert!(out.gateways[0]
-        .problems
-        .contains(&Problem::NamespaceSelectorUnsupported {
-            listener: "http".to_string(),
-        }));
+    let admitted = out.routes.iter().find(|r| r.name == "admitted").unwrap();
+    assert!(admitted.parents[0].accepted, "the labelled namespace is in");
+    assert_eq!(admitted.parents[0].accepted_reason, "Accepted");
+    let refused = out.routes.iter().find(|r| r.name == "refused").unwrap();
+    assert!(
+        !refused.parents[0].accepted,
+        "Selector replaces Same: the Gateway's own namespace is not special"
+    );
+    assert_eq!(refused.parents[0].accepted_reason, "NotAllowedByListeners");
+
+    // The listener is ordinary now: programmed, no problem reported, and it
+    // counts only the route it actually admits.
     let l = &out.gateways[0].listeners[0];
-    assert!(!l.programmed, "listener must not read cleanly Programmed");
-    assert_eq!(l.programmed_reason, "Invalid");
+    assert!(
+        l.programmed,
+        "a selector that parses is just an admission policy"
+    );
+    assert_eq!(l.attached_routes, 1);
+    assert!(out.gateways[0].problems.is_empty());
+    assert_eq!(out.ir.frontends.len(), 1);
 }
 
 #[test]
-fn selector_https_listener_loads_no_certificates() {
-    // Fail closed means ALL the way closed: an HTTPS listener with perfectly
-    // valid certificateRefs but `from: Selector` admits no routes, so its
-    // certificates must not be loaded into Sōzu either — exactly like the
-    // port-mismatch path, which skips cert loading entirely.
+fn a_selector_listener_loads_its_certificates() {
+    // The old fail-closed stance skipped cert loading, because material for a
+    // listener that serves nothing has no business in Sōzu. A selector that
+    // parses serves routes, so its certificates load like any other listener's.
     let gw: Gateway = from_json(json!({
         "metadata": { "name": "gw", "namespace": "demo" },
         "spec": { "gatewayClassName": "sozu", "listeners": [{
@@ -1200,6 +1236,7 @@ fn selector_https_listener_loads_no_certificates() {
         gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
         gateways: arcs(vec![gw]),
         http_routes: arcs(vec![route_to_web(false)]),
+        namespaces: arcs(vec![namespace("demo", &[("team", "web")])]),
         services: arcs(vec![web_service()]),
         endpointslices: arcs(vec![web_slice()]),
         secrets: arcs(vec![tls_secret()]),
@@ -1207,19 +1244,91 @@ fn selector_https_listener_loads_no_certificates() {
     };
     let out = build(&BuildConfig::default(), &inputs);
 
-    assert!(
-        out.ir.certificates.is_empty(),
-        "a Selector listener must load no certificates"
-    );
-    assert!(out.ir.frontends.is_empty(), "and admit no routes");
+    assert_eq!(out.ir.certificates.len(), 1);
+    assert!(!out.ir.frontends.is_empty());
+    let l = &out.gateways[0].listeners[0];
+    assert!(l.programmed);
+    assert!(out.gateways[0].problems.is_empty());
+}
+
+#[test]
+fn a_selector_that_cannot_be_evaluated_still_fails_closed() {
+    // `operator` is a bare string in the CRD, so a newer Gateway API can add
+    // one this build cannot name. That is the case the fail-closed stance is
+    // for: admit nothing, do not read cleanly Programmed, load no certificate,
+    // and say why — never widen a restriction into `All` by guessing.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [{
+            "name": "https", "protocol": "HTTPS", "port": 443,
+            "hostname": "app.example.com",
+            "tls": { "mode": "Terminate", "certificateRefs": [{ "name": "app-tls" }] },
+            "allowedRoutes": { "namespaces": { "from": "Selector", "selector": {
+                "matchExpressions": [{ "key": "team", "operator": "Sorta", "values": ["web"] }]
+            } } }
+        }]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        namespaces: arcs(vec![namespace("demo", &[("team", "web")])]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.frontends.is_empty(), "no route admitted");
+    assert!(out.ir.certificates.is_empty(), "and no certificate loaded");
     let l = &out.gateways[0].listeners[0];
     assert!(!l.programmed);
     assert_eq!(l.programmed_reason, "Invalid");
-    assert!(out.gateways[0]
-        .problems
-        .contains(&Problem::NamespaceSelectorUnsupported {
-            listener: "https".to_string(),
-        }));
+    assert!(out.gateways[0].problems.iter().any(|p| matches!(
+        p,
+        Problem::NamespaceSelectorInvalid { listener, reason }
+            if listener == "https" && reason.contains("Sorta")
+    )));
+    assert_eq!(
+        out.routes[0].parents[0].accepted_reason,
+        "NotAllowedByListeners"
+    );
+}
+
+#[test]
+fn a_namespace_missing_from_the_cache_admits_nothing() {
+    // Only reachable in the window before the Namespace cache syncs. A route
+    // whose namespace we cannot look up cannot be matched against the
+    // selector, so it is refused rather than waved through; the next event
+    // re-evaluates it.
+    let gw: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu", "listeners": [
+            { "name": "http", "protocol": "HTTP", "port": 80,
+              "allowedRoutes": { "namespaces": { "from": "Selector",
+                  "selector": {} } } }
+        ]}
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        namespaces: arcs(vec![]), // cache still empty
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    // The selector itself is valid and matches everything, so nothing is
+    // *reported* — there is no gap to report, only a namespace we cannot see.
+    assert!(out.ir.frontends.is_empty());
+    assert!(out.gateways[0].problems.is_empty());
+    assert_eq!(
+        out.routes[0].parents[0].accepted_reason,
+        "NotAllowedByListeners"
+    );
 }
 
 #[test]

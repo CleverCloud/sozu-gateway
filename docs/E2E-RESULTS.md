@@ -184,43 +184,41 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 | 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml) | **conditioned run** — the `Selector` base Gateway carries `gateway-api/skip-this-for-readiness`, without which nothing runs at all. **Not comparable to row 1**: different suite, denominator 33 → 37, and a base object excluded |
 | 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml) | **control run** on `master` (c68a72d, i.e. E0–E6), same conditioning as row 3. Identical result *and identical failed-test set* → E7–E11 moved no test either way |
 
+| 2026-08-05 | v1.6.1 | v1.6.1 | **18 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml) | **unconditioned** — nothing excluded, nothing annotated. `from: Selector` is evaluated for real, so the setup gate passes on its own; `HTTPRouteCrossNamespace` newly passes |
+
 > **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
-> number to quote. Quoting `17/37` without "with a base Gateway excluded from readiness" would be exactly the
-> kind of decontextualised figure this log was created to stop.
+> number to quote — quoting `17/37` without "with a base Gateway excluded from readiness" is exactly
+> the kind of decontextualised figure this log was created to stop. **Row 5 is the first
+> unconditioned figure on the v1.6.1 suite** and the one to cite.
 
-### v1.6.1: `Selector` stopped costing 5 tests and started costing all of them
+### `Selector` is evaluated now, and the suite runs
 
-The single most important result of this pass, and it changes a roadmap priority rather than a
-number.
+Rows 2–4 were taken before `allowedRoutes.namespaces.from: Selector` was implemented, and they are
+kept because the sequence is the point. What follows is the state they described; row 5 is what
+changed.
 
 The suite's shared base manifests include a `backend-namespaces` Gateway whose listener uses
-`allowedRoutes.namespaces.from: Selector`. This controller has no Namespace label index, so it
-fails that listener **closed** — `Programmed: False` — which is the honest stance and the reason
-row 1's score dropped from 16 to 12.
-
-On the **v1.6.1** suite, `NamespacesMustBeReady`
-(`conformance/utils/kubernetes/helpers.go`) requires **every** Gateway in the conformance
-namespaces to be `Programmed: True`, and the suite calls it during *setup*. One Gateway we fail
-closed therefore aborts the entire profile before a single test runs: 2 530 polling lines, all
-naming that one object, then `context deadline exceeded`.
+`from: Selector`. With no Namespace label index the controller failed that listener **closed** —
+`Programmed: False` — and `NamespacesMustBeReady` requires *every* Gateway in the conformance
+namespaces to be Programmed **during setup**. One object we failed closed therefore aborted the
+whole profile before a single test ran: 2 530 polling lines naming it, then
+`context deadline exceeded`.
 
 So the arithmetic in the roadmap — "recovering the 5 `Selector` tests takes 12/33 to ~17/33, still
-a failure, so do it for correctness rather than for the scoreboard" — was right about the *reason*
-and is now wrong about the *stakes*. Evaluating `Selector` is no longer the highest-leverage item
-on the board; it is the **precondition for measuring anything at all** on a current suite.
+a failure, so do it for correctness rather than for the scoreboard" — was right about the reason
+and understated the stakes: on a current suite it was the precondition for measuring anything.
 
-Row 3 confirms the documented blast radius to the letter. Excluding that one Gateway from the
-readiness gate flips exactly the three tests the analysis said were gated on its *setup* —
-`GatewayModifyListeners`, `GatewayObservedGenerationBump`, `HTTPRouteObservedGenerationBump` — and
-leaves failing the two that genuinely need it to work, `HTTPRouteCrossNamespace` and
-`GatewayWithAttachedRoutes`.
+**Row 5 closes that.** The listener is evaluated against the Namespace cache's labels, the base
+Gateway reads `Programmed: True` on its own, and the suite runs end to end with nothing excluded
+and nothing annotated: **18/37 core**. `HTTPRouteCrossNamespace` newly passes on top of the three
+the exclusion had already unblocked.
 
-The rest of the 12 → 17 delta is the suite growing: v1.6.1 adds four core tests to GATEWAY-HTTP
+`GatewayWithAttachedRoutes` — the fifth of the documented blast radius — still fails, and is no
+longer attributable to `Selector`. Why is not yet measured, so it is listed as an open item below
+rather than explained here.
+
+The rest of the 12 → 18 delta is the suite growing: v1.6.1 adds four core tests to GATEWAY-HTTP
 (33 → 37), of which two pass and two fail (`HTTPRouteMultipleGateways`, `HTTPRouteNoBackendRefs`).
-Nothing in the E7–E11 work moved a test either way — row 4 is `master` (E0–E6) under the same
-conditioning, and it returns not just the same counts but the same twenty failed test names. That
-is a measurement, not an inference: the whole point of a second pass is that "our changes did
-nothing here" has to be shown rather than assumed.
 
 ### Why the two passes are not the two the roadmap asked for
 
@@ -246,7 +244,7 @@ Each re-run keeps paying for itself. This one caught a controller bug in the fie
 write could park the reconcile loop for ~5 minutes (kube's default ~295 s read timeout), starving
 every status-polling test. Fixed by giving one-shot API calls a seconds-bounded client.
 
-> **The `Selector` fail-closed blast radius (5 tests).** The suite's shared base infrastructure
+> **Historical — the `Selector` fail-closed blast radius (5 tests), before row 5 fixed it.** The suite's shared base infrastructure
 > includes a `backend-namespaces` Gateway whose listeners use
 > `allowedRoutes.namespaces.from: Selector`. An unevaluable selector fails CLOSED (the listener
 > admits no routes, `Programmed: False`), so that base Gateway never reads `Programmed` — which
@@ -277,9 +275,9 @@ go test . -run TestConformance -timeout 150m -args \
 The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
 Name the resulting file `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml` and add a row above.
 
-**It will abort in setup** until `allowedRoutes.namespaces.from: Selector` is evaluated for real
-(see above). To get a per-test picture anyway, keep the base Gateway out of the readiness gate
-while the run starts — and record the row as *conditioned*, never as a score:
+It runs unconditioned now. Rows 2–4 predate the `Selector` implementation, when the suite aborted
+in setup; the workaround they used was to keep the base Gateway out of the readiness gate while the
+run started, and it is kept here only because those rows cite it:
 
 ```bash
 # alongside the run, until the suite is past setup
@@ -332,12 +330,12 @@ a conditions-only guard would compute the new list and never write it.
   tests). Real users on a shared LB route by hostname (no collision).
 
 **Implementable remaining gaps** (would raise the count):
-1. **Evaluate `allowedRoutes.namespaces.from: Selector` for real** — the fail-closed stance exists
-   because the controller has no Namespace label index, *not* because of any Sōzu limit. A
-   Namespace reflector + label matching would flip Selector to supported. On the v1.2.1 suite that
-   was worth 5 tests; on **v1.6.1 it is worth the entire run**, which aborts in setup without it
-   (see above). No longer "highest-leverage item" — it is the precondition for measuring at all.
-2. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
+1. ~~**Evaluate `allowedRoutes.namespaces.from: Selector` for real**~~ — **done** (row 5). It was
+   worth the entire run, not 5 tests: without it the v1.6.1 suite aborted in setup.
+2. **`GatewayWithAttachedRoutes`** — was attributed to the `Selector` blast radius and still fails
+   without it. Not diagnosed; it wants its own look at how `attachedRoutes` is counted against what
+   the test expects.
+3. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
    shared `:443`; intertwined with the catch-all-collision limit above.
 
 (`GatewaySecret{Invalid,Missing}ReferenceGrant` now pass — cert `ReferenceGrant` denial reports

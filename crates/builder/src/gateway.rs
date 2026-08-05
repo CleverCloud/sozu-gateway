@@ -40,6 +40,7 @@ use sozu_gw_gateway_api::httproute::{
 use sozu_gw_gateway_api::{TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
 
+use crate::selector::NamespaceSelector;
 use crate::{
     add_service_route, extract_cert, meta_nn, BuildConfig, ExposedProtocol, FingerprintedCert,
     FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
@@ -301,19 +302,29 @@ fn build_listener(
         supported_kinds: vec![],
     };
 
-    // An unevaluable namespace selector fails closed exactly like the other
-    // fail-closed listener paths: the listener admits no routes (see
-    // `AllowedFrom::admits`), must not read cleanly Programmed, and — like
-    // the port-mismatch path — loads none of its certificates into Sōzu
-    // (material for a listener that serves nothing has no business there).
-    let selector_unsupported = routable && matches!(info.allow_from, AllowedFrom::Selector);
-    if selector_unsupported {
-        info.programmed = false;
-        info.programmed_reason = "Invalid";
-        problems.push(Problem::NamespaceSelectorUnsupported {
-            listener: l.name.clone(),
-        });
-    }
+    // A selector that *parses* is just another admission policy and changes
+    // nothing about programming the listener. One we cannot evaluate fails
+    // closed exactly like the other fail-closed paths: the listener admits no
+    // routes (see `AllowedFrom::admits`), must not read cleanly Programmed,
+    // and — like the port-mismatch path — loads none of its certificates into
+    // Sōzu, since material for a listener that serves nothing has no business
+    // there.
+    let selector_unevaluable = match &info.allow_from {
+        AllowedFrom::Selector(s) if routable => s.unevaluable().map(str::to_string),
+        _ => None,
+    };
+    let selector_unevaluable = match selector_unevaluable {
+        Some(reason) => {
+            info.programmed = false;
+            info.programmed_reason = "Invalid";
+            problems.push(Problem::NamespaceSelectorInvalid {
+                listener: l.name.clone(),
+                reason,
+            });
+            true
+        }
+        None => false,
+    };
 
     let Some(protocol) = protocol else {
         info.accepted = false;
@@ -376,7 +387,7 @@ fn build_listener(
         }
     }
 
-    if !selector_unsupported {
+    if !selector_unevaluable {
         match protocol {
             ListenerProtocol::Http => info.programmed = true,
             ListenerProtocol::Https => {
@@ -429,42 +440,51 @@ fn listener_kinds(
     info
 }
 
-/// A listener's `allowedRoutes.namespaces.from` policy. `Selector` is
-/// unsupported — there is no Namespace label index to evaluate it against — so
-/// it fails CLOSED: the listener admits no routes at all and the gap is
-/// reported ([`Problem::NamespaceSelectorUnsupported`]). Treating it as
-/// permissive would silently admit every namespace on a control the Gateway
-/// owner set precisely to restrict admission.
-#[derive(Clone, Copy)]
+/// A listener's `allowedRoutes.namespaces.from` policy.
+///
+/// `Selector` is evaluated against the Namespace cache's labels. A selector
+/// this build cannot evaluate — an unknown operator, a malformed expression,
+/// `from: Selector` with no selector — still fails CLOSED and is reported
+/// ([`Problem::NamespaceSelectorInvalid`]): guessing at a control the Gateway
+/// owner set precisely to *restrict* admission is the one outcome to avoid.
+///
+/// A member of `from` this build does not know falls back to `Same`, the
+/// narrowest policy, for the same reason.
+#[derive(Clone)]
 enum AllowedFrom {
     Same,
     All,
-    Selector,
+    Selector(NamespaceSelector),
 }
 
 impl AllowedFrom {
     fn of(l: &sozu_gw_gateway_api::gateway::GatewayListeners) -> Self {
-        match l
+        let namespaces = l
             .allowed_routes
             .as_ref()
-            .and_then(|ar| ar.namespaces.as_ref())
-            .and_then(|ns| ns.from.as_ref())
-        {
+            .and_then(|ar| ar.namespaces.as_ref());
+        match namespaces.and_then(|ns| ns.from.as_ref()) {
             Some(ApiAllowedFrom::All) => AllowedFrom::All,
-            Some(ApiAllowedFrom::Selector) => AllowedFrom::Selector,
-            _ => AllowedFrom::Same, // unset defaults to Same
+            Some(ApiAllowedFrom::Selector) => AllowedFrom::Selector(NamespaceSelector::parse(
+                namespaces.and_then(|ns| ns.selector.as_ref()),
+            )),
+            // Unset defaults to Same; so does a member this build cannot name.
+            _ => AllowedFrom::Same,
         }
     }
 
     /// Does this listener admit a route from `route_ns` (gateway in `gw_ns`)?
-    fn admits(self, route_ns: &str, gw_ns: &str) -> bool {
+    ///
+    /// `Selector` *replaces* `Same` rather than extending it: the Gateway's own
+    /// namespace is admitted only if its labels match, like any other.
+    fn admits(&self, route_ns: &str, gw_ns: &str, index: &Index) -> bool {
         match self {
             AllowedFrom::All => true,
             AllowedFrom::Same => route_ns == gw_ns,
-            // Unsupported means unsupported: an unevaluable selector admits
-            // nothing — not even the Gateway's own namespace (`from: Selector`
-            // replaces `Same`, it does not extend it).
-            AllowedFrom::Selector => false,
+            AllowedFrom::Selector(selector) => index
+                .namespace_labels
+                .get(route_ns)
+                .is_some_and(|labels| selector.matches(labels)),
         }
     }
 }
@@ -580,7 +600,7 @@ pub(crate) fn build_gateway(
                 // API spells a kind refusal `NotAllowedByListeners`, and
                 // `NoMatchingParent` means the parentRef addressed nothing.
                 .filter(|l| l.admits_kind(RouteKind::HttpRoute))
-                .filter(|l| l.allow_from.admits(&rns, &gw_ns))
+                .filter(|l| l.allow_from.admits(&rns, &gw_ns, index))
                 .collect();
 
             let mut problems = Vec::new();
@@ -1612,7 +1632,7 @@ fn attach_l4_routes(
                 // not `NoMatchingParent`: the parentRef addressed a listener,
                 // that listener just does not serve this kind.
                 .filter(|l| l.admits_kind(view.kind))
-                .filter(|l| l.allow_from.admits(&view.namespace, &gw_ns))
+                .filter(|l| l.allow_from.admits(&view.namespace, &gw_ns, index))
                 .collect();
 
             let mut problems = Vec::new();

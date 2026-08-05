@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::{Secret, Service};
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
 use serde::Serialize;
@@ -19,6 +19,7 @@ use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpR
 use sozu_gw_ir as ir;
 
 mod gateway;
+mod selector;
 pub use gateway::{
     GatewayClassResult, GatewayResult, ListenerStatus, RouteKind, RouteParentResult, RouteResult,
 };
@@ -215,6 +216,9 @@ impl Default for BuildConfig {
 #[derive(Default)]
 pub struct Inputs {
     pub ingresses: Vec<Arc<Ingress>>,
+    /// Watched only for their labels, which is what
+    /// `allowedRoutes.namespaces.selector` selects on.
+    pub namespaces: Vec<Arc<Namespace>>,
     pub services: Vec<Arc<Service>>,
     pub endpointslices: Vec<Arc<EndpointSlice>>,
     pub secrets: Vec<Arc<Secret>>,
@@ -339,12 +343,14 @@ pub enum Problem {
     /// without the timeout, and the gap is reported.
     TimeoutsUnsupported,
     HeaderOrQueryMatchUnsupported,
-    /// A listener's `allowedRoutes.namespaces.from: Selector` cannot be
-    /// evaluated (there is no Namespace label index), so the listener fails
-    /// CLOSED — it admits no routes at all — rather than silently admitting
-    /// every namespace on a control the Gateway owner meant to restrict.
-    NamespaceSelectorUnsupported {
+    /// A listener's `allowedRoutes.namespaces.selector` cannot be evaluated —
+    /// an operator this build does not know, a malformed expression, or
+    /// `from: Selector` with no selector at all. The listener fails CLOSED: it
+    /// admits no routes, rather than guessing at a control the Gateway owner
+    /// set precisely to restrict admission.
+    NamespaceSelectorInvalid {
         listener: String,
+        reason: String,
     },
     FilterUnsupported {
         kind: String,
@@ -386,7 +392,7 @@ impl Problem {
             Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
             Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
             Problem::HeaderOrQueryMatchUnsupported => "HeaderOrQueryMatchUnsupported",
-            Problem::NamespaceSelectorUnsupported { .. } => "NamespaceSelectorUnsupported",
+            Problem::NamespaceSelectorInvalid { .. } => "NamespaceSelectorInvalid",
             Problem::FilterUnsupported { .. } => "FilterUnsupported",
             Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
             Problem::GatewaySpecUnsupported { .. } => "GatewaySpecUnsupported",
@@ -399,7 +405,7 @@ impl Problem {
         match self {
             Problem::PortNotExposed { listener, .. }
             | Problem::ListenerPortNotOwned { listener, .. }
-            | Problem::NamespaceSelectorUnsupported { listener } => Some(listener),
+            | Problem::NamespaceSelectorInvalid { listener, .. } => Some(listener),
             _ => None,
         }
     }
@@ -496,9 +502,10 @@ impl std::fmt::Display for Problem {
             Problem::HeaderOrQueryMatchUnsupported => {
                 write!(f, "header/query matches are not supported by Sōzu; the rule was skipped")
             }
-            Problem::NamespaceSelectorUnsupported { listener } => write!(
+            Problem::NamespaceSelectorInvalid { listener, reason } => write!(
                 f,
-                "listener {listener:?} uses allowedRoutes.namespaces.from: Selector, which cannot be evaluated; the listener admits no routes (fail closed)"
+                "listener {listener:?} has an allowedRoutes.namespaces.selector this controller \
+                 cannot evaluate ({reason}); the listener admits no routes (fail closed)"
             ),
             Problem::FilterUnsupported { kind } => write!(f, "unsupported filter: {kind}"),
             Problem::BackendRefNotPermitted { reference } => write!(
@@ -734,6 +741,11 @@ pub(crate) fn extract_cert(
 
 pub(crate) struct Index<'a> {
     pub(crate) services: BTreeMap<(String, String), &'a Service>,
+    /// Namespace name -> its labels, for `allowedRoutes.namespaces.selector`.
+    /// A namespace absent here cannot be matched, so a selector listener
+    /// admits nothing from it — the same fail-closed answer as an unevaluable
+    /// selector, and only reachable in the window before the cache syncs.
+    pub(crate) namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
     pub(crate) secrets: BTreeMap<(String, String), &'a Secret>,
     /// (namespace, service-name) -> slices
     pub(crate) slices: BTreeMap<(String, String), Vec<&'a EndpointSlice>>,
@@ -755,6 +767,12 @@ impl<'a> Index<'a> {
                 secret.as_ref(),
             );
         }
+        let mut namespace_labels = BTreeMap::new();
+        for ns in &inputs.namespaces {
+            if let Some(name) = ns.metadata.name.clone() {
+                namespace_labels.insert(name, ns.metadata.labels.clone().unwrap_or_default());
+            }
+        }
         let mut slices: BTreeMap<(String, String), Vec<&EndpointSlice>> = BTreeMap::new();
         for slice in &inputs.endpointslices {
             if let Some(key) = slice_service(slice) {
@@ -763,6 +781,7 @@ impl<'a> Index<'a> {
         }
         Self {
             services,
+            namespace_labels,
             secrets,
             slices,
         }

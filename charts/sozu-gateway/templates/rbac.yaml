@@ -15,6 +15,13 @@ rules:
   - apiGroups: [""]
     resources: ["services", "secrets"]
     verbs: ["get", "list", "watch"]
+  # Namespaces are read for their **labels** only: that is what a Gateway
+  # listener's `allowedRoutes.namespaces.selector` selects on. Without this the
+  # controller cannot evaluate a selector, and an unevaluable selector fails
+  # closed — the listener would admit no routes at all.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]

@@ -49,7 +49,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
-| Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ❌ | fails closed — the listener admits no routes; reported as `NamespaceSelectorUnsupported`. A controller gap, not a Sōzu limit: evaluating selectors needs a Namespace watch. **This is also what stops the v1.6.1 conformance suite from running at all** ([E2E-RESULTS §6](E2E-RESULTS.md)) |
+| Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
 | Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) is rejected (`ZeroWeightBackendUnsupported`): Sōzu cannot express the spec's all-zero-weight 500 |
 | Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |

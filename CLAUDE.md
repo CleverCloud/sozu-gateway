@@ -117,7 +117,9 @@ golden snapshots.
 `--schema=disabled`; regenerate per its README — do not hand-edit). The builder's
 [`gateway` module](crates/builder/src/gateway.rs) maps GatewayClass/Gateway/HTTPRoute through the
 **same** Service→pod-IP resolver and into the **same** IR as Ingress (a route and an Ingress to one
-Service share a cluster). Gateway listeners map to the static listeners by protocol and must
+Service share a cluster). `allowedRoutes.namespaces.from: Selector` is evaluated against a Namespace label
+index (a cluster-wide Namespace watch, labels only); a selector this build *cannot* evaluate still
+fails closed and is reported. Gateway listeners map to the static listeners by protocol and must
 declare the **advertised** ports (default `80`/`443`, `--gateway-http(s)-port` — the Service's
 client-facing ports, wired by the chart; a mismatch is rejected with `PortUnavailable`); cross-ns
 refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
@@ -156,17 +158,15 @@ into one whose `lastTransitionTime` then moves on every pass.
 **Events** on the owning Ingress/Gateway/route ([`controller/src/events.rs`](crates/controller/src/events.rs),
 diffed against the previous pass so resyncs never flood etcd).
 
-**Conformance is a documented partial, by design** — and on the **v1.6.1** suite it does not run at
-all. `NamespacesMustBeReady` requires every base Gateway to be `Programmed: True` during *setup*,
-and the suite's `backend-namespaces` Gateway uses `allowedRoutes.namespaces.from: Selector`, which
-this controller fails closed. One object aborts the whole profile before a single test runs. So
-evaluating `Selector` (a Namespace watch + label index) is no longer the highest-leverage item —
-it is the **precondition for measuring anything**. With that Gateway excluded from the readiness
-gate the profile scores 17/37 core, 0/3 extended; that figure is *conditioned* and must never be
-quoted bare. Full run log, per-test attribution and reproduction: [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6,
-reports in [docs/conformance/](docs/conformance/) (immutable, one file per run). The profile
-**cannot fully pass** on Sōzu (no weighted splits, no header/query matching, no HTTP 500), so
-don't chase the "Conformant" badge — and don't read the recorded failures as regressions.
+**Conformance is a documented partial, by design.** On the v1.6.1 suite, unconditioned, the
+GATEWAY-HTTP profile scores **18/37 core, 0/3 extended** — full run log, per-test attribution and
+reproduction in [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6, reports in
+[docs/conformance/](docs/conformance/) (immutable, one file per run). Rows 2–4 of that log predate
+the `Selector` implementation, when the suite **aborted in setup** because
+`NamespacesMustBeReady` demands every base Gateway be `Programmed: True` and one of them uses
+`from: Selector`; those rows are conditioned and must never be quoted bare. The profile **cannot
+fully pass** on Sōzu (no weighted splits, no header/query matching, no HTTP 500), so don't chase
+the "Conformant" badge — and don't read the recorded failures as regressions.
 `GatewayClass.status.supportedFeatures` is published **empty** on purpose: an entry goes in only
 when a recorded run shows its tests passing. [docs/features.md](docs/features.md) is the
 user-facing support matrix (supported / planned / not supported); keep it in sync when support
