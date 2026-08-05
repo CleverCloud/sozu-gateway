@@ -32,6 +32,7 @@ use sozu_gw_builder::{
 use sozu_gw_gateway_api::gateway::{
     GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
 };
+use sozu_gw_gateway_api::gatewayclass::GatewayClassStatusSupportedFeatures;
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, TcpRoute, UdpRoute};
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -142,6 +143,38 @@ fn conditions_equal(a: &[Condition], b: &[Condition]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y)
 }
 
+/// The Gateway API features published in `GatewayClass.status.supportedFeatures`.
+///
+/// `FeatureName` is an **upstream, boolean-per-feature** vocabulary, and the
+/// conformance tooling cross-checks it. A name here whose tests do not pass is a
+/// lie told in the one machine-readable channel that exists for honesty — and a
+/// lie the next conformance run contradicts on the spot. So an entry is added
+/// only when a **recorded run** in `docs/E2E-RESULTS.md` §6 shows its tests
+/// passing, never because the code appears to implement the feature.
+///
+/// The list is empty today, and that is a result rather than a placeholder: at
+/// the last recorded run no feature's tests passed cleanly. Publishing it empty
+/// is the statement "we claim nothing", which is different from saying nothing
+/// at all — and it is what makes a later addition visible as a change.
+///
+/// **Must stay sorted**: the CRD requires ascending order by name and keys the
+/// list on it (`x-kubernetes-list-type: map`).
+const SUPPORTED_FEATURES: &[&str] = &[];
+
+/// Is the published feature list already what we want?
+///
+/// A GatewayClass that has never been written carries `None`, which is *not*
+/// equal to an empty list: "we claim nothing" is a statement and has to be
+/// published once, or the field would stay absent forever.
+fn features_equal(
+    current: Option<&[GatewayClassStatusSupportedFeatures]>,
+    desired: &[GatewayClassStatusSupportedFeatures],
+) -> bool {
+    current.is_some_and(|f| {
+        f.len() == desired.len() && f.iter().zip(desired).all(|(a, b)| a.name == b.name)
+    })
+}
+
 async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<(), kube::Error> {
     let api: Api<GatewayClass> = Api::all(client.clone());
     let current = api.get(&gc.name).await?;
@@ -159,10 +192,27 @@ async fn write_gatewayclass(client: &Client, gc: &GatewayClassResult) -> Result<
         cur,
         current.metadata.generation,
     );
-    if cur.is_some_and(|c| conditions_equal(&desired, c)) {
+    let features: Vec<GatewayClassStatusSupportedFeatures> = SUPPORTED_FEATURES
+        .iter()
+        .map(|name| GatewayClassStatusSupportedFeatures {
+            name: name.to_string(),
+        })
+        .collect();
+    // The no-op guard has to cover the features too. Comparing conditions alone
+    // means a list changed by a version bump — the whole reason it is versioned
+    // against the run log — would be computed and then never written, because
+    // the conditions it travels with did not move.
+    let features_unchanged = features_equal(
+        current
+            .status
+            .as_ref()
+            .and_then(|s| s.supported_features.as_deref()),
+        &features,
+    );
+    if cur.is_some_and(|c| conditions_equal(&desired, c)) && features_unchanged {
         return Ok(());
     }
-    let patch = json!({ "status": { "conditions": desired } });
+    let patch = json!({ "status": { "conditions": desired, "supportedFeatures": features } });
     api.patch_status(&gc.name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
     debug!(name = %gc.name, "GatewayClass status updated");
@@ -704,6 +754,50 @@ mod tests {
         );
         assert_eq!(parents.len(), 2);
         assert!(parents.contains(&theirs));
+    }
+
+    fn features(names: &[&str]) -> Vec<GatewayClassStatusSupportedFeatures> {
+        names
+            .iter()
+            .map(|n| GatewayClassStatusSupportedFeatures {
+                name: n.to_string(),
+            })
+            .collect()
+    }
+
+    /// The guard that decides whether to PATCH must look at the features, not
+    /// only the conditions. A list changed by a Gateway API bump travels with
+    /// conditions that did not move, so a conditions-only guard would compute
+    /// the new list and then never write it.
+    #[test]
+    fn the_no_op_guard_notices_a_changed_feature_list() {
+        assert!(features_equal(
+            Some(&features(&["A", "B"])),
+            &features(&["A", "B"])
+        ));
+        assert!(!features_equal(
+            Some(&features(&["A"])),
+            &features(&["A", "B"])
+        ));
+        assert!(!features_equal(
+            Some(&features(&["A", "B"])),
+            &features(&["A", "C"])
+        ));
+        // Never written before: `None` is not an empty list. Claiming nothing is
+        // a statement, and it has to reach the object once.
+        assert!(!features_equal(None, &features(&[])));
+        assert!(features_equal(Some(&[]), &features(&[])));
+    }
+
+    /// The CRD keys `supportedFeatures` on `name` and requires ascending order.
+    /// Enforced here because the constant is hand-maintained against the
+    /// conformance run log, and a misordered patch is rejected by the apiserver.
+    #[test]
+    fn declared_features_are_sorted_and_unique() {
+        let mut sorted = SUPPORTED_FEATURES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.as_slice(), SUPPORTED_FEATURES);
     }
 
     #[test]

@@ -180,6 +180,56 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 | Date | CRD bundle | Suite | Core | Extended | Declared `--supported-features` | Report | Delta vs previous |
 | ---- | ---------- | ----- | ---- | -------- | ------------------------------- | ------ | ----------------- |
 | 2026-07-02 | v1.2.1 | v1.2.1 | 12 / 33 | 0 / 3 | `HTTPRouteResponseHeaderModification`, `HTTPRouteSchemeRedirect`, `HTTPRouteMethodMatching` | [gateway-http_crd-v1.2.1_2026-07-02.yaml](conformance/gateway-http_crd-v1.2.1_2026-07-02.yaml) | first recorded run at this shape |
+| 2026-08-04 | v1.6.1 | v1.6.1 | **did not run** | did not run | same three | [gateway-http_crd-v1.6.1_2026-08-04_setup-blocked.md](conformance/gateway-http_crd-v1.6.1_2026-08-04_setup-blocked.md) | the suite aborts in setup — see below. Nothing to compare |
+| 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml) | **conditioned run** — the `Selector` base Gateway carries `gateway-api/skip-this-for-readiness`, without which nothing runs at all. **Not comparable to row 1**: different suite, denominator 33 → 37, and a base object excluded |
+| 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml) | **control run** on `master` (c68a72d, i.e. E0–E6), same conditioning as row 3. Identical result *and identical failed-test set* → E7–E11 moved no test either way |
+
+> **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
+> number to quote. Quoting `17/37` without "with a base Gateway excluded from readiness" would be exactly the
+> kind of decontextualised figure this log was created to stop.
+
+### v1.6.1: `Selector` stopped costing 5 tests and started costing all of them
+
+The single most important result of this pass, and it changes a roadmap priority rather than a
+number.
+
+The suite's shared base manifests include a `backend-namespaces` Gateway whose listener uses
+`allowedRoutes.namespaces.from: Selector`. This controller has no Namespace label index, so it
+fails that listener **closed** — `Programmed: False` — which is the honest stance and the reason
+row 1's score dropped from 16 to 12.
+
+On the **v1.6.1** suite, `NamespacesMustBeReady`
+(`conformance/utils/kubernetes/helpers.go`) requires **every** Gateway in the conformance
+namespaces to be `Programmed: True`, and the suite calls it during *setup*. One Gateway we fail
+closed therefore aborts the entire profile before a single test runs: 2 530 polling lines, all
+naming that one object, then `context deadline exceeded`.
+
+So the arithmetic in the roadmap — "recovering the 5 `Selector` tests takes 12/33 to ~17/33, still
+a failure, so do it for correctness rather than for the scoreboard" — was right about the *reason*
+and is now wrong about the *stakes*. Evaluating `Selector` is no longer the highest-leverage item
+on the board; it is the **precondition for measuring anything at all** on a current suite.
+
+Row 3 confirms the documented blast radius to the letter. Excluding that one Gateway from the
+readiness gate flips exactly the three tests the analysis said were gated on its *setup* —
+`GatewayModifyListeners`, `GatewayObservedGenerationBump`, `HTTPRouteObservedGenerationBump` — and
+leaves failing the two that genuinely need it to work, `HTTPRouteCrossNamespace` and
+`GatewayWithAttachedRoutes`.
+
+The rest of the 12 → 17 delta is the suite growing: v1.6.1 adds four core tests to GATEWAY-HTTP
+(33 → 37), of which two pass and two fail (`HTTPRouteMultipleGateways`, `HTTPRouteNoBackendRefs`).
+Nothing in the E7–E11 work moved a test either way — row 4 is `master` (E0–E6) under the same
+conditioning, and it returns not just the same counts but the same twenty failed test names. That
+is a measurement, not an inference: the whole point of a second pass is that "our changes did
+nothing here" has to be shown rather than assumed.
+
+### Why the two passes are not the two the roadmap asked for
+
+The plan called for one run just after the API-version bump and one after the port-model change, so
+that a delta could be attributed to one or the other. Both had already merged by the time this ran,
+which makes that split unrecoverable — the honest thing is to say so rather than present a single
+number as if it had been decomposed. The two boundaries that still existed were taken instead:
+the last recorded v1.2.1 run against the v1.6.1 suite (rows 1 → 3, the API/suite delta), and
+`master` against this stack on the *same* suite (the control run, isolating E7–E11).
 
 ### How the score got here
 
@@ -210,10 +260,12 @@ every status-polling test. Fixed by giving one-shot API calls a seconds-bounded 
 ### Reproduce
 
 ```bash
-git clone --depth 1 --branch v1.2.1 https://github.com/kubernetes-sigs/gateway-api
+git clone --depth 1 --branch v1.6.1 https://github.com/kubernetes-sigs/gateway-api
 cd gateway-api   # raise the suite's client QPS (default 5 flakes on status polling):
 # in conformance/conformance.go, after config.GetConfig(): cfg.QPS = 100; cfg.Burst = 200
-go test ./conformance -run TestConformance -timeout 120m -args \
+cd conformance   # from v1.6 the suite is its own Go module inside a workspace,
+                 # so `go test ./conformance` from the root no longer resolves it
+go test . -run TestConformance -timeout 150m -args \
   --gateway-class=sozu --conformance-profiles=GATEWAY-HTTP \
   --supported-features=HTTPRouteResponseHeaderModification,HTTPRouteSchemeRedirect,HTTPRouteMethodMatching \
   --organization=clevercloud --project=sozu-gateway \
@@ -224,6 +276,40 @@ go test ./conformance -run TestConformance -timeout 120m -args \
 
 The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
 Name the resulting file `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml` and add a row above.
+
+**It will abort in setup** until `allowedRoutes.namespaces.from: Selector` is evaluated for real
+(see above). To get a per-test picture anyway, keep the base Gateway out of the readiness gate
+while the run starts — and record the row as *conditioned*, never as a score:
+
+```bash
+# alongside the run, until the suite is past setup
+until kubectl -n gateway-conformance-infra get gateway backend-namespaces >/dev/null 2>&1; do sleep 3; done
+while kubectl -n gateway-conformance-infra annotate gateway backend-namespaces \
+  gateway-api/skip-this-for-readiness=true --overwrite >/dev/null 2>&1; do sleep 3; done
+```
+
+Two practical notes: the first run on a cold node times out in setup on **image pulls** — v1.6.1's
+base manifests add grpc/tls/tcp/coredns backends — so re-run once the images are cached; and
+`go test` without `-v` prints nothing until the package finishes, which looks like a hang for the
+~24 minutes a full run takes.
+
+### `GatewayClass.status.supportedFeatures`
+
+Published, and **empty**. That is a result, not a stub.
+
+`FeatureName` is an upstream, boolean-per-feature vocabulary, and the conformance tooling
+cross-checks what an implementation declares. At the last recorded run no feature's tests pass
+cleanly — extended is 0/3 on the three the runs have always declared via `--supported-features` —
+so naming any of them would publish a claim in the one machine-readable channel that exists for
+honesty, and one the next run contradicts immediately.
+
+Publishing the field empty rather than leaving it absent is deliberate: "we claim nothing" is a
+statement, and it makes the first genuine entry visible as a change. The list lives in one constant
+in [`controller/src/status.rs`](../crates/controller/src/status.rs) whose rule is that an entry is
+added only when a **row in the log above** shows its tests passing — never because the code looks
+like it implements the feature. `write_gatewayclass` compares the published list as well as the
+conditions, because a list changed by a version bump travels with conditions that did not move, and
+a conditions-only guard would compute the new list and never write it.
 
 **Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
@@ -248,30 +334,14 @@ Name the resulting file `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml` and add a 
 **Implementable remaining gaps** (would raise the count):
 1. **Evaluate `allowedRoutes.namespaces.from: Selector` for real** — the fail-closed stance exists
    because the controller has no Namespace label index, *not* because of any Sōzu limit. A
-   Namespace reflector + label matching would flip Selector to supported and recover the 5
-   fail-closed tests above (→ ~17/33). Highest-leverage single item on the board.
+   Namespace reflector + label matching would flip Selector to supported. On the v1.2.1 suite that
+   was worth 5 tests; on **v1.6.1 it is worth the entire run**, which aborts in setup without it
+   (see above). No longer "highest-leverage item" — it is the precondition for measuring at all.
 2. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
    shared `:443`; intertwined with the catch-all-collision limit above.
 
 (`GatewaySecret{Invalid,Missing}ReferenceGrant` now pass — cert `ReferenceGrant` denial reports
 `RefNotPermitted`, with the grant `group` checked too.)
-
-Reproduce (the handoff notes previously referenced here lived in the gitignored `.scratch/`):
-
-```bash
-git clone --depth 1 --branch v1.2.1 https://github.com/kubernetes-sigs/gateway-api
-cd gateway-api   # raise the suite's client QPS (default 5 flakes on status polling):
-# in conformance/conformance.go, after config.GetConfig(): cfg.QPS = 100; cfg.Burst = 200
-go test ./conformance -run TestConformance -timeout 120m -args \
-  --gateway-class=sozu --conformance-profiles=GATEWAY-HTTP \
-  --supported-features=HTTPRouteResponseHeaderModification,HTTPRouteSchemeRedirect,HTTPRouteMethodMatching \
-  --organization=clevercloud --project=sozu-gateway \
-  --url=https://github.com/CleverCloud/sozu-gateway \
-  --contact=https://github.com/CleverCloud/sozu-gateway/issues \
-  --version=<version under test> --report-output=report.yaml
-```
-
-The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
 
 ## Reproduce
 

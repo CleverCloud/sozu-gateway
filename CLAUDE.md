@@ -156,15 +156,19 @@ into one whose `lastTransitionTime` then moves on every pass.
 **Events** on the owning Ingress/Gateway/route ([`controller/src/events.rs`](crates/controller/src/events.rs),
 diffed against the previous pass so resyncs never flood etcd).
 
-**Conformance is a documented partial, by design.** The official Gateway API v1.2.1 `GATEWAY-HTTP`
-suite passes 12/33 core tests (report: [docs/conformance/](docs/conformance/), analysis:
-[docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6; down from a recorded 16 because the `Selector`
-fail-closed change removed passes that were artifacts of the old fail-open bug — 5 tests hang on
-the suite's `from: Selector` base Gateway; evaluating selectors via a Namespace watch would
-recover them). The profile **cannot fully pass** on Sōzu (no
-weighted splits, no header/query matching, …), so don't chase the "Conformant" badge — and don't
-read the recorded failures as regressions: several (hostname/path-matching tests) route correctly
-by hand but fail on a base-setup cert-timing gate. [docs/features.md](docs/features.md) is the
+**Conformance is a documented partial, by design** — and on the **v1.6.1** suite it does not run at
+all. `NamespacesMustBeReady` requires every base Gateway to be `Programmed: True` during *setup*,
+and the suite's `backend-namespaces` Gateway uses `allowedRoutes.namespaces.from: Selector`, which
+this controller fails closed. One object aborts the whole profile before a single test runs. So
+evaluating `Selector` (a Namespace watch + label index) is no longer the highest-leverage item —
+it is the **precondition for measuring anything**. With that Gateway excluded from the readiness
+gate the profile scores 17/37 core, 0/3 extended; that figure is *conditioned* and must never be
+quoted bare. Full run log, per-test attribution and reproduction: [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6,
+reports in [docs/conformance/](docs/conformance/) (immutable, one file per run). The profile
+**cannot fully pass** on Sōzu (no weighted splits, no header/query matching, no HTTP 500), so
+don't chase the "Conformant" badge — and don't read the recorded failures as regressions.
+`GatewayClass.status.supportedFeatures` is published **empty** on purpose: an entry goes in only
+when a recorded run shows its tests passing. [docs/features.md](docs/features.md) is the
 user-facing support matrix (supported / planned / not supported); keep it in sync when support
 changes.
 

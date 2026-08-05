@@ -1,0 +1,94 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-08-04T19:08:21Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.1
+implementation:
+  contact:
+  - https://github.com/CleverCloud/sozu-gateway/issues
+  organization: clevercloud
+  project: sozu-gateway
+  url: https://github.com/CleverCloud/sozu-gateway
+  version: e7-e11-selector-excluded
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    failedTests:
+    - GatewayWithAttachedRoutes
+    - HTTPRouteCrossNamespace
+    - HTTPRouteHTTPSListener
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMatchingAcrossRoutes
+    - HTTPRouteMultipleGateways
+    - HTTPRouteNoBackendRefs
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteRedirectHostAndStatus
+    - HTTPRouteReferenceGrant
+    - HTTPRouteRequestHeaderModifier
+    - HTTPRouteWeight
+    result: failure
+    statistics:
+      Failed: 20
+      Passed: 17
+      Skipped: 0
+  extended:
+    failedTests:
+    - HTTPRouteMethodMatching
+    - HTTPRouteRedirectScheme
+    - HTTPRouteResponseHeaderModifier
+    result: failure
+    statistics:
+      Failed: 3
+      Passed: 0
+      Skipped: 0
+    supportedFeatures:
+    - HTTPRouteMethodMatching
+    - HTTPRouteResponseHeaderModification
+    - HTTPRouteSchemeRedirect
+    unsupportedFeatures:
+    - BackendTLSPolicy
+    - BackendTLSPolicySANValidation
+    - GatewayAddressEmpty
+    - GatewayBackendClientCertificate
+    - GatewayFrontendClientCertificateValidation
+    - GatewayFrontendClientCertificateValidationInsecureFallback
+    - GatewayHTTPListenerIsolation
+    - GatewayHTTPSListenerDetectMisdirectedRequests
+    - GatewayInfrastructurePropagation
+    - GatewayPort8080
+    - GatewayStaticAddresses
+    - HTTPRoute303RedirectStatusCode
+    - HTTPRoute307RedirectStatusCode
+    - HTTPRoute308RedirectStatusCode
+    - HTTPRouteBackendProtocolH2C
+    - HTTPRouteBackendProtocolWebSocket
+    - HTTPRouteBackendRequestHeaderModification
+    - HTTPRouteBackendTimeout
+    - HTTPRouteCORS
+    - HTTPRouteDestinationPortMatching
+    - HTTPRouteHostRewrite
+    - HTTPRouteNamedRouteRule
+    - HTTPRouteParentRefPort
+    - HTTPRoutePathRedirect
+    - HTTPRoutePathRewrite
+    - HTTPRoutePortRedirect
+    - HTTPRouteQueryParamMatching
+    - HTTPRouteRequestMirror
+    - HTTPRouteRequestMultipleMirrors
+    - HTTPRouteRequestPercentageMirror
+    - HTTPRouteRequestTimeout
+    - HTTPRouteRetry
+    - HTTPRouteRetryBackendTimeout
+    - HTTPRouteRetryConnectionError
+    - ListenerSet
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 20 test failures. Extended tests failed with 3 test
+    failures.
