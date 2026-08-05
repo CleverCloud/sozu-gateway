@@ -419,6 +419,32 @@ mod tests {
         );
     }
 
+    /// A shadow written by an older controller must still parse.
+    ///
+    /// The file is a bare `Ir` with no version field, so every field added
+    /// since has to carry `#[serde(default)]`. That is a convention, and a
+    /// convention is not a guarantee: this fixture is the guarantee. It is
+    /// **frozen** — never regenerate it to make the test pass, because the
+    /// whole point is that it predates the fields under test.
+    ///
+    /// Failing it means an upgrade silently discards the persisted baseline
+    /// (`load_initial` falls back to an empty `Ir`) and re-applies everything
+    /// without pruning, leaving orphaned state in Sōzu.
+    #[test]
+    fn a_shadow_from_an_older_controller_still_parses() {
+        let raw = include_str!("../tests/fixtures/shadow-v0.2.json");
+        let ir: Ir = serde_json::from_str(raw)
+            .expect("an older shadow must stay readable; a new Ir field needs #[serde(default)]");
+        assert_eq!(ir.clusters.len(), 1);
+        assert_eq!(ir.frontends.len(), 1);
+        assert_eq!(ir.backends.len(), 1);
+        // Fields that did not exist when the fixture was written default
+        // cleanly rather than failing the parse.
+        assert!(ir.l4_frontends.is_empty());
+        assert!(ir.clusters[0].max_connections_per_ip.is_none());
+        assert!(ir.frontends[0].filters.redirect.is_none());
+    }
+
     #[test]
     fn shadow_round_trips_through_json() {
         // A representative IR must survive serialize -> deserialize unchanged, so

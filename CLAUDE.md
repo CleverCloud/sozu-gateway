@@ -90,6 +90,13 @@ A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
   under a live controller is detected by its **worker-PID generation** (checked on every resync
   tick, pending reconnect, and post-apply reconnect); a changed generation resets the shadow so
   the next reconcile re-applies everything — an emptiness probe would be raceable there.
+- **The shadow is a bare `Ir` with no version field**, so every new field needs `#[serde(default)]`
+  — enforced by a frozen fixture (`controller/tests/fixtures/shadow-v0.2.json`), not by convention.
+  The reverse direction cannot be defaulted: an older build has no variant for an enum value a
+  newer one wrote, serde fails the *whole* parse, and diffing from the resulting empty `Ir` emits
+  only adds — so orphans in Sōzu are never pruned. **Downgrading therefore requires restarting
+  Sōzu**, see [docs/UPGRADING.md](docs/UPGRADING.md). Adding an `ir` enum variant is a
+  downgrade-breaking change and should say so in its commit.
 
 ### Translator diff strategy — the subtle part
 
