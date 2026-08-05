@@ -16,9 +16,9 @@ installed in the cluster. Hosts are fictional — reach them with a `Host` heade
 
 Honesty notes baked into the examples: Sōzu has no header *append* (a Gateway
 `add` is applied as a set); a `RequestRedirect` rule carries no `backendRef`;
-redirect host/path/port targets and `URLRewrite` (Sōzu's `rewrite_host` rewrites
-the backend authority, so a Gateway rewrite 408s) are not expressible and are
-reported, never half-applied.
+redirect host/path/port targets and `URLRewrite` are reported rather than
+half-applied — measured expressible on Sōzu 2.2.0 but not wired yet, see
+[docs/E2E-RESULTS.md §5c](../../docs/E2E-RESULTS.md).
 
 Each file's header comment carries the exact `curl` to verify it. Apply one with:
 

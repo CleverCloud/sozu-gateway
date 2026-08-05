@@ -132,6 +132,34 @@ The UDP round-trip is worth calling out separately: nothing in this repo had eve
 UDP proxy before, so "UDPRoute programs a UDP frontend" and "a datagram comes back" were two
 different claims. Both are now measured.
 
+## 5c. Rewrite and redirect targets — a measurement, not a feature
+
+Two things this project reported as unsupported rested on the proto's doc comments plus one
+result taken against an older Sōzu. Both were re-measured against **Sōzu 2.2.0** with
+`crates/sozu-agent/examples/rewrite_redirect_probe.rs`, which programs its own frontends over
+the command socket and drives raw HTTP against its own in-process echo backend. The full table
+is in [PROTOCOL.md §13](../PROTOCOL.md); the verdicts:
+
+| Question | Answer |
+| -------- | ------ |
+| `URLRewrite` with `ReplaceFullPath` (`rewrite_path` alone) | **Works.** Backend sees the rewritten path, `Host` untouched, `200` |
+| `URLRewrite` with `hostname` (`rewrite_host`) | **Works.** Only the forwarded `Host` changes; the proxy still dials the cluster's configured backend |
+| The recorded `408` under a literal rewrite | **Does not reproduce on 2.2.0.** It was taken against 2.1.0 |
+| `RequestRedirect` host/path target under `PERMANENT` | `Location: https://new/new` |
+| … under `FOUND` (Gateway API's **default** 302) | `Location: https://new/new` — undocumented in the proto, works |
+| … under `PERMANENT_REDIRECT` (308) | `Location: https://new/new` |
+| `RequestRedirect` `port` target (`rewrite_port`) | `Location: https://new:8443/new` |
+| A literal `$` in a rewrite value | **`AddHttpFrontend` is rejected.** Translation is all-or-nothing, so one such route fails *every* reconcile |
+| Query string across a path rewrite | **Dropped** — Gateway API's `ReplaceFullPath` keeps it |
+| `ReplacePrefixMatch` via `$PATH[1]` | Yields `/` — the compiled prefix regex's only capture group is the boundary `(/\|?\|$)`, not the remainder |
+
+**No behaviour changed in this pass, by design.** The deliverable is the measurement. What it
+buys is that three "not supported" rows in [features.md](features.md) were wrong about *why*:
+`URLRewrite` and redirect host/path/port targets are not Sōzu limits, they are unwired — with
+two conditions any wiring must meet first (refuse or escape `$`; decide what to do about the
+dropped query string, which is a spec deviation rather than a detail). `ReplacePrefixMatch`
+stays a genuine limit, and now with a measured reason.
+
 ## 6. Gateway API conformance (GATEWAY-HTTP)
 
 The **official** `kubernetes-sigs/gateway-api` conformance suite, `GATEWAY-HTTP` profile, run

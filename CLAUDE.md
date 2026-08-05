@@ -129,11 +129,15 @@ translator maps onto Sōzu's frontend fields. Two honesty rules hold: Sōzu has 
 a Gateway `add` is applied as a set; and unsupported sub-fields (redirect host/path/port,
 `RequestMirror`) are reported, never half-applied. A `RequestRedirect` rule has no `backendRef` (the
 API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
-`Option<String>`. **`URLRewrite` is reported unsupported**: Sōzu's `rewrite_host`/`rewrite_path`
-rewrite the *backend authority* (the proxy dials the rewritten host) and expect regex-capture
-templates, so a literal Gateway rewrite 408s — verified end-to-end. The translator keeps an
-`ir::Rewrite` mapping, so re-wiring it is a one-line builder change if Sōzu's rewrite semantics are
-reconciled later.
+`Option<String>`. **`URLRewrite` and redirect host/path/port targets are reported, not wired** — and
+that is a *choice*, not a Sōzu limit. Both were measured working on Sōzu 2.2.0
+([PROTOCOL.md §13](PROTOCOL.md), [docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also
+retired an earlier `408` result taken against 2.1.0. Two measured conditions gate any wiring: a
+literal `$` in a rewrite value makes Sōzu **reject the frontend** (and translation is
+all-or-nothing, so one such route fails every reconcile), and a path rewrite **drops the query
+string** that `ReplaceFullPath` keeps. `ReplacePrefixMatch` is a real limit — the compiled prefix
+regex's only capture group is the element boundary, so `$PATH[1]` yields `/`, not the remainder.
+The translator already maps `ir::Rewrite`, so the builder side is the only piece missing.
 
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
 *required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no

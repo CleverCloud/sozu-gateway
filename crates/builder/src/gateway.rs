@@ -19,10 +19,12 @@
 //!
 //! Not yet: header/query matches, weighted multi-backend split (incl. a
 //! single weight-0 drain), rule timeouts, per-backendRef filters, TLS
-//! Passthrough, RequestMirror, redirect host/path/port, and URLRewrite
-//! (Sōzu's rewrite_host rewrites the *backend authority* — it dials the
-//! rewritten host — so a literal Gateway rewrite 408s; header/query match and
-//! weighted split are Sōzu hard limits).
+//! Passthrough, RequestMirror, redirect host/path/port, and URLRewrite.
+//! Header/query match and weighted split are Sōzu hard limits; the last two are
+//! merely unwired — both were measured working on Sōzu 2.2.0 (PROTOCOL.md §13),
+//! with two conditions any wiring owes first: a literal `$` in a rewrite value
+//! makes Sōzu reject the frontend outright (and translation is all-or-nothing),
+//! and a path rewrite drops the query string that `ReplaceFullPath` keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -1187,14 +1189,19 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                 }
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
-                // Not wired: Sōzu's rewrite_host/rewrite_path rewrite the *backend
-                // authority* (the proxy then dials the rewritten host) and expect
-                // regex-capture templates, whereas Gateway URLRewrite rewrites the
-                // forwarded Host/path toward the *same* backend. Mapping it
-                // literally makes the route 408 (verified end-to-end), so report it
-                // rather than emit a broken frontend. The translator keeps an
-                // ir::Rewrite mapping, so re-wiring is a one-line change should
-                // Sōzu's rewrite semantics be reconciled later.
+                // Not wired — but no longer for the reason this used to give.
+                // Measured on Sōzu 2.2.0 (PROTOCOL.md §13): `rewrite_path` alone
+                // rewrites the forwarded path toward the *same* backend, and
+                // `rewrite_host` changes only the forwarded Host — the proxy
+                // still dials the cluster's configured address. The `408` this
+                // comment claimed was taken against 2.1.0 and does not reproduce.
+                //
+                // Two things must be settled before wiring it, both measured:
+                // a literal `$` makes Sōzu reject the frontend (translation is
+                // all-or-nothing, so one such route fails every reconcile), and
+                // a path rewrite drops the query string `ReplaceFullPath` keeps.
+                // `ReplacePrefixMatch` stays impossible: the compiled prefix
+                // regex's only capture group is the element boundary.
                 problems.push(Problem::FilterUnsupported {
                     kind: "URLRewrite".to_string(),
                 });

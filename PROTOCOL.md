@@ -306,3 +306,53 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
    want their own probe.
 4. **Multi-worker fan-in**: with `worker_count > 1`, confirm whether to inspect per-worker
    `WorkerResponses` for partial failure (we'll add defensive handling in `sozu-agent`).
+
+---
+
+## 13. Rewrite & redirect templates — measured on Sōzu 2.2.0
+
+`RequestHttpFrontend` carries `rewrite_host`, `rewrite_path` and `rewrite_port`. The proto
+documents them under `PERMANENT` only, and describes `rewrite_host` as rewriting "both the
+backend authority/path and the wire request line". Both statements needed measuring before
+anything could be mapped onto them; `crates/sozu-agent/examples/rewrite_redirect_probe.rs`
+reproduces every row below against a live Sōzu.
+
+Setup: one cluster with one backend (an in-process echo that reports the request line and the
+`Host` it received), one frontend per row, request `GET /original` unless stated.
+
+| Frontend fields | Observed |
+| --------------- | -------- |
+| *(none)* — control | `200`, backend sees `GET /original`, `Host: <frontend hostname>` |
+| `rewrite_path="/rewritten"` | `200`, backend sees `GET /rewritten`, **Host unchanged** |
+| `rewrite_host="elsewhere"`, `rewrite_path="/rewritten"` | `200`, backend sees `GET /rewritten`, `Host: elsewhere` |
+| `rewrite_path="/rewritten"`, request `GET /original?q=1&x=2` | `200`, backend sees `GET /rewritten` — **the query string is dropped** |
+| `rewrite_path="/lit$PATH[0]eral"` | `200`, backend sees `GET /lit/originaleral` — `$PATH[0]` is the whole request path |
+| `rewrite_path="/price$100"` | **`AddHttpFrontend` REJECTED**: `Could not parse path rewrite "/price$100"` |
+| `redirect=PERMANENT`, `scheme=USE_HTTPS`, `rewrite_host="new"`, `rewrite_path="/new"` | `301`, `Location: https://new/new` |
+| `redirect=FOUND`, same rewrites | `302`, `Location: https://new/new` |
+| `redirect=PERMANENT_REDIRECT`, same rewrites | `308`, `Location: https://new/new` |
+| `redirect=FOUND`, same rewrites + `rewrite_port=8443` | `302`, `Location: https://new:8443/new` |
+| `redirect=FOUND`, `scheme=USE_HTTPS`, no rewrites | `302`, `Location: https://<request host><request path>` |
+| path rule `Regex "^/foo(/\|\?\|$)"`, `rewrite_path="/pfx[$PATH[1]]"`, request `/foo/bar/baz` | `200`, backend sees `GET /pfx[/]` |
+
+What that settles:
+
+1. **`rewrite_host` does not change which backend is dialled.** The proxy dialled the cluster's
+   configured backend address and rewrote only the forwarded `Host`. Backends are explicit
+   addresses (`AddBackend`), so there is no authority to resolve. An earlier recorded result —
+   a route timing out with `408` under a literal rewrite — was taken against **2.1.0** and does
+   not reproduce here.
+2. **All three redirect policies honour the rewrite fields**, `FOUND` and `PERMANENT_REDIRECT`
+   included, despite the proto documenting only `PERMANENT`. `rewrite_port` lands as an explicit
+   port in `Location`.
+3. **`$` is a template sigil, and an unparseable template is a hard reject.** Not a warning, not
+   a passthrough: `AddHttpFrontend` returns `Failure`. Since translation is all-or-nothing, one
+   route whose rewrite value contains a stray `$` would fail *every* reconcile. Any mapping onto
+   these fields has to escape or refuse `$` in the builder.
+4. **`$PATH[n]` indexes the path-rule regex's capture groups**, `[0]` being the whole match. The
+   regex a Kubernetes `pathType: Prefix` compiles to (§ the path mapping above) has exactly one
+   group — the element boundary `(/|\?|$)` — so `$PATH[1]` yields `/`, not the remainder after
+   the prefix. There is nothing there to graft a `ReplacePrefixMatch` onto without changing that
+   shared, load-bearing regex.
+5. **A path rewrite discards the query string.** Gateway API's `ReplaceFullPath` replaces the
+   path and leaves the query alone, so this is a real deviation, not a detail.

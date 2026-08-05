@@ -1,0 +1,67 @@
+== sozu rewrite/redirect probe ==
+socket=/run/sozu/sozu.sock listener=0.0.0.0:8080 dial=127.0.0.1:8080 backend=127.0.0.1:9099
+
+frontends programmed; probing
+
+--- baseline.probe ---
+Q: control: plain proxying, no rewrite — the backend must see /original
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | body: request-line=GET /original HTTP/1.1 backend-host=baseline.probe
+
+--- path-only.probe ---
+Q: URLRewrite ReplaceFullPath: rewrite_path alone, no rewrite_host — does the backend see /rewritten, and does the request complete?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 backend-host=path-only.probe
+
+--- host-and-path.probe ---
+Q: the known-bad shape, re-measured: rewrite_host rewrites the backend authority, so the proxy dials elsewhere (expected 408/504)
+   redirect=Forward scheme=UseSame rewrite_host=Some("elsewhere.probe") rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 backend-host=elsewhere.probe
+
+--- dollar-literal.probe ---
+Q: template grammar: is a literal `$` in rewrite_path reinterpreted?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/lit$PATH[0]eral") rewrite_port=None
+A: HTTP/1.1 200 OK | body: request-line=GET /lit/originaleral HTTP/1.1 backend-host=dollar-literal.probe
+
+--- redirect-301.probe ---
+Q: PERMANENT + rewrite_host/path: the documented case — what Location?
+   redirect=Permanent scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 301 Moved Permanently | Location: https://new.probe/new
+
+--- redirect-302.probe ---
+Q: FOUND + rewrite_host/path: UNDOCUMENTED, and Gateway API's default statusCode. If Location echoes the request, the feature dies here
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://new.probe/new
+
+--- redirect-308.probe ---
+Q: PERMANENT_REDIRECT + rewrite_host/path: UNDOCUMENTED — what Location?
+   redirect=PermanentRedirect scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 308 Permanent Redirect | Location: https://new.probe/new
+
+--- dollar-bare.probe ---
+Q: a literal `$` that starts no known token — passed through, or eaten?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/price$100") rewrite_port=None
+A: FRONTEND REJECTED — AddHttpFrontend(dollar-bare.probe) rejected by Sōzu: 1: could not add frontend: could not add frontend: Could not parse path rewrite "/price$100", 0: could not add frontend: could not add frontend: Could not parse path rewrite "/price$100"
+
+--- query.probe ---
+Q: does rewrite_path keep the query string? Gateway's ReplaceFullPath replaces the path and leaves the query alone
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 backend-host=query.probe
+
+--- prefix-capture.probe ---
+Q: what does $PATH[1] capture on the regex a Kubernetes prefix compiles to? Its only group is the boundary `(/|?|$)`, so ReplacePrefixMatch has no remainder to graft on
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/pfx[$PATH[1]]") rewrite_port=None
+   path rule: Regex "^/foo(/|\\?|$)"  request: /foo/bar/baz
+A: HTTP/1.1 200 OK | body: request-line=GET /pfx[/] HTTP/1.1 backend-host=prefix-capture.probe
+
+--- redirect-port.probe ---
+Q: rewrite_port on a redirect: does Location carry an explicit port? Gateway's RequestRedirect has a `port` field
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=Some(8443)
+A: HTTP/1.1 302 Found | Location: https://new.probe:8443/new
+
+--- redirect-302-scheme-only.probe ---
+Q: FOUND with no rewrite: the shape we ship today, as a comparison point
+   redirect=Found scheme=UseHttps rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://redirect-302-scheme-only.probe/original
+
+== done ==
