@@ -356,3 +356,27 @@ What that settles:
    shared, load-bearing regex.
 5. **A path rewrite discards the query string.** Gateway API's `ReplaceFullPath` replaces the
    path and leaves the query alone, so this is a real deviation, not a detail.
+
+### Header `set` appends instead of replacing — measured
+
+`HeaderPosition`'s proto doc says the mutation "Mirrors HAProxy `http-request set-header` /
+`http-response set-header` parity", and HAProxy's `set-header` **replaces**. The shipped
+`clevercloud/sozu:2.2.0` binary appends.
+
+| Frontend `headers` | Request sent | Backend / client sees |
+| ------------------ | ------------ | --------------------- |
+| `Request X-Env=prod` | `X-Env: staging` | `X-Env: staging`, `X-Env: prod` — **both** |
+| `Request X-Env=prod` | *(none)* | `X-Env: prod` — one, so it is a pure append |
+| `Request X-Env=` (empty val) | `X-Env: staging` | *(absent)* — delete works as documented |
+| `Response X-Served-By=sozu` | backend answers `X-Served-By: backend` | `X-Served-By: backend`, `X-Served-By: sozu` |
+
+Two separate consequences, and they belong to two separate upstream reports:
+
+1. **A bug.** Set is documented as replace and does not replace, on both the request and the
+   response side. Delete is unaffected, which narrows it usefully.
+2. **A gap.** There is no APPEND mode anywhere in the proto — `Header` carries only
+   `position`, `key`, `val`, whose only documented behaviours are set and (empty `val`) delete. So
+   Gateway API's `add`, which *must* append, has no field to map onto even once the bug is fixed.
+   This controller applies `add` as a set and says so.
+
+Raw run: [docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt](docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt).

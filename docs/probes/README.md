@@ -37,4 +37,4 @@ out of band are left alone.
 
 | Probe | Question |
 | ----- | -------- |
-| `rewrite_redirect_probe` | What `rewrite_host` / `rewrite_path` / `rewrite_port` actually do, on the forwarding path and under each redirect policy — see [PROTOCOL.md §13](../../PROTOCOL.md) |
+| `rewrite_redirect_probe` | What `rewrite_host` / `rewrite_path` / `rewrite_port` actually do, on the forwarding path and under each redirect policy, plus whether a `Header` `set` replaces or appends — see [PROTOCOL.md §13](../../PROTOCOL.md) |
