@@ -186,6 +186,8 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 
 | 2026-08-05 | v1.6.1 | v1.6.1 | **18 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml) | **unconditioned** — nothing excluded, nothing annotated. `from: Selector` is evaluated for real, so the setup gate passes on its own; `HTTPRouteCrossNamespace` newly passes |
 
+| 2026-08-10 | v1.6.1 | v1.6.1 | **19 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-10.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-10.yaml) | unconditioned, on `master` 5fe5713. `GatewayWithAttachedRoutes` newly passes — a route sharing no hostname with its listener now reads `Accepted: False` / `NoMatchingListenerHostname` and no longer inflates `attachedRoutes`. Nothing regressed |
+
 > **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
 > number to quote — quoting `17/37` without "with a base Gateway excluded from readiness" is exactly
 > the kind of decontextualised figure this log was created to stop. **Row 5 is the first
@@ -332,9 +334,10 @@ a conditions-only guard would compute the new list and never write it.
 **Implementable remaining gaps** (would raise the count):
 1. ~~**Evaluate `allowedRoutes.namespaces.from: Selector` for real**~~ — **done** (row 5). It was
    worth the entire run, not 5 tests: without it the v1.6.1 suite aborted in setup.
-2. **`GatewayWithAttachedRoutes`** — was attributed to the `Selector` blast radius and still fails
-   without it. Not diagnosed; it wants its own look at how `attachedRoutes` is counted against what
-   the test expects.
+2. ~~**`GatewayWithAttachedRoutes`**~~ — **done** (row 6). Diagnosed as a real bug, not a suite
+   quirk: a route whose hostnames intersect none of its listener's read `Accepted` while serving
+   nothing, and inflated `attachedRoutes`. Fixed by reporting `NoMatchingListenerHostname` and
+   counting only the listeners a route actually matches.
 3. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
    shared `:443`; intertwined with the catch-all-collision limit above.
 
