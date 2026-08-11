@@ -1,0 +1,102 @@
+== sozu rewrite/redirect probe ==
+socket=/run/sozu/sozu.sock listener=0.0.0.0:8080 dial=127.0.0.1:8080 backend=127.0.0.1:9099
+
+frontends programmed; probing
+
+--- baseline.probe ---
+Q: control: plain proxying, no rewrite — the backend must see /original
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=baseline.probe x-env=[]
+
+--- path-only.probe ---
+Q: URLRewrite ReplaceFullPath: rewrite_path alone, no rewrite_host — does the backend see /rewritten, and does the request complete?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=path-only.probe x-env=[]
+
+--- host-and-path.probe ---
+Q: the known-bad shape, re-measured: rewrite_host rewrites the backend authority, so the proxy dials elsewhere (expected 408/504)
+   redirect=Forward scheme=UseSame rewrite_host=Some("elsewhere.probe") rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=elsewhere.probe x-env=[]
+
+--- dollar-literal.probe ---
+Q: template grammar: is a literal `$` in rewrite_path reinterpreted?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/lit$PATH[0]eral") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /lit/originaleral HTTP/1.1 backend-host=dollar-literal.probe x-env=[]
+
+--- redirect-301.probe ---
+Q: PERMANENT + rewrite_host/path: the documented case — what Location?
+   redirect=Permanent scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 301 Moved Permanently | Location: https://new.probe/new
+
+--- redirect-302.probe ---
+Q: FOUND + rewrite_host/path: UNDOCUMENTED, and Gateway API's default statusCode. If Location echoes the request, the feature dies here
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://new.probe/new
+
+--- redirect-308.probe ---
+Q: PERMANENT_REDIRECT + rewrite_host/path: UNDOCUMENTED — what Location?
+   redirect=PermanentRedirect scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 308 Permanent Redirect | Location: https://new.probe/new
+
+--- dollar-bare.probe ---
+Q: a literal `$` that starts no known token — passed through, or eaten?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/price$100") rewrite_port=None
+A: FRONTEND REJECTED — AddHttpFrontend(dollar-bare.probe) rejected by Sōzu: 0: could not add frontend: could not add frontend: Could not parse path rewrite "/price$100", 1: could not add frontend: could not add frontend: Could not parse path rewrite "/price$100"
+
+--- query.probe ---
+Q: does rewrite_path keep the query string? Gateway's ReplaceFullPath replaces the path and leaves the query alone
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=query.probe x-env=[]
+
+--- prefix-capture.probe ---
+Q: what does $PATH[1] capture on the regex a Kubernetes prefix compiles to? Its only group is the boundary `(/|?|$)`, so ReplacePrefixMatch has no remainder to graft on
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/pfx[$PATH[1]]") rewrite_port=None
+   path rule: Regex "^/foo(/|\\?|$)"  request: /foo/bar/baz
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /pfx[/] HTTP/1.1 backend-host=prefix-capture.probe x-env=[]
+
+--- hdr-set-request.probe ---
+Q: Gateway `set` must OVERWRITE. The proto says HeaderPosition mirrors HAProxy set-header, which replaces. Client sends X-Env: staging, frontend sets X-Env: prod — does the backend see one value or two?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=hdr-set-request.probe x-env=[X-Env: staging | X-Env: prod]
+
+--- hdr-set-request-absent.probe ---
+Q: same set, but the client sends no X-Env — the header must appear once
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=hdr-set-request-absent.probe x-env=[X-Env: prod]
+
+--- hdr-delete-request.probe ---
+Q: empty val is documented as delete-by-name (HAProxy del-header parity)
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=hdr-delete-request.probe x-env=[]
+
+--- hdr-set-response.probe ---
+Q: the response side of the same question: the backend answers X-Served-By: backend and the frontend sets X-Served-By: sozu
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend ; X-Served-By: sozu] | body: request-line=GET /original HTTP/1.1 backend-host=hdr-set-response.probe x-env=[]
+
+--- redirect-host-only.probe ---
+Q: the exact HTTPRouteRedirectHostAndStatus shape: rewrite_host with NO rewrite_path and NO scheme. The suite compares the Location's scheme, host, port AND path, defaulting the unspecified ones to the request's — so the path must come back as /original and the scheme as http
+   redirect=Found scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: http://example.org/original
+
+--- redirect-host-only-301.probe ---
+Q: same, under PERMANENT — the test's second case
+   redirect=Permanent scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 301 Moved Permanently | Location: http://example.org/original
+
+--- redirect-host-query.probe ---
+Q: does a redirect Location keep the request's query string?
+   redirect=Found scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: http://example.org/original?q=1&x=2
+
+--- redirect-port.probe ---
+Q: rewrite_port on a redirect: does Location carry an explicit port? Gateway's RequestRedirect has a `port` field
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=Some(8443)
+A: HTTP/1.1 302 Found | Location: https://new.probe:8443/new
+
+--- redirect-302-scheme-only.probe ---
+Q: FOUND with no rewrite: the shape we ship today, as a comparison point
+   redirect=Found scheme=UseHttps rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://redirect-302-scheme-only.probe/original
+
+== done ==

@@ -34,7 +34,8 @@ use sozu_gw_gateway_api::gateway::{
     GatewayListenersAllowedRoutesNamespacesFrom as ApiAllowedFrom, GatewayListenersTlsMode,
 };
 use sozu_gw_gateway_api::httproute::{
-    HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
+    HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectPathType,
+    HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
     HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
 };
 use sozu_gw_gateway_api::{TcpRoute, UdpRoute};
@@ -1189,42 +1190,113 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                         unprogrammable = true;
                         continue;
                     };
-                    // The only part of a redirect Sōzu can express is the
-                    // scheme: `redirect_scheme` unset means USE_SAME, i.e. the
-                    // Location echoes the request's own scheme, host and path.
-                    // So anything else the author asked for cannot be honoured,
-                    // and programming the rule anyway would answer every
-                    // matching request with a redirect to itself — an infinite
-                    // loop, served under a green route status. Fail closed, the
-                    // way every other unsupported piece does.
-                    // A `port` equal to the scheme's well-known port asks for
-                    // nothing extra: Gateway API derives the redirect port from
-                    // the scheme when it is unset, and Sōzu's `redirect_scheme`
-                    // emits `https://<host><path>` with no explicit port. So
-                    // `scheme: https` and `scheme: https, port: 443` are the
-                    // same redirect, and both are expressible.
-                    let port_is_implied = matches!(
-                        (scheme, r.port),
-                        (_, None)
-                            | (Some(ir::Scheme::Https), Some(443))
-                            | (Some(ir::Scheme::Http), Some(80))
-                    );
-                    if r.hostname.is_some() || r.path.is_some() || !port_is_implied {
+                    // Sōzu builds the `Location` from `redirect_scheme` plus
+                    // the `rewrite_host`/`rewrite_path`/`rewrite_port` fields,
+                    // under every policy — measured, including the two the
+                    // proto leaves undocumented (PROTOCOL.md §13). So a host,
+                    // path or port target is expressible; what is left to
+                    // refuse is narrow, and each refusal is measured too.
+                    let refuse = |kind: &str, problems: &mut Vec<Problem>| {
                         problems.push(Problem::FilterUnsupported {
-                            kind: "RequestRedirect hostname/path/port".to_string(),
+                            kind: kind.to_string(),
                         });
+                    };
+
+                    // `ReplacePrefixMatch` needs the matched prefix's
+                    // *remainder*, and there is nowhere to get it: `$PATH[n]`
+                    // indexes the path rule's regex captures, and the regex a
+                    // Kubernetes prefix compiles to has exactly one group — the
+                    // element boundary — so `$PATH[1]` yields `/`.
+                    let path = match r.path.as_ref() {
+                        None => None,
+                        Some(p) => match p.r#type {
+                            HttpRouteRulesFiltersRequestRedirectPathType::ReplaceFullPath => {
+                                match p.replace_full_path.clone() {
+                                    Some(v) => Some(v),
+                                    None => {
+                                        refuse(
+                                            "RequestRedirect ReplaceFullPath with no value",
+                                            problems,
+                                        );
+                                        unprogrammable = true;
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {
+                                refuse("RequestRedirect path.type ReplacePrefixMatch", problems);
+                                unprogrammable = true;
+                                continue;
+                            }
+                        },
+                    };
+
+                    // A literal `$` is not a literal: it opens the `$HOST[n]` /
+                    // `$PATH[n]` template grammar, and a value Sōzu cannot parse
+                    // makes it **reject the frontend**. Translation is
+                    // all-or-nothing, so one such route would fail every
+                    // reconcile cluster-wide — refuse it here instead.
+                    let hostname = r.hostname.clone();
+                    if hostname.iter().chain(path.iter()).any(|v| v.contains('$')) {
+                        refuse(
+                            "RequestRedirect hostname/path containing '$' (Sōzu reads it as a \
+                             rewrite template and rejects the frontend)",
+                            problems,
+                        );
                         unprogrammable = true;
-                    } else if scheme.is_none() {
-                        // A scheme-less redirect has nothing left to change:
-                        // USE_SAME + same host + same path is that same loop.
-                        problems.push(Problem::FilterUnsupported {
-                            kind: "RequestRedirect without scheme".to_string(),
-                        });
-                        unprogrammable = true;
-                    } else {
-                        ff.redirect = Some(ir::Redirect { scheme, status });
+                        continue;
                     }
+
+                    let port = match r.port {
+                        None => None,
+                        Some(p) => match u16::try_from(p) {
+                            // A port the scheme already implies asks for
+                            // nothing: Gateway API derives it from the scheme
+                            // when unset, so `https` and `https + 443` are the
+                            // same redirect. Dropping it keeps the emitted
+                            // `Location` free of a redundant `:443`.
+                            Ok(443) if scheme == Some(ir::Scheme::Https) => None,
+                            Ok(80) if scheme == Some(ir::Scheme::Http) => None,
+                            Ok(p) => Some(p),
+                            Err(_) => {
+                                refuse("RequestRedirect port out of range", problems);
+                                unprogrammable = true;
+                                continue;
+                            }
+                        },
+                    };
+
+                    // Every target unset means the `Location` is the request's
+                    // own scheme, host and path — a redirect to itself, which
+                    // the client follows forever. Nothing about that is
+                    // expressible *or* desirable, so it stays refused.
+                    if scheme.is_none() && hostname.is_none() && path.is_none() && port.is_none() {
+                        refuse(
+                            "RequestRedirect that changes nothing (it would redirect to itself)",
+                            problems,
+                        );
+                        unprogrammable = true;
+                        continue;
+                    }
+
+                    ff.redirect = Some(ir::Redirect {
+                        scheme,
+                        status,
+                        hostname,
+                        path,
+                        port,
+                    });
                 }
+            }
+            HttpRouteRulesFiltersType::UrlRewrite if ff.redirect.is_some() => {
+                // Both compile to the same `rewrite_*` fields, so one would
+                // silently overwrite the other. The Gateway API keeps them
+                // apart anyway (URLRewrite needs a backendRef, RequestRedirect
+                // forbids one), so this is a malformed rule, not a gap.
+                problems.push(Problem::FilterUnsupported {
+                    kind: "URLRewrite combined with RequestRedirect".to_string(),
+                });
+                unprogrammable = true;
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
                 // Not wired — but no longer for the reason this used to give.

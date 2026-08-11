@@ -110,12 +110,30 @@ pub enum HeaderTarget {
     Response,
 }
 
-/// A scheme/status redirect. Host/path/port redirect targets are not modelled
-/// yet (the builder reports them as unsupported).
+/// A redirect: the `Location` a matching request is answered with.
+///
+/// Every field is a *target* — what to replace in the request's own URL. A
+/// `None` keeps the request's value, which is Sōzu's `USE_SAME` for the scheme
+/// and its behaviour for an unset `rewrite_*`. At least one has to be `Some`,
+/// or the `Location` echoes the request and the client loops; the builder
+/// refuses that shape rather than programming it.
+///
+/// The fields are additive, so an older controller reading a shadow that
+/// carries them ignores what it does not know — unlike a new enum *variant*,
+/// which would fail the whole parse (see `docs/UPGRADING.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redirect {
     pub scheme: Option<Scheme>,
     pub status: RedirectStatus,
+    /// Replaces the authority. Sōzu's `rewrite_host`.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// Replaces the whole path. Sōzu's `rewrite_path`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// An explicit port in the `Location`. Sōzu's `rewrite_port`.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

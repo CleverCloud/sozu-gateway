@@ -197,9 +197,20 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
                 ir::Scheme::Https => RedirectScheme::UseHttps,
             } as i32);
         }
+        // Sōzu builds the `Location` from the same `rewrite_*` fields it uses to
+        // rewrite a forwarded request — which of the two it means is decided by
+        // `redirect`, not by the fields. An unset one keeps the request's value.
+        payload.rewrite_host = redirect.hostname.clone();
+        payload.rewrite_path = redirect.path.clone();
+        payload.rewrite_port = redirect.port.map(u32::from);
     }
 
     if let Some(rewrite) = &filters.rewrite {
+        // Same three fields as a redirect target, so the two cannot both be
+        // expressed on one frontend. The Gateway API keeps them apart anyway —
+        // URLRewrite needs a backendRef and RequestRedirect forbids one — and
+        // the builder refuses the combination rather than letting the later
+        // assignment win silently.
         payload.rewrite_host = rewrite.hostname.clone();
         payload.rewrite_path = rewrite.path.clone();
     }

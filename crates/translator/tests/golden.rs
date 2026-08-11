@@ -602,6 +602,9 @@ fn ir_to_requests_with_filters() {
         redirect: Some(ir::Redirect {
             scheme: Some(ir::Scheme::Https),
             status: ir::RedirectStatus::MovedPermanently,
+            hostname: None,
+            path: None,
+            port: None,
         }),
         rewrite: Some(ir::Rewrite {
             hostname: Some("backend.svc".into()),
@@ -647,6 +650,9 @@ fn reconcile_redirect_only_frontend_folds() {
     f.filters.redirect = Some(ir::Redirect {
         scheme: Some(ir::Scheme::Https),
         status: ir::RedirectStatus::Found,
+        hostname: None,
+        path: None,
+        port: None,
     });
     let model = ir::Ir {
         frontends: vec![f],

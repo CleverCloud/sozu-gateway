@@ -37,8 +37,8 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier` (Sōzu has no append → `add` applied as set) |
 | API gateway | URL rewrite — `ReplaceFullPath` / `hostname` | 🟡 | **measured expressible** on Sōzu 2.2.0 ([E2E-RESULTS §5c](E2E-RESULTS.md)), not wired: reported as `FilterUnsupported`. Wiring it must first refuse a literal `$` (Sōzu rejects the frontend outright) and answer for the query string, which a path rewrite drops |
 | API gateway | URL rewrite — `ReplacePrefixMatch` | ❌ | the compiled prefix regex's only capture group is the element boundary, so `$PATH[1]` yields `/`, not the remainder — measured |
-| API gateway | Redirects — scheme + status | ✅ | `RequestRedirect` (HTTP→HTTPS, 301/302/308) |
-| API gateway | Redirects — hostname / path / port target | 🟡 | **measured expressible** under all three policies incl. the undocumented 302/308 ([E2E-RESULTS §5c](E2E-RESULTS.md)), not wired: reported as `FilterUnsupported` |
+| API gateway | Redirects — scheme + status | ✅ | `RequestRedirect`, 301/302/308 (303 and 307 have no Sōzu policy and are refused) |
+| API gateway | Redirects — hostname / path / port target | ✅ | `hostname`, `path.replaceFullPath` and `port`, under 301/302/308. An unset target keeps the request's own value, and the query string is preserved. Refused, with the reason: `path.replacePrefixMatch`, a literal `$` (Sōzu reads it as a rewrite template and rejects the frontend), a redirect that changes nothing, and combining with `URLRewrite` |
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
 | API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
@@ -74,13 +74,13 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
   and Gateway API HTTPRoute filters (Phase 3). Sōzu has no header *append*, so a Gateway `add` is
-  applied as a set. `URLRewrite` and redirect host/path/port targets are reported rather than
-  half-applied — but as **unwired**, not impossible: both were measured working on Sōzu 2.2.0
-  (see [E2E-RESULTS §5c](E2E-RESULTS.md) and [PROTOCOL.md §13](../PROTOCOL.md)), which also
-  corrected an earlier `408` result taken against 2.1.0. Two things have to be settled before
-  either is wired: a literal `$` in a rewrite value makes Sōzu **reject the frontend**, and since
-  translation is all-or-nothing that would fail every reconcile; and a path rewrite **drops the
-  query string**, which Gateway API's `ReplaceFullPath` keeps.
+  applied as a set. Redirect host/path/port targets are **wired** — measured working on Sōzu 2.2.0 under
+  every policy (see [E2E-RESULTS §5c](E2E-RESULTS.md) and [PROTOCOL.md §13](../PROTOCOL.md)),
+  with a literal `$` refused in the builder because Sōzu reads it as a rewrite template and
+  rejects the frontend outright, which an all-or-nothing translation turns into a failed
+  reconcile for everyone. `URLRewrite` stays unwired for one measured reason: on the *forwarding*
+  path a rewrite **drops the query string** that `ReplaceFullPath` keeps. (A redirect does not —
+  the two share Sōzu's fields but not that behaviour.)
   The per-source-IP connection limit is wired through Service annotations (see below). HTTP Basic
   auth exists in Sōzu's data plane but has no core Gateway API filter, so it remains unwired.
 - **Hard limits.** Matching on header values or query parameters, weighted traffic split across

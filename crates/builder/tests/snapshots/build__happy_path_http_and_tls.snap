@@ -28,7 +28,10 @@ expression: out
           "header_mods": [],
           "redirect": {
             "scheme": "Https",
-            "status": "MovedPermanently"
+            "status": "MovedPermanently",
+            "hostname": null,
+            "path": null,
+            "port": null
           },
           "rewrite": null
         }

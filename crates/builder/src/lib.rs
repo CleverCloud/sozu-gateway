@@ -1287,6 +1287,11 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                 redirect: Some(ir::Redirect {
                                     scheme: Some(ir::Scheme::Https),
                                     status: ir::RedirectStatus::MovedPermanently,
+                                    // Scheme only: the host and path are the
+                                    // request's own, which is the point.
+                                    hostname: None,
+                                    path: None,
+                                    port: None,
                                 }),
                                 ..Default::default()
                             }

@@ -273,6 +273,48 @@ const CASES: &[Case] = &[
         send: &[],
     },
     Case {
+        host: "redirect-host-only.probe",
+        question: "the exact HTTPRouteRedirectHostAndStatus shape: rewrite_host with NO \
+                   rewrite_path and NO scheme. The suite compares the Location's scheme, host, \
+                   port AND path, defaulting the unspecified ones to the request's — so the path \
+                   must come back as /original and the scheme as http",
+        redirect: RedirectPolicy::Found,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: Some("example.org"),
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "redirect-host-only-301.probe",
+        question: "same, under PERMANENT — the test's second case",
+        redirect: RedirectPolicy::Permanent,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: Some("example.org"),
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "redirect-host-query.probe",
+        question: "does a redirect Location keep the request's query string?",
+        redirect: RedirectPolicy::Found,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: Some("example.org"),
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: Some("/original?q=1&x=2"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
         host: "redirect-port.probe",
         question: "rewrite_port on a redirect: does Location carry an explicit port? \
                    Gateway's RequestRedirect has a `port` field",

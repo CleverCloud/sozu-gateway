@@ -354,8 +354,13 @@ What that settles:
    group — the element boundary `(/|\?|$)` — so `$PATH[1]` yields `/`, not the remainder after
    the prefix. There is nothing there to graft a `ReplacePrefixMatch` onto without changing that
    shared, load-bearing regex.
-5. **A path rewrite discards the query string.** Gateway API's `ReplaceFullPath` replaces the
-   path and leaves the query alone, so this is a real deviation, not a detail.
+5. **A path rewrite discards the query string** — on the *forwarding* path. Gateway API's
+   `ReplaceFullPath` replaces the path and leaves the query alone, so this is a real deviation,
+   not a detail.
+6. **A redirect keeps it.** `rewrite_host` with `rewrite_path` unset answers
+   `Location: <request scheme>://<new host><request path><request query>`, so only the authority
+   moves. Measured separately because the two paths share the same fields and it would have been
+   easy to assume they behave alike; they do not.
 
 ### Header `set` appends instead of replacing — measured
 

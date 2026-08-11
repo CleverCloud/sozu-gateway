@@ -449,37 +449,25 @@ fn build_with_redirect(request_redirect: serde_json::Value) -> sozu_gw_builder::
 }
 
 #[test]
-fn redirect_with_unsupported_target_is_skipped_not_half_applied() {
-    // Sōzu can only express the *scheme* of a redirect: an unset
-    // `redirect_scheme` means USE_SAME, so the Location it emits echoes the
-    // request's own scheme, host and path. Programming a hostname/path/port
-    // redirect anyway therefore answers every matching request with a redirect
-    // to itself — an infinite loop. The rule must be dropped entirely, and the
-    // route must stop reading Accepted.
+fn hostname_path_and_port_redirect_targets_are_programmed() {
+    // These three were refused wholesale, on the belief that Sōzu could express
+    // only a redirect's *scheme*. Measured on 2.2.0 (PROTOCOL.md §13), it builds
+    // the whole `Location` from `rewrite_host`/`rewrite_path`/`rewrite_port`
+    // under every policy — so refusing them was leaving a working feature on
+    // the floor, not protecting anyone.
     for target in [
         json!({ "hostname": "new.example.com", "statusCode": 301 }),
         json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2" } }),
         json!({ "port": 8443, "scheme": "https" }),
     ] {
         let out = build_with_redirect(target.clone());
-
-        assert!(
-            out.ir.frontends.is_empty(),
-            "nothing may be programmed for {target}: {:?}",
-            out.ir.frontends
-        );
+        assert_eq!(out.ir.frontends.len(), 1, "must program {target}");
+        assert!(out.ir.frontends[0].filters.redirect.is_some(), "{target}");
         let parent = &out.routes[0].parents[0];
+        assert!(parent.accepted, "{target}");
         assert!(
-            !parent.accepted,
-            "route must not read Accepted for {target}"
-        );
-        assert_eq!(parent.accepted_reason, "UnsupportedValue");
-        assert!(
-            parent.problems.iter().any(|p| matches!(
-                p,
-                Problem::FilterUnsupported { kind } if kind.starts_with("RequestRedirect")
-            )),
-            "the gap must be reported for {target}: {:?}",
+            parent.problems.is_empty(),
+            "{target}: {:?}",
             parent.problems
         );
     }
@@ -567,10 +555,22 @@ fn redirect_port_matching_the_scheme_still_programs() {
         assert!(out.routes[0].parents[0].accepted, "{target}");
     }
 
-    // A port that the scheme does not imply is still unexpressible.
+    // The implied port is dropped rather than emitted, so the Location stays
+    // free of a redundant `:443`.
+    let out = build_with_redirect(json!({ "scheme": "https", "port": 443, "statusCode": 301 }));
+    assert_eq!(
+        out.ir.frontends[0].filters.redirect.as_ref().unwrap().port,
+        None
+    );
+
+    // A port the scheme does not imply is carried through — measured to land in
+    // the Location as an explicit `:8443`.
     let out = build_with_redirect(json!({ "scheme": "https", "port": 8443, "statusCode": 301 }));
-    assert!(out.ir.frontends.is_empty());
-    assert_eq!(out.routes[0].parents[0].accepted_reason, "UnsupportedValue");
+    assert_eq!(
+        out.ir.frontends[0].filters.redirect.as_ref().unwrap().port,
+        Some(8443)
+    );
+    assert!(out.routes[0].parents[0].accepted);
 }
 
 #[test]
@@ -2101,4 +2101,146 @@ fn a_route_sharing_no_hostname_with_its_listener_is_not_accepted() {
     // And nothing was programmed for the route that matches no hostname.
     assert_eq!(out.ir.frontends.len(), 1);
     assert_eq!(out.ir.frontends[0].hostname, "foo.example.com");
+}
+
+// ---------------------------------------------------------------------------
+// RequestRedirect targets (hostname / path / port)
+// ---------------------------------------------------------------------------
+
+/// An HTTPRoute with one redirect-only rule carrying `requestRedirect`.
+fn redirect_route(request_redirect: serde_json::Value) -> HttpRoute {
+    from_json(json!({
+        "metadata": { "name": "redir", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                "filters": [{ "type": "RequestRedirect", "requestRedirect": request_redirect }]
+            }]
+        }
+    }))
+}
+
+fn build_redirect(request_redirect: serde_json::Value) -> sozu_gw_builder::BuildOutput {
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![redirect_route(request_redirect)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    build(&BuildConfig::default(), &inputs)
+}
+
+/// The exact shape `HTTPRouteRedirectHostAndStatus` pins: a hostname target,
+/// no scheme and no statusCode. It used to be refused wholesale — the
+/// scheme-less guard existed because without a target the `Location` echoes the
+/// request and the client loops. A hostname *is* a target, so there is no loop.
+#[test]
+fn a_hostname_redirect_needs_neither_scheme_nor_status() {
+    let out = build_redirect(json!({ "hostname": "example.org" }));
+
+    assert!(out.routes[0].parents[0].accepted);
+    assert!(out.routes[0].parents[0].problems.is_empty());
+    let redirect = out.ir.frontends[0]
+        .filters
+        .redirect
+        .as_ref()
+        .expect("programmed");
+    assert_eq!(redirect.hostname.as_deref(), Some("example.org"));
+    // Unset scheme and path keep the request's own — Sōzu's USE_SAME.
+    assert_eq!(redirect.scheme, None);
+    assert_eq!(redirect.path, None);
+    // Gateway API's default statusCode is 302.
+    assert_eq!(redirect.status, ir::RedirectStatus::Found);
+}
+
+#[test]
+fn a_redirect_carries_status_path_and_port_targets() {
+    let out = build_redirect(json!({
+        "statusCode": 301,
+        "hostname": "example.org",
+        "port": 8443,
+        "path": { "type": "ReplaceFullPath", "replaceFullPath": "/moved" }
+    }));
+    let redirect = out.ir.frontends[0].filters.redirect.as_ref().unwrap();
+    assert_eq!(redirect.status, ir::RedirectStatus::MovedPermanently);
+    assert_eq!(redirect.hostname.as_deref(), Some("example.org"));
+    assert_eq!(redirect.path.as_deref(), Some("/moved"));
+    assert_eq!(redirect.port, Some(8443));
+}
+
+/// `ReplacePrefixMatch` needs the matched prefix's remainder, and `$PATH[n]`
+/// indexes the path rule's regex captures — the regex a Kubernetes prefix
+/// compiles to has exactly one group, the element boundary. Measured, so this
+/// is a refusal with a reason rather than a gap.
+#[test]
+fn replace_prefix_match_is_refused() {
+    let out = build_redirect(json!({
+        "hostname": "example.org",
+        "path": { "type": "ReplacePrefixMatch", "replacePrefixMatch": "/prefix" }
+    }));
+    assert!(out.ir.frontends.is_empty(), "the rule is skipped");
+    assert!(!out.routes[0].parents[0].accepted);
+    assert_eq!(out.routes[0].parents[0].accepted_reason, "UnsupportedValue");
+}
+
+/// The one that would take the cluster down. `$` opens Sōzu's rewrite-template
+/// grammar and an unparseable template makes it **reject the frontend**;
+/// translation is all-or-nothing, so a single such route would fail every
+/// reconcile, for every tenant. Refused in the builder instead.
+#[test]
+fn a_dollar_in_a_redirect_target_is_refused_not_forwarded() {
+    for target in [
+        json!({ "hostname": "ex$ample.org" }),
+        json!({ "hostname": "example.org",
+                "path": { "type": "ReplaceFullPath", "replaceFullPath": "/price$100" } }),
+    ] {
+        let out = build_redirect(target.clone());
+        assert!(
+            out.ir.frontends.is_empty(),
+            "{target} must not be programmed"
+        );
+        assert!(out.routes[0].parents[0]
+            .problems
+            .iter()
+            .any(|p| matches!(p, Problem::FilterUnsupported { kind } if kind.contains('$'))));
+    }
+}
+
+/// A redirect target and a URLRewrite compile to the *same* three Sōzu fields,
+/// so one would silently overwrite the other.
+#[test]
+fn a_redirect_combined_with_url_rewrite_is_refused() {
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "redir", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [{
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                "filters": [
+                    { "type": "RequestRedirect", "requestRedirect": { "hostname": "example.org" } },
+                    { "type": "URLRewrite", "urlRewrite": { "hostname": "other.example.com" } }
+                ]
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(out.ir.frontends.is_empty());
+    assert!(out.routes[0].parents[0]
+        .problems
+        .iter()
+        .any(|p| matches!(p, Problem::FilterUnsupported { kind }
+            if kind.contains("combined with RequestRedirect"))));
 }
