@@ -188,6 +188,8 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 
 | 2026-08-10 | v1.6.1 | v1.6.1 | **19 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-10.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-10.yaml) | unconditioned, on `master` 5fe5713. `GatewayWithAttachedRoutes` newly passes — a route sharing no hostname with its listener now reads `Accepted: False` / `NoMatchingListenerHostname` and no longer inflates `attachedRoutes`. Nothing regressed |
 
+| 2026-08-11 | v1.6.1 | v1.6.1 | **20 / 37** | **1 / 3** | same three | [gateway-http_crd-v1.6.1_2026-08-11.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-11.yaml) | unconditioned. Redirect hostname/path/port targets wired: `HTTPRouteRedirectHostAndStatus` passes, and `HTTPRouteRedirectScheme` becomes the **first extended test to pass** — two of its four cases carry a `hostname`, so the whole test failed on them |
+
 > **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
 > number to quote — quoting `17/37` without "with a base Gateway excluded from readiness" is exactly
 > the kind of decontextualised figure this log was created to stop. **Row 5 is the first
@@ -325,7 +327,11 @@ a conditions-only guard would compute the new list and never write it.
   build that replaces. Re-verified unchanged on the 2.1.0 → 2.2.0 bump.)
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
-  `(:8080,*,/path)` (first wins). Per-Gateway addresses would need multiple LBs (unavailable), so
+  `(:8080,*,/path)` (first wins). **`HTTPRouteMultipleGateways` is the purest case**: it puts a
+  hostname-less `/` route on each of two Gateways and expects a different backend from each. Both
+  Gateways publish the *same* address — we have one Service — so the two sub-tests send byte-identical
+  requests to the same socket and require different answers. Nothing in the request distinguishes
+  them; it is unsatisfiable without per-Gateway addresses, not a controller gap. Per-Gateway addresses would need multiple LBs (unavailable), so
   this is a platform-constrained limit — it drives most of the remaining routing/filter failures
   (`HTTPRouteMatchingAcrossRoutes`, `HTTPRoutePathMatchOrder`, `HostnameIntersection`,
   `ListenerHostnameMatching`, and the extended `RedirectScheme`/`MethodMatching`/header-modifier
@@ -338,7 +344,9 @@ a conditions-only guard would compute the new list and never write it.
    quirk: a route whose hostnames intersect none of its listener's read `Accepted` while serving
    nothing, and inflated `attachedRoutes`. Fixed by reporting `NoMatchingListenerHostname` and
    counting only the listeners a route actually matches.
-3. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
+3. ~~**`HTTPRouteRedirectHostAndStatus`**~~ — **done** (row 7), and it took `HTTPRouteRedirectScheme`
+   with it.
+4. **Per-Gateway HTTPS listener** (`HTTPRouteHTTPSListener`) — multi-listener HTTPS with SNI on the
    shared `:443`; intertwined with the catch-all-collision limit above.
 
 (`GatewaySecret{Invalid,Missing}ReferenceGrant` now pass — cert `ReferenceGrant` denial reports

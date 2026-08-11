@@ -166,7 +166,7 @@ into one whose `lastTransitionTime` then moves on every pass.
 diffed against the previous pass so resyncs never flood etcd).
 
 **Conformance is a documented partial, by design.** On the v1.6.1 suite, unconditioned, the
-GATEWAY-HTTP profile scores **19/37 core, 0/3 extended** — full run log, per-test attribution and
+GATEWAY-HTTP profile scores **20/37 core, 1/3 extended** — full run log, per-test attribution and
 reproduction in [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6, reports in
 [docs/conformance/](docs/conformance/) (immutable, one file per run). Rows 2–4 of that log predate
 the `Selector` implementation, when the suite **aborted in setup** because
