@@ -19,14 +19,19 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.93.1"
 publish = false
 license = "Apache-2.0"
 
 [workspace.dependencies]
 # Data-plane protocol: official LGPL-3.0 crate. We reuse its protobuf types and
 # socket framing — we never reimplement the wire format or invent fields.
-sozu-command-lib = "2.2.0"
+#
+# Pinned exactly. A caret range lets the library drift away from the Sōzu image
+# the chart deploys without anyone deciding to, and the two are only
+# interchangeable for as long as the wire format agrees. Bumping this is a
+# deliberate act that re-checks PROTOCOL.md, not a lockfile refresh.
+sozu-command-lib = "=2.2.1"
 # Same major as sozu-command-lib's own mio: sozu-agent builds the command
 # socket's `mio::net::UnixStream` itself (from a std stream) so it can bound
 # writes, and tests reuse `Channel` server-side to speak the real framing.

@@ -230,11 +230,17 @@ changes.
 
 ### Version pins (verified, do not bump casually)
 
-`sozu-command-lib` **2.2.0** (LGPL-3.0) against Sōzu **2.2.0**, `kube` **4**, `k8s-openapi`
+`sozu-command-lib` **2.2.1** (LGPL-3.0, pinned exactly) against Sōzu **2.2.0**, `kube` **4**, `k8s-openapi`
 **0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
 **v1.6.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
 `kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
-rust-version 1.88.
+rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
+
+The library is deliberately one patch ahead of the data-plane image: 2.2.1 redacts
+certificate and key material from `Debug`, and its `command.proto`, `ConfigState::diff`
+and channel framing are byte-identical to 2.2.0, so the two interoperate exactly. Keep
+checking that before widening the gap — a library newer than the proxy is only safe
+while the wire format agrees.
 
 ## Deployment model
 
