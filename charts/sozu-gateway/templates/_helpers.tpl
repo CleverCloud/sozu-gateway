@@ -86,3 +86,72 @@ template needs one specific listener (Sōzu's static HTTP/HTTPS binds).
 {{- if eq .protocol $proto -}}{{ toJson . }}{{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+The timeout keys this chart exposes, in the order they are rendered. One list
+feeds both the renderer and the validator, so the two cannot drift.
+
+`sozu.timeouts.<name>` maps onto `<name>_timeout` in Sōzu's config. These four
+are not everything `ListenerBuilder` understands — `sni_preread_timeout` and the
+H2 deadlines exist too — they are the ones a gateway operator has a reason to
+turn. Read that struct, not this list, for the full schema.
+*/}}
+{{- define "sozu-gateway.timeoutKeys" -}}
+connect front back request
+{{- end -}}
+
+{{/*
+Timeouts as top-level TOML keys. An empty entry is omitted, leaving Sōzu's own
+default in force.
+
+Emitted once at the root rather than inside each `[[listeners]]` block:
+`assign_config_timeouts` applies a file-level timeout to every listener that
+does not override it, so one copy covers both listeners and there is no second
+copy to drift — nor any risk of a scalar landing after a sub-table like
+`[listeners.hsts]` and being parsed into the wrong table.
+*/}}
+{{- define "sozu-gateway.timeouts" -}}
+{{- $values := .Values.sozu.timeouts | default dict -}}
+{{- range $key := splitList " " (include "sozu-gateway.timeoutKeys" $) -}}
+{{- with get $values $key }}
+{{ $key }}_timeout = {{ int . }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Reject, while rendering, a timeout Sōzu could not use.
+
+Two different failures are being headed off. A value the TOML cannot represent —
+a fraction, or anything past `u32` — fails `FileConfig`'s whole-file parse, and
+`sozu start` exits rather than serving: a CrashLoopBackOff, not a proxy missing a
+listener. An unknown key is the quieter one: nothing at the file's top level
+denies unknown fields, so a typo is dropped in silence and the operator's intent
+simply never happens.
+*/}}
+{{- define "sozu-gateway.validateTimeouts" -}}
+{{- $known := splitList " " (include "sozu-gateway.timeoutKeys" .) -}}
+{{- $values := .Values.sozu.timeouts | default dict -}}
+{{- if not (kindIs "map" $values) -}}
+  {{- fail (printf "sozu.timeouts must be a mapping of %s, got %v" (join "/" $known) $values) -}}
+{{- end -}}
+{{- range $key, $value := $values -}}
+  {{- if not (has $key $known) -}}
+    {{- fail (printf "sozu.timeouts.%s is not a timeout this chart exposes — it renders %s. Nothing at the top level of Sōzu's config rejects an unknown key, so this would be dropped in silence rather than reported" $key (join ", " $known)) -}}
+  {{- end -}}
+  {{- if not (kindIs "invalid" $value) -}}
+    {{- if or (kindIs "bool" $value) (kindIs "string" $value) (kindIs "map" $value) (kindIs "slice" $value) -}}
+      {{- fail (printf "sozu.timeouts.%s must be a whole number of seconds, got %v (%s)" $key $value (kindOf $value)) -}}
+    {{- end -}}
+    {{- if ne (printf "%v" $value) (printf "%v" (int $value)) -}}
+      {{- fail (printf "sozu.timeouts.%s must be a whole number of seconds, got %v — Sōzu's timeouts have one-second resolution and the fraction would be dropped without a word" $key $value) -}}
+    {{- end -}}
+    {{- if lt (int $value) 1 -}}
+      {{- fail (printf "sozu.timeouts.%s must be at least 1 second, got %v — leave it empty to keep Sōzu's own default" $key $value) -}}
+    {{- end -}}
+    {{- if gt (int $value) 4294967295 -}}
+      {{- fail (printf "sozu.timeouts.%s is %v, past the u32 Sōzu parses it into — the config would fail to load and the proxy would not start" $key $value) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}

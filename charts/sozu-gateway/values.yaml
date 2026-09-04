@@ -170,6 +170,42 @@ sozu:
       includeSubdomains: false
       preload: false
 
+  # Timeouts, in whole seconds. Like `hardening` above, an empty entry is
+  # omitted and leaves Sōzu's own default in force — so `timeouts: {}` is not
+  # "no timeouts", it is Sōzu's (connect 3, front 60, back 30, request 10).
+  #
+  # These reach the HTTP and HTTPS listeners, which are the ones declared in
+  # Sōzu's config file. They do NOT reach layer-4: a TCPRoute or UDPRoute
+  # listener is created by the controller over the command socket and carries
+  # its own fixed budgets. Turning `connect` here changes nothing for a database
+  # behind a TCPRoute.
+  timeouts:
+    # How long Sōzu waits for a backend to accept a connection. Sōzu's own
+    # default is 3s, which is longer than most callers will wait: a backend that
+    # has gone silent burns the caller's whole budget and the failure is
+    # recorded on the client as a hang, with nothing proxy-side to attribute it
+    # to — no 504, no `backend_timeout` in the access log, no `http.status.504`.
+    #
+    # 2s rather than 1s, deliberately. Linux sends its first SYN retransmit at
+    # 1s, so a 1s budget cannot absorb even a single lost SYN — routine enough
+    # during pod churn, while conntrack and the CNI's maps catch up. And the
+    # cost of being wrong is not a slow success: a connect that times out is
+    # answered 504 with no retry and no failover, and it does not even mark the
+    # backend down, because that path never records a connection failure. 2s
+    # still lands inside a typical caller's patience while leaving room for one
+    # retransmit.
+    #
+    # None of this is failover. Sōzu retries another backend only when a
+    # connection is actively refused. Raise this if a legitimately slow-to-accept
+    # backend — a cold runtime, a saturated accept queue — starts being cut off.
+    connect: 2
+    # Inactivity on the client-facing socket (Sōzu default 60).
+    front: null
+    # Inactivity on the backend socket (Sōzu default 30).
+    back: null
+    # Time to receive a whole request since the connection opened (default 10).
+    request: null
+
 service:
   type: LoadBalancer
   externalTrafficPolicy: Local

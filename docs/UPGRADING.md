@@ -4,6 +4,37 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## The backend connect timeout drops to 2 seconds
+
+The chart used to set no timeouts, so Sōzu's own applied — including **3 seconds
+to connect to a backend**. It now renders `connect_timeout = 2`.
+
+A `helm upgrade` picks this up like any other config change, including with
+`--reuse-values`, because the value ships in the chart rather than in your
+overrides. **A backend that legitimately takes longer than 2 seconds to accept a
+connection — a cold runtime, a saturated accept queue — starts being answered
+`504` where it previously waited.**
+
+The change is there so that a backend which has gone *silent* fails inside the
+proxy, where it is answered, logged as `backend_timeout` and counted in
+`http.status.504`, instead of consuming the caller's entire budget and being
+recorded on the client as an unexplained hang. It buys attribution, not
+recovery: a connect that times out gets no retry and no failover.
+
+If it cuts off a backend that was merely slow, raise it:
+
+```yaml
+sozu:
+  timeouts:
+    connect: 5   # or null, to return to Sōzu's own default of 3
+```
+
+This reaches the HTTP and HTTPS listeners only. Layer-4 listeners are created by
+the controller over the command socket and keep their own fixed budgets, so a
+TCPRoute or UDPRoute is unaffected either way.
+
+---
+
 ## Downgrading the controller
 
 Upgrades need nothing special. **Downgrades do**, and this is the procedure.

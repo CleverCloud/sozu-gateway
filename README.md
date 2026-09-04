@@ -83,6 +83,7 @@ The controller is configured entirely through the Helm chart
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
 | `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status for **every** route kind) |
 | `metrics.enabled` | `false` | Serve Prometheus `/metrics` (pulled from Sōzu over the socket) |
+| `sozu.timeouts.connect` | `2` | Seconds Sōzu waits for a backend to accept, on the HTTP/HTTPS listeners. Below Sōzu's own 3 so a silent backend fails inside the proxy, where it is answered and logged |
 
 A few behaviours worth knowing:
 
