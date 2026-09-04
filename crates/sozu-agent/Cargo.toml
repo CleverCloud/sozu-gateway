@@ -27,6 +27,9 @@ socket2 = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
+# The protocol probe prints whole protobuf values; `Debug` redacts them since
+# sozu-command-lib 2.2.1, and PROTOCOL.md is written from what the probe shows.
+serde_json = { workspace = true }
 # End-to-end smoke example dogfoods the pure pipeline (IR -> Translator -> Agent).
 sozu-gw-ir = { workspace = true }
 sozu-gw-translator = { workspace = true }

@@ -32,7 +32,7 @@ use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
     request::RequestType, AddBackend, AddCertificate, CertificateAndKey, Cluster,
     LoadBalancingAlgorithms, PathRule, PathRuleKind, Request, RequestHttpFrontend, Response,
-    ResponseStatus, RulePosition, SocketAddress, Status,
+    ResponseContent, ResponseStatus, RulePosition, SocketAddress, Status, WorkerResponse,
 };
 
 fn env_or(key: &str, default: &str) -> String {
@@ -67,7 +67,11 @@ fn apply(channel: &mut Channel<Request, Response>, label: &str, req: Request) ->
         if status == ResponseStatus::Ok as i32 {
             println!("    [{label}] OK: {}", resp.message);
             if let Some(content) = &resp.content {
-                println!("    [{label}]    content: {content:?}");
+                // Rendered as JSON, not `Debug`: since sozu-command-lib 2.2.1 the
+                // `Debug` of a response summarises rather than shows, and this
+                // probe exists to record exactly what came back (PROTOCOL.md §10
+                // quotes the worker id and run_state from here).
+                println!("    [{label}]    content: {}", render_content(content));
             }
             return Ok(resp);
         }
@@ -77,6 +81,20 @@ fn apply(channel: &mut Channel<Request, Response>, label: &str, req: Request) ->
             resp.message
         ));
     }
+}
+
+/// Whole value as JSON.
+///
+/// `Debug` on these types redacts since sozu-command-lib 2.2.1 — right for the
+/// controller's logs, wrong for a probe whose entire job is to record what the
+/// wire carried. This is a manually-run example against a throwaway Sōzu; the
+/// controller must keep using `Debug`.
+fn render_content(value: &ResponseContent) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("<unserialisable: {e}>"))
+}
+
+fn render_worker_response(value: &WorkerResponse) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("<unserialisable: {e}>"))
 }
 
 fn main() -> Result<()> {
@@ -237,7 +255,7 @@ fn main() -> Result<()> {
 /// Minimal alternate-transport handshake to answer Open Question #1: does the
 /// external command socket expect a `WorkerRequest { id, content }` envelope?
 fn probe_worker_transport(sock: &str) -> Result<()> {
-    use sozu_command_lib::proto::command::{WorkerRequest, WorkerResponse};
+    use sozu_command_lib::proto::command::WorkerRequest;
 
     let mut channel: Channel<WorkerRequest, WorkerResponse> =
         Channel::from_path(sock, 1024 * 1024, 16 * 1024 * 1024)
@@ -257,6 +275,11 @@ fn probe_worker_transport(sock: &str) -> Result<()> {
     let resp: WorkerResponse = channel
         .read_message()
         .context("read_message (WorkerResponse) failed")?;
-    println!("[worker-transport] got WorkerResponse: {resp:?}");
+    // §1 is founded on the echoed request id, which `Debug` now reports only as
+    // a length.
+    println!(
+        "[worker-transport] got WorkerResponse: {}",
+        render_worker_response(&resp)
+    );
     Ok(())
 }

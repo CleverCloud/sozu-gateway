@@ -605,9 +605,13 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     requests.extend(l4.into_iter().map(l4_frontend_request));
     let mut state = ConfigState::new();
     for req in canonicalize(requests) {
+        // The library's own message identifies the clashing object only by the
+        // byte length of its id, so the request has to carry the diagnosis: on a
+        // duplicate route key, this is the only thing that names the route. Safe
+        // to inline — `Debug` on a request redacts certificate and key material.
         state
             .dispatch(&req)
-            .map_err(|e| TranslatorError::Dispatch(e.to_string()))?;
+            .map_err(|e| TranslatorError::Dispatch(format!("{e}; request was {req:?}")))?;
     }
     Ok(state)
 }

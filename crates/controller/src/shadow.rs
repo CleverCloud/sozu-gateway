@@ -413,6 +413,11 @@ mod tests {
 
         let requests = sozu_gw_translator::reconcile(&reloaded, &desired)
             .expect("a key-less previous side must not fail the diff");
+        // `Debug`, deliberately, and not JSON like the translator's golden tests:
+        // since sozu-command-lib 2.2.1 it prints the certificate as lengths and
+        // counts, which names the request without putting the fixture's private
+        // key in the failure output — in the one test whose whole subject is
+        // that key material does not escape.
         assert!(
             requests.is_empty(),
             "an unchanged cert must yield no requests: {requests:?}"
