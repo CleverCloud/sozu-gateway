@@ -1,6 +1,22 @@
 # Default values for the sozu-gateway add-on.
 
-replicaCount: 1
+# The data plane is the one component whose loss is immediately user-visible, so
+# it defaults to spare capacity rather than to the smallest possible footprint.
+# A single replica has no one to fail over to: while its Pod is being
+# rescheduled the Service holds no endpoint at all, and callers get a connection
+# error rather than a slower answer. Three, spread by the constraints below,
+# leave someone still serving when one Pod goes away.
+replicaCount: 3
+
+# Disruption budget for the replicas above. Only rendered with more than one
+# replica: over a single Pod a budget can only block every disruption or permit
+# every one of them, and neither is a budget.
+pdb:
+  # `maxUnavailable`, not `minAvailable`: the two agree at two replicas and
+  # diverge above it. `minAvailable: 1` on three replicas authorises evicting
+  # two of them at once, which is a two-thirds capacity cut dressed up as a
+  # budget.
+  maxUnavailable: 1
 
 image:
   controller:
@@ -178,6 +194,41 @@ resources:
     requests:
       cpu: 250m
       memory: 256Mi
+
+# Spread the replicas so that one failure domain cannot hold all of them. The
+# chart fills in each constraint's `labelSelector` from its own selector labels:
+# a hand-written selector that drifts from them silently spreads nothing, and a
+# constraint that matches no Pod reports no error.
+#
+# The host constraint is hard, because a soft one measurably does not hold. As a
+# preference it is one score among several and loses: across eight observed
+# rollouts on a three-node cluster a soft constraint put two replicas on one node
+# and left another empty every single time, and nothing undoes that afterwards —
+# the scheduler places Pods, it never moves running ones. `DoNotSchedule` placed
+# one per node on every run.
+#
+# It does not stall a rollout, because `matchLabelKeys` counts only the incoming
+# revision: the surge Pod always sees a node its own revision has not taken yet.
+# The two belong together — hard spreading without that scoping would deadlock at
+# the first surge.
+#
+# The cost is explicit: with fewer nodes than replicas the surplus stays
+# `Pending`, and `helm --wait` will time out. That is the right shape for an edge
+# proxy behind `externalTrafficPolicy: Local`, where what matters is a Pod on
+# every node rather than a count of Pods — but it means `replicaCount` should not
+# exceed the node count. Lower it on smaller clusters.
+#
+# The zone constraint stays soft: a constraint whose `topologyKey` no node carries
+# is skipped in silence, so on a cluster without `topology.kubernetes.io/zone`
+# labels it does nothing at all, and making it hard there would be a hard
+# requirement nobody can satisfy.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
 
 nodeSelector: {}
 tolerations: []

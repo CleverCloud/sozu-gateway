@@ -1,7 +1,8 @@
 {{- if gt (int .Values.replicaCount) 1 }}
-# Only rendered with more than one replica: a minAvailable:1 PDB on a
-# singleton can never be satisfied during a voluntary disruption, so it
-# would block node drains forever.
+# Only rendered with more than one replica: a budget over a single Pod can only
+# ever block every disruption or permit every one of them, and neither is a
+# budget. `maxUnavailable: 1` there would be the permissive half — an object
+# that says nothing.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -9,7 +10,13 @@ metadata:
   labels:
     {{- include "sozu-gateway.labels" . | nindent 4 }}
 spec:
-  minAvailable: 1
+  maxUnavailable: {{ required "pdb.maxUnavailable must be set: a PodDisruptionBudget carrying neither minAvailable nor maxUnavailable is accepted by the apiserver, reports expectedPods 0 / disruptionsAllowed 0, and blocks every drain" .Values.pdb.maxUnavailable }}
+  # Narrower than it looks, and deliberately kept. Under the default policy an
+  # unready Pod is still evictable while the budget has room, which at three
+  # replicas is the ordinary case — so this only bites once two of the three are
+  # unready, and then it lets the drain proceed instead of stalling behind Pods
+  # that cannot recover where they are.
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "sozu-gateway.selectorLabels" . | nindent 6 }}

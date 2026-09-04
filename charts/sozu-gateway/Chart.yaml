@@ -1,4 +1,9 @@
 apiVersion: v2
+# Floor set by the fields the disruption budget and the topology spread rely on:
+# `unhealthyPodEvictionPolicy` and `matchLabelKeys` are both present and honoured
+# from 1.27. Below that they are silently inert, and under strict field
+# validation they are a hard rejection rather than a default.
+kubeVersion: ">=1.27.0-0"
 name: sozu-gateway
 description: Sōzu-based Ingress + Gateway API controller and API gateway add-on.
 type: application

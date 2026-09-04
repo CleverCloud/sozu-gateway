@@ -75,6 +75,7 @@ The controller is configured entirely through the Helm chart
 
 | Value | Default | Description |
 | ----- | ------- | ----------- |
+| `replicaCount` | `3` | Data-plane replicas. `topologySpreadConstraints` prefers one per node, and per zone where nodes are labelled |
 | `ingressClass.name` | `sozu` | Name of the created `IngressClass` (and `GatewayClass`) |
 | `ingressClass.default` | `false` | Make it the cluster's default `IngressClass` |
 | `service.type` | `LoadBalancer` | How the proxy is exposed |

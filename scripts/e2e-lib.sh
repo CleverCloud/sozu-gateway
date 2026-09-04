@@ -49,7 +49,13 @@ ensure_image() {
 #   ensure_addon --set-json 'exposure=[...]' 
 ensure_addon() {
   echo "==> helm upgrade --install $RELEASE $*"
+  # One replica, deliberately. The chart's default spreads hard across nodes, so
+  # at the default the suites would need as many nodes as replicas and would sit
+  # in `--wait` on anything smaller. These suites exercise routing, not the
+  # replica topology; override REPLICAS to test the shipped default on a cluster
+  # big enough for it.
   helm upgrade --install "$RELEASE" "$ROOT/charts/sozu-gateway" -n "$NS" --create-namespace \
+    --set replicaCount="${REPLICAS:-1}" \
     --set image.controller.repository="$REPO" \
     --set image.controller.tag="$TAG" \
     --set image.controller.digest="${DIGEST:-}" \

@@ -66,8 +66,8 @@ the time the LoadBalancer routes to it, the routes exist.
 > **Program gap — now gated.** The controller container exposes `/readyz`, which turns green only
 > after its first successful reconcile (Sōzu programmed). A fresh Pod is therefore `Ready` — and
 > joins the Service — only once its routes exist, closing the cold-start "program gap" the plain
-> Sōzu TCP probe left open. For a robust data-plane upgrade still run `replicaCount >= 2` and set
-> `maxUnavailable=0` explicitly. A real version bump must also bump the controller (built against a
+> Sōzu TCP probe left open. A robust data-plane upgrade wants `replicaCount >= 2` and
+> `maxUnavailable=0`, both of which the chart now defaults to. A real version bump must also bump the controller (built against a
 > matching `sozu-command-lib`) and the Sōzu image together.
 
 ## 4. Gateway API (Phase 2)
@@ -383,9 +383,9 @@ Detection of the second case is **polled, not pushed**: the worker-generation
 probe runs on the periodic resync (`SOZU_GW_RESYNC_SECS`, 60 s by default) and
 when the command socket reconnects. A Sōzu main-process crash under a live
 controller therefore leaves the data plane unprogrammed for up to one resync
-period. For gap-free serving across a data-plane restart, run
-`replicaCount >= 2` so another Pod keeps answering, and/or lower
-`SOZU_GW_RESYNC_SECS`. `SOZU_GW_RESYNC_SECS=0` disables the poll entirely and
+period. Gap-free serving across a data-plane restart wants `replicaCount >= 2`
+so another Pod keeps answering — the chart's default of 3 satisfies it — and/or
+a lower `SOZU_GW_RESYNC_SECS`. `SOZU_GW_RESYNC_SECS=0` disables the poll entirely and
 leaves only the reconnect path.
 
 What the probe compares is Sōzu's live worker-PID set, not whether its state

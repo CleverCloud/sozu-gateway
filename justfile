@@ -53,9 +53,13 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowStatusWrites=true > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=1 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=2 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowGatewayStatusWrites=false > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":5432,"bind":5432,"protocol":"TCP","transport":"TCP"},{"name":"dns","port":5353,"bind":5353,"protocol":"UDP","transport":"UDP"}]' > /dev/null
+    # A budget with neither bound is accepted by the apiserver and then blocks
+    # every drain, so it must fail the render instead.
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set pdb.maxUnavailable=null > /dev/null 2>&1
     # An exposure table that cannot work must fail the render, not the apiserver.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pass","port":443,"bind":9443,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"pg","port":5432,"bind":8080,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
