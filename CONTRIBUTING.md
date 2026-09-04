@@ -64,7 +64,8 @@ You need:
   build will not even start without it. On a bare host: `apt-get install protobuf-compiler`.
 - **[`just`](https://github.com/casey/just)** — the [`justfile`](justfile) is the authoritative
   source for task and command names. Run `just` with no args to list every recipe.
-- **Rust 1.88 (stable)**, edition 2021. No nightly is required — unlike Sōzu, formatting and lints
+- **Rust 1.93.1 (stable)**, edition 2021. The floor comes from the dependency tree, not from our own
+  code — `sozu-command-lib` sets it. No nightly is required — unlike Sōzu, formatting and lints
   run on the stable toolchain.
 - The **devcontainer** ([`.devcontainer`](.devcontainer)) brings the Rust toolchain, Go, and a
   Kubernetes stack (kubectl/helm/minikube). It does **not** bring `protoc`, `just`, or a docker
