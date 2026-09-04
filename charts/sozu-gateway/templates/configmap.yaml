@@ -24,6 +24,12 @@ data:
     pid_file_path = "/run/sozu/sozu.pid"
     activate_listeners = true
 
+    # File-level timeouts: Sōzu applies each to every listener below that does
+    # not set its own. HTTP and HTTPS are the listeners declared here, so these
+    # are the listeners this covers — layer-4 listeners are created by the
+    # controller over the command socket and carry their own values.
+    {{- include "sozu-gateway.timeouts" . | nindent 4 }}
+
     [[listeners]]
     protocol = "http"
     address = "0.0.0.0:{{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTP"))).bind }}"

@@ -27,6 +27,13 @@ pid_file_path = "/run/sozu/sozu.pid"
 # Listeners come up and start listening at boot.
 activate_listeners = true
 
+# Timeouts apply to every listener below that does not set its own, and default
+# to Sōzu's when omitted (connect 3, front 60, back 30, request 10). The chart
+# renders these from `sozu.timeouts`. 2 rather than Sōzu's 3 so a silent backend
+# fails inside the proxy, where it is answered and logged, rather than inside the
+# caller's budget — and not 1, because Linux retransmits a lost SYN at 1s.
+connect_timeout = 2
+
 [[listeners]]
 protocol = "http"
 address = "0.0.0.0:8080"

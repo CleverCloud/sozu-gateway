@@ -1,4 +1,8 @@
 {{- include "sozu-gateway.validateExposure" . }}
+{{- /* Both chart-wide preconditions are asserted here, and not in the file
+     they guard: deployment.yaml re-renders the ConfigMap to checksum it, so a
+     `fail` raised inside it is reported against the checksum line. */ -}}
+{{- include "sozu-gateway.validateTimeouts" . }}
 apiVersion: v1
 kind: Service
 metadata:
