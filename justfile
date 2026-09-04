@@ -46,13 +46,13 @@ clippy:
 image:
     docker build -t {{IMAGE}}:{{TAG}} .
 
-# Lint + render the Helm chart (also with rbac.allowStatusWrites=true, the
-# opt-in metrics + ServiceMonitor path, and a digest-pinned image).
+# Lint + render the Helm chart (also with rbac.allowStatusWrites=true, both
+# sides of the metrics switch + the ServiceMonitor path, and a digest-pinned
+# image).
 chart-lint:
     helm lint {{CHART}}
     helm template {{HELM_RELEASE}} {{CHART}} > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowStatusWrites=true > /dev/null
-    helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=true --set metrics.serviceMonitor.enabled=true > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=1 > /dev/null
     # Timeouts: non-default values, and the HSTS sub-table they share a file with.
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts.front=45 --set sozu.timeouts.request=8 > /dev/null
@@ -63,6 +63,13 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts.front=true > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts.connect=5000000000 > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts=5 > /dev/null 2>&1
+    helm template {{HELM_RELEASE}} {{CHART}} --set metrics.serviceMonitor.enabled=true > /dev/null
+    # Both sides of the metrics switch, asserted rather than merely rendered.
+    helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false | grep -q SOZU_GW_METRICS_LISTEN
+    # The Pod's own ports are not up for grabs by an exposure entry.
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=2 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowGatewayStatusWrites=false > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":5432,"bind":5432,"protocol":"TCP","transport":"TCP"},{"name":"dns","port":5353,"bind":5353,"protocol":"UDP","transport":"UDP"}]' > /dev/null

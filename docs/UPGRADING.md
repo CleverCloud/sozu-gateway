@@ -4,6 +4,39 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Prometheus metrics are served by default
+
+`metrics.enabled` now defaults to `true`. A `helm upgrade` with unchanged values
+therefore adds a `ClusterIP` Service, opens a container port, and rolls the Pod.
+
+**What it exposes.** The endpoint has no authentication and no NetworkPolicy, and
+the series carry `cluster_id` as `namespace.service.port` — so any Pod that can
+reach the Service can enumerate the routed Services of every tenant. Backend Pod
+IPs are not exposed at Sōzu's default detail level. On a shared cluster, put a
+NetworkPolicy in front of it or turn it off:
+
+```yaml
+metrics:
+  enabled: false
+```
+
+**What it costs.** A scrape is a `QueryMetrics` on the same command socket that
+carries routing applies, and that socket is served by a single worker in order.
+A slow scrape can therefore delay — and in the worst case fail — a reconcile.
+Two known limits, neither of which the chart can fix on its own:
+
+- the scraper stops waiting after 10s and returns `503`, but the query it started
+  keeps the socket busy for longer than that;
+- an `AggregatedMetrics` payload larger than `max_command_buffer_size`
+  (1 638 400 bytes) is rejected by Sōzu, which closes the connection instead of
+  answering. Large clusters will see scrapes fail deterministically.
+
+**What it is good for.** The controller's own signals — the
+last-successful-reconcile timestamp above all — plus Sōzu's request counters and
+status codes. Note what it is *not* good for: `cluster.available_backends`
+against `cluster.total_backends` only moves when Sōzu's passive circuit breaker
+trips, and that is armed by a *refused* connection. A backend that has gone
+silent is still counted available, so those two series do not detect it.
 ## The backend connect timeout drops to 2 seconds
 
 The chart used to set no timeouts, so Sōzu's own applied — including **3 seconds
