@@ -79,6 +79,7 @@ The controller is configured entirely through the Helm chart
 | `ingressClass.name` | `sozu` | Name of the created `IngressClass` (and `GatewayClass`) |
 | `ingressClass.default` | `false` | Make it the cluster's default `IngressClass` |
 | `service.type` | `LoadBalancer` | How the proxy is exposed |
+| `sozu.drain.delaySeconds` | `5` | Seconds the proxy keeps accepting after the Pod is marked for deletion, before it drains. Raise it to your load balancer's depool time under `externalTrafficPolicy: Local` |
 | `exposure` | `80→8080` HTTP, `443→8443` HTTPS | Every port the gateway serves: advertised port, in-pod bind, listener protocol. Add a `TCP`/`UDP` entry to make a layer-4 `Gateway` listener possible |
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
 | `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status for **every** route kind) |

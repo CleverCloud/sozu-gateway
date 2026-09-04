@@ -172,3 +172,56 @@ simply never happens.
   {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The drain's effective settings, defaulted here rather than read straight from
+values: `helm upgrade --reuse-values` replays the previous release's values over
+the new chart and does not pick up keys the chart has since added, so an existing
+user upgrading into this feature arrives with `sozu.drain` absent. Reading it
+blind is a nil dereference and a Go template trace; defaulting makes that upgrade
+simply work.
+*/}}
+{{- define "sozu-gateway.drainDelay" -}}
+{{- (.Values.sozu.drain | default dict).delaySeconds | default 5 -}}
+{{- end -}}
+
+{{- define "sozu-gateway.drainGrace" -}}
+{{- (.Values.sozu.drain | default dict).gracePeriodSeconds | default 40 -}}
+{{- end -}}
+
+{{/*
+Whether the hook is rendered at all. `default true` would be wrong here — it
+treats `false` as unset — so the key's presence is what decides.
+*/}}
+{{- define "sozu-gateway.drainEnabled" -}}
+{{- $drain := .Values.sozu.drain | default dict -}}
+{{- if hasKey $drain "enabled" -}}{{ $drain.enabled }}{{- else -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The drain has to fit inside the grace period, or the kubelet SIGKILLs mid-drain
+and the hook has bought nothing.
+
+Validated on the raw values, not on their coercion: `int` turns "30s" into 0 and
+5.7 into 5, so validating the coerced form both hides the mistake and reports a
+number the user never wrote.
+*/}}
+{{- define "sozu-gateway.validateDrain" -}}
+{{- $drain := .Values.sozu.drain | default dict -}}
+{{- range $key := list "delaySeconds" "gracePeriodSeconds" -}}
+  {{- $value := get $drain $key -}}
+  {{- /* Absent is fine — the defaults above cover it, which is what makes
+       `--reuse-values` work. `get` on a missing key yields "", not nil, so the
+       test is on the key's presence. */ -}}
+  {{- if and (hasKey $drain $key) (not (kindIs "invalid" $value)) -}}
+    {{- if not (regexMatch "^[0-9]+$" (printf "%v" $value)) -}}
+      {{- fail (printf "sozu.drain.%s must be a whole number of seconds, got %v — it is rendered into a shell command and into terminationGracePeriodSeconds, neither of which takes a fraction or a unit suffix" $key $value) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- $d := int (include "sozu-gateway.drainDelay" .) -}}
+{{- $g := int (include "sozu-gateway.drainGrace" .) -}}
+{{- if le $g $d -}}
+  {{- fail (printf "sozu.drain.gracePeriodSeconds (%d) must exceed sozu.drain.delaySeconds (%d), otherwise the kubelet SIGKILLs the proxy before it has begun draining" $g $d) -}}
+{{- end -}}
+{{- end -}}

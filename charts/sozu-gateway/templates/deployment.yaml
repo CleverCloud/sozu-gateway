@@ -1,3 +1,4 @@
+{{- include "sozu-gateway.validateDrain" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,6 +26,14 @@ spec:
         # Roll the pod when the Sōzu config changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
+      # Long enough for the data plane's preStop drain below to finish; when it
+      # expires the kubelet SIGKILLs, which is exactly what the drain exists to
+      # avoid. Widened only because the drain needs the room — with the hook off
+      # it is left alone, since a longer wait for a proxy that ignores SIGTERM is
+      # a longer outage, not a safer one.
+      terminationGracePeriodSeconds: {{ include "sozu-gateway.drainGrace" . | int }}
+      {{- end }}
       serviceAccountName: {{ include "sozu-gateway.serviceAccountName" . }}
       # The ServiceAccount can read Secrets cluster-wide; the data-plane
       # container parses untrusted network input and must never hold that
@@ -57,6 +66,24 @@ spec:
             capabilities:
               drop: ["ALL"]
           args: ["start", "-c", "/etc/sozu/config.toml"]
+          # Why this exists at all: see `sozu.drain` in values.yaml. `--timeout`
+          # is a real duration because 0 is applied as zero nanoseconds rather
+          # than as "no timeout"; the budget is what the grace period leaves
+          # after the delay, so it runs out at the same moment the kubelet's
+          # does. Overrunning it is a SIGKILL moments later, not a clean stop —
+          # do not "fix" it by widening the budget past the grace period.
+          {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - 'sleep "$1"; exec /usr/local/bin/sozu -c /etc/sozu/config.toml -t "$2" shutdown'
+                  - drain
+                  - {{ include "sozu-gateway.drainDelay" . | int | quote }}
+                  - {{ mul (sub (int (include "sozu-gateway.drainGrace" .)) (int (include "sozu-gateway.drainDelay" .))) 1000 | quote }}
+          {{- end }}
           ports:
             {{- range .Values.exposure }}
             - name: {{ .name }}
