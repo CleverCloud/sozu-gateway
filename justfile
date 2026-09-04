@@ -76,6 +76,12 @@ chart-lint:
     # A budget with neither bound is accepted by the apiserver and then blocks
     # every drain, so it must fail the render instead.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set pdb.maxUnavailable=null > /dev/null 2>&1
+    # A drain that cannot fit inside the grace period, or that is not a whole
+    # number of seconds, must fail the render rather than the Pod's shutdown.
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.drain.enabled=false > /dev/null
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.drain.delaySeconds=40 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.drain.delaySeconds=-1 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.drain.gracePeriodSeconds=30s > /dev/null 2>&1
     # An exposure table that cannot work must fail the render, not the apiserver.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pass","port":443,"bind":9443,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"pg","port":5432,"bind":8080,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1

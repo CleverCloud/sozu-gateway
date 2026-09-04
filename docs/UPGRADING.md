@@ -4,6 +4,41 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu is drained on shutdown, and the grace period grows to 40s
+
+The data-plane container gets a `preStop` hook and
+`terminationGracePeriodSeconds: 40` (was Kubernetes' default 30).
+
+Sōzu registers no signal handler, and a signal with no handler is discarded when
+it reaches PID 1 of a container — so SIGTERM did nothing and every Pod deletion
+sat out the full grace period before being SIGKILLed, losing the response to
+whatever was in flight. Measured on a three-node cluster: **31–32s to delete a
+gateway Pod before, 6–7s after**, the difference being the 5s delay plus about a
+second of draining.
+
+**The first upgrade is not drained.** The outgoing Pod is the old spec, so it
+still waits out its own grace period; only Pods created from this chart onwards
+drain.
+
+**`--reuse-values` needs care.** Helm replays the previous release's values over
+the new chart and does not pick up keys the chart has since added. The chart
+defaults `sozu.drain` internally so this no longer fails, but
+`--reset-then-reuse-values` is the flag that actually gives you the new defaults.
+
+**Sizing under `externalTrafficPolicy: Local`** — the chart's default. The 5s
+delay covers kube-proxy and the CNI, not an external load balancer, which stops
+sending only once its own health check fails (often 10–30s). Before this change
+Sōzu kept accepting for the whole 30s grace and covered that window by accident;
+now the listener closes at 5s and connections arriving after that are refused.
+If you depend on an external LB, raise `sozu.drain.delaySeconds` to at least its
+depool time.
+
+**What is drained** is HTTP/1 exchanges in progress and HTTP/2 streams. TCPRoute
+and UDPRoute sessions, WebSockets, TLS handshakes in progress and idle
+keep-alives are cut once the delay elapses.
+
+Set `sozu.drain.enabled: false` to opt out entirely; the grace period then
+returns to Kubernetes' default too.
 ## Prometheus metrics are served by default
 
 `metrics.enabled` now defaults to `true`. A `helm upgrade` with unchanged values

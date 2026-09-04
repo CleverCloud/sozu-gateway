@@ -160,6 +160,34 @@ two conditions any wiring must meet first (refuse or escape `$`; decide what to 
 dropped query string, which is a spec deviation rather than a detail). `ReplacePrefixMatch`
 stays a genuine limit, and now with a measured reason.
 
+## 5d. Data-plane shutdown — a measurement, not a feature
+
+Sōzu registers no signal handler, and a signal with no handler is discarded when
+it reaches PID 1 of a container. Deleting a gateway Pod therefore did nothing
+until the grace period expired and the kubelet SIGKILLed the proxy, severing
+whatever was mid-response. `sozu shutdown` over the command socket is the only
+graceful stop, and a `preStop` hook the only place to invoke it.
+
+Measured by deleting one gateway Pod and timing until it was gone, on a
+three-node managed cluster (k8s v1.35.7), controller image built from the branch:
+
+| Chart | Result |
+| ----- | ------ |
+| Before the hook | **31–32 s**, ending in SIGKILL, no soft stop in the logs |
+| With the hook (`delaySeconds: 5`) | **6 s** — the delay, plus about a second of draining |
+| `helm upgrade --reuse-values` into the hook | succeeds; the *outgoing* Pod is the old spec and still pays its full grace period |
+| `FailedPreStopHook` events | none |
+
+Two things the number does not cover. `--timeout 0` on `sozu shutdown` is
+documented as disabling the timeout but is applied as **zero nanoseconds**, so
+the command gives up before the proxy answers — the budget has to be a real
+duration, and it is derived from what the grace period leaves after the delay.
+And what drains is HTTP/1 exchanges in progress and HTTP/2 streams: layer-4
+sessions, WebSockets and idle keep-alives are cut once the delay elapses, so
+`gracePeriodSeconds` buys those tenants nothing.
+
+---
+
 ## 6. Gateway API conformance (GATEWAY-HTTP)
 
 The **official** `kubernetes-sigs/gateway-api` conformance suite, `GATEWAY-HTTP` profile, run

@@ -139,6 +139,47 @@ exposure:
 # Sōzu data-plane sidecar.
 sozu:
   workerCount: 2
+  # Stopping the proxy on purpose, because it will not stop itself. Sōzu
+  # registers no signal handler, and a signal with no handler is discarded when
+  # it reaches PID 1 of a container — so on an ordinary Pod deletion the proxy
+  # keeps running until the grace period expires and the kubelet SIGKILLs it,
+  # losing the response to every request still in flight. `sozu shutdown` over
+  # the command socket is the real graceful stop, and a preStop hook is the only
+  # place left to call it from.
+  #
+  # What it actually drains: HTTP/1 exchanges in progress, and HTTP/2 streams.
+  # TCPRoute and UDPRoute sessions, WebSockets, TLS handshakes still in progress
+  # and idle keep-alives are cut at the first tick after the delay — for those
+  # tenants `gracePeriodSeconds` buys nothing, and only `delaySeconds` moves when
+  # the cut happens.
+  drain:
+    # Set false when replacing the Sōzu image with one that has no shell: the
+    # hook would then fail on every deletion and the Pod would wait out the grace
+    # period regardless, which is worse than not having it. With the hook off the
+    # grace period is left at Kubernetes' own default.
+    enabled: true
+    # Wait before stopping, so the Pod is out of the Service's endpoints before
+    # the proxy stops accepting. Endpoint withdrawal races preStop; without this
+    # the datapath still points at a proxy that has begun shutting down.
+    #
+    # Five seconds covers kube-proxy and the CNI. It does NOT cover an external
+    # load balancer: under `service.externalTrafficPolicy: Local` the LB stops
+    # sending only once its own health check fails, often 10-30s, by which time
+    # the listener is already closed — so new connections are refused rather than
+    # served. Raise this to at least the load balancer's depool time if you
+    # depend on one.
+    delaySeconds: 5
+    # Ceiling for the whole sequence: the delay above, then draining whatever is
+    # still in flight. Must stay above `delaySeconds` — the kubelet SIGKILLs when
+    # it expires, which is the outcome this exists to avoid.
+    #
+    # It does not bound a long-lived exchange. A streaming response re-arms
+    # Sōzu's back timeout on every byte, and a slow upload can hold until its
+    # front timeout; either can outlast this budget, and the hook then fails and
+    # the kubelet kills the Pod moments after the grace period. The same hook
+    # runs on a liveness-triggered restart, so a proxy wedged on its command
+    # socket spends the whole budget before being replaced.
+    gracePeriodSeconds: 40
   logLevel: info
   # Listener-level knobs Sōzu parses from its own config.toml. None of these
   # reach the IR: the HTTP/HTTPS listeners are declared at boot and re-creating
