@@ -202,6 +202,24 @@ spec:
                     - path: namespace
                       fieldRef:
                         fieldPath: metadata.namespace
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        # The selector is the chart's own, and `matchLabelKeys` scopes the skew
+        # count to one revision. Without it a rolling update counts the outgoing
+        # ReplicaSet's Pods too, every node looks equally loaded, and the surge
+        # Pod lands anywhere — which reliably ends a rollout with two replicas on
+        # one node and another node empty. Nothing recovers from that afterwards:
+        # the scheduler places Pods, it never moves running ones.
+        {{- $base := dict
+              "labelSelector" (dict "matchLabels" (fromYaml (include "sozu-gateway.selectorLabels" $)))
+              "matchLabelKeys" (list "pod-template-hash") }}
+        {{- range $i, $c := . }}
+        {{- if not (kindIs "map" $c) }}
+          {{- fail (printf "topologySpreadConstraints[%d] is not a map (got %v) — `--set topologySpreadConstraints[N].x` on an empty list produces a null entry; use --set-json or a values file" $i $c) }}
+        {{- end }}
+        - {{ toYaml (mustMerge (deepCopy (omit $c "labelSelector")) $base) | nindent 10 | trim }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

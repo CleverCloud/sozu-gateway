@@ -114,8 +114,9 @@ helm upgrade sozu-gateway oci://ghcr.io/clevercloud/sozu-gateway \
 
 A new version bumps both the controller image and the bundled Sōzu version together (they are
 released as a matched pair, because the controller speaks Sōzu's command protocol through a pinned
-`sozu-command-lib`). The chart rolls the Pod with `maxUnavailable=0`; for the LoadBalancer path to
-stay gap-free during a data-plane bump, run with `replicaCount >= 2`.
+`sozu-command-lib`). The chart rolls Pods with `maxUnavailable=0` and defaults to three replicas, which it
+prefers to spread one per node, so the LoadBalancer path stays gap-free during a
+data-plane bump.
 
 ## Uninstall
 
