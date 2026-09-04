@@ -38,7 +38,21 @@ a reconcile that fails as a whole. In particular a layer-4 entry on 443 is not
 caught here rather than left to `helm install` to reject obscurely.
 */}}
 {{- define "sozu-gateway.validateExposure" -}}
+{{- /* The Pod's other listeners are seeded into the bind map, so an exposure
+     entry cannot quietly land on one. They are bound by the controller at
+     startup, before the first reconcile: Sōzu's ActivateListener then fails
+     EADDRINUSE in the first tier, which fails every reconcile including HTTP,
+     and readiness never turns green. */ -}}
 {{- $binds := dict -}}
+{{- if .Values.metrics.enabled -}}
+  {{- $_ := set $binds (printf "%s/TCP" (toString .Values.metrics.port)) "the metrics endpoint" -}}
+{{- end -}}
+{{- $_ := set $binds (printf "%s/TCP" (toString .Values.controller.healthPort)) "the controller's health endpoint" -}}
+{{- /* Reserved names: the metrics Service resolves `targetPort` by name, and a
+     name is looked up across every container in Pod order — Sōzu first. An
+     exposure entry called `metrics` would silently point the endpoint at a Sōzu
+     listener. */ -}}
+{{- $reserved := list "metrics" "health" -}}
 {{- $ports := dict -}}
 {{- $l7 := dict "HTTP" 0 "HTTPS" 0 -}}
 {{- range $i, $e := .Values.exposure -}}
@@ -48,13 +62,16 @@ caught here rather than left to `helm install` to reject obscurely.
   {{- if or (not $e.name) (not $e.port) (not $e.bind) (not $e.protocol) -}}
     {{- fail (printf "exposure[%d] needs name, port, bind and protocol; got %s" $i (toJson $e)) -}}
   {{- end -}}
+  {{- if has $e.name $reserved -}}
+    {{- fail (printf "exposure entry %d is named %q, which the Pod already uses for a container port — the metrics Service resolves its target by name across every container, Sōzu first, so this would point it at a Sōzu listener. Pick another name" $i $e.name) -}}
+  {{- end -}}
   {{- $transport := $e.transport | default "TCP" -}}
   {{- if lt (int $e.bind) 1025 -}}
     {{- fail (printf "exposure entry %q binds %d: nothing in the Pod can bind a privileged port — both containers run as uid %v with every capability dropped. Advertise the low port and bind a high one (the defaults map 80 -> 8080 and 443 -> 8443)" $e.name (int $e.bind) $.Values.runAsUser) -}}
   {{- end -}}
   {{- $bindKey := printf "%s/%s" (toString $e.bind) $transport -}}
   {{- if hasKey $binds $bindKey -}}
-    {{- fail (printf "exposure entries %q and %q both bind %d/%s — one socket cannot serve two" (get $binds $bindKey) $e.name (int $e.bind) $transport) -}}
+    {{- fail (printf "exposure entry %q binds %d/%s, already taken by %s — one socket cannot serve two" $e.name (int $e.bind) $transport (get $binds $bindKey)) -}}
   {{- end -}}
   {{- $_ := set $binds $bindKey $e.name -}}
   {{- $portKey := printf "%s/%s" (toString $e.port) $transport -}}

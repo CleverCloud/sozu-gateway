@@ -15,6 +15,8 @@ spec:
   ports:
     - name: metrics
       port: {{ .Values.metrics.port }}
-      targetPort: metrics
+      # Numeric, not the port's name: a name is resolved against every container
+      # in Pod order, and Sōzu comes first.
+      targetPort: {{ .Values.metrics.port }}
       protocol: TCP
 {{- end }}

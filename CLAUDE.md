@@ -213,7 +213,8 @@ changes.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
-  (opt-in, `--metrics-listen` / Helm `metrics.enabled`) by issuing a `QueryMetrics` over the command
+  (`--metrics-listen`, off when the flag is absent; the chart sets it by default via
+  `metrics.enabled`) by issuing a `QueryMetrics` over the command
   socket on each scrape and rendering the returned `AggregatedMetrics` with the pure
   [`prometheus` crate](crates/prometheus), prefixed by the controller's own health signals
   (`sozu_gw_controller_*`, incl. the last-successful-reconcile timestamp — the staleness alert).

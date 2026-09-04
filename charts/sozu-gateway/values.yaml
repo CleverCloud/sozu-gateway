@@ -52,12 +52,17 @@ controller:
                           # detection then only runs on a command-socket reconnect)
   healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
 
-# Prometheus /metrics on the controller. Each scrape serves the controller's
-# own health signals (sozu_gw_controller_*: last successful reconcile,
-# failures, shadow resets) and pulls Sōzu's data-plane metrics over the
-# command socket (Sōzu has no native /metrics endpoint). Off by default.
+# Prometheus /metrics on the controller. Each scrape serves the controller's own
+# health signals (sozu_gw_controller_*: last successful reconcile, failures,
+# shadow resets) and pulls Sōzu's data-plane metrics over the command socket
+# (Sōzu has no native /metrics endpoint).
+#
+# On by default: without it there is no record of what the data plane was doing,
+# and nobody turns metrics on *after* the outage that needed them. A scrape is
+# not free, though — it rides the same command socket as routing applies, so see
+# docs/UPGRADING.md before enabling it on a busy or very large cluster.
 metrics:
-  enabled: false
+  enabled: true
   port: 9100              # container port + ClusterIP Service port for /metrics
   serviceMonitor:
     enabled: false        # requires the Prometheus Operator (monitoring.coreos.com)
