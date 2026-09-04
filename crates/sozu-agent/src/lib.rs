@@ -87,9 +87,13 @@ fn is_teardown(request: &Request) -> bool {
 /// tolerated as already-applied.
 ///
 /// Scoped to the verbs where `Exists` is the expected duplicate outcome, and
-/// to failure messages that actually carry `StateError::Exists`'s Display
-/// ("{kind:?} '{id}' already exists"), matched case-insensitively because the
-/// main process wraps it in its own error prefix. `ActivateListener` is *not*
+/// to failure messages that actually carry `StateError::Exists`'s Display,
+/// matched case-insensitively because the main process wraps it in its own
+/// error prefix. The match is on "already exist" alone, which is the part the
+/// wording has kept across versions: Sōzu 2.2.0 says "{kind:?} '{id}' already
+/// exists", 2.2.1 says "{kind:?} with id_bytes={n} already exists; …". Both
+/// shapes are covered by the tests, because the proxy image and the linked
+/// library move independently. `ActivateListener` is *not*
 /// here: re-activation is idempotent in Sōzu (it only fails `NotFound`).
 fn is_duplicate_add(request: &Request, failure_message: &str) -> bool {
     let exists_is_duplicate = matches!(
@@ -630,10 +634,17 @@ mod tests {
     };
 
     /// A failure message shaped like the real thing: the main process wraps
-    /// `StateError::Exists`'s Display ("{kind:?} '{id}' already exists") in
-    /// its own prefix.
+    /// `StateError::Exists`'s Display in its own prefix. This is Sōzu 2.2.0's
+    /// wording, which is what the pinned proxy image still emits.
     const EXISTS_MESSAGE: &str =
         "executing request on the state: HttpFrontend 'lb.example.com;/' already exists";
+
+    /// The same failure from Sōzu 2.2.1, which replaced the object's id with the
+    /// byte length of it. The matcher has to survive the image being bumped
+    /// under a controller that was linked against either version.
+    const EXISTS_MESSAGE_2_2_1: &str = "executing request on the state: HttpFrontend with \
+         id_bytes=17 already exists; remove it first, or apply the corresponding update if \
+         the object supports one, instead of re-adding it";
 
     fn socket_address(port: u16) -> sozu_command_lib::proto::command::SocketAddress {
         std::net::SocketAddr::from(([127, 0, 0, 1], port)).into()
@@ -758,6 +769,12 @@ mod tests {
         assert!(
             is_duplicate_add(&add_frontend, EXISTS_MESSAGE),
             "a frontend add rejected as already-existing must get duplicate handling"
+        );
+        assert!(
+            is_duplicate_add(&add_frontend, EXISTS_MESSAGE_2_2_1),
+            "the same rejection from a 2.2.1 proxy, which reports the id's byte \
+             length instead of the id, must still get duplicate handling: the image \
+             and the linked library are bumped independently"
         );
         assert!(
             is_duplicate_add(&add_frontend, "HTTPFRONTEND 'X' ALREADY EXISTS"),

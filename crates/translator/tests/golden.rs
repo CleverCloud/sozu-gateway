@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::request::RequestType;
-use sozu_command_lib::proto::command::{LoadBalancingParams, PathRuleKind};
+use sozu_command_lib::proto::command::{LoadBalancingParams, PathRuleKind, Request};
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
@@ -16,6 +16,18 @@ const CERT_A: &str = include_str!("fixtures/cert_a.pem");
 const KEY_A: &str = include_str!("fixtures/key_a.pem");
 const CERT_B: &str = include_str!("fixtures/cert_b.pem");
 const KEY_B: &str = include_str!("fixtures/key_b.pem");
+
+/// Requests as JSON, for assertion messages.
+///
+/// Since sozu-command-lib 2.2.1 the `Debug` of a request prints a bare variant
+/// name for `AddBackend` and friends — deliberate, because that `Debug` also
+/// reaches production logs that must not carry certificate or key material. It
+/// leaves a failing golden test saying only which *kind* of request it saw, so
+/// the value is re-rendered here instead. This is a test binary over fixtures:
+/// nothing on the controller's logging path should copy it.
+fn dump(reqs: &[Request]) -> String {
+    serde_json::to_string_pretty(reqs).unwrap_or_else(|e| format!("<unserialisable: {e}>"))
+}
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().expect("valid socket addr in test")
@@ -158,7 +170,12 @@ fn emitted_path(model: &ir::Ir) -> (i32, String) {
             _ => None,
         })
         .collect();
-    assert_eq!(paths.len(), 1, "one frontend, one rule: {reqs:#?}");
+    assert_eq!(
+        paths.len(),
+        1,
+        "one frontend, one rule: {dump}",
+        dump = dump(&reqs)
+    );
     paths.pop().expect("one rule")
 }
 
@@ -268,7 +285,8 @@ fn a_prefix_route_never_takes_an_exact_route_key() {
             .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
             .count(),
         2,
-        "both routes are programmed, on distinct keys: {reqs:#?}"
+        "both routes are programmed, on distinct keys: {dump}",
+        dump = dump(&reqs)
     );
 }
 
@@ -332,13 +350,15 @@ fn reconcile_weight_change_keeps_backend_alive() {
                 if b.cluster_id == "api"
                     && b.load_balancing_parameters == Some(LoadBalancingParams { weight: 7 })
         )),
-        "the weight change must arrive as an AddBackend upsert: {reqs:#?}"
+        "the weight change must arrive as an AddBackend upsert: {dump}",
+        dump = dump(&reqs)
     );
     assert!(
         !reqs
             .iter()
             .any(|r| matches!(r.request_type, Some(RequestType::RemoveBackend(_)))),
-        "no RemoveBackend may accompany the upsert (it would delete the backend): {reqs:#?}"
+        "no RemoveBackend may accompany the upsert (it would delete the backend): {dump}",
+        dump = dump(&reqs)
     );
     assert_eq!(reqs.len(), 1, "a weight change is exactly one request");
 
@@ -481,7 +501,12 @@ fn reconcile_duplicate_fingerprint_certs_union_names() {
         ..Default::default()
     };
     let reqs = tr::reconcile(&before, &after).expect("reconcile");
-    assert_eq!(reqs.len(), 1, "one ReplaceCertificate expected: {reqs:#?}");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "one ReplaceCertificate expected: {dump}",
+        dump = dump(&reqs)
+    );
     match &reqs[0].request_type {
         Some(RequestType::ReplaceCertificate(r)) => {
             assert_eq!(
@@ -538,7 +563,8 @@ fn reconcile_retarget_route_removes_before_adds() {
     assert!(
         remove_idx < add_idx,
         "old frontend must be removed before the new one is added (same Sōzu route key), \
-         got remove at {remove_idx}, add at {add_idx}: {reqs:#?}"
+         got remove at {remove_idx}, add at {add_idx}: {dump}",
+        dump = dump(&reqs)
     );
     insta::assert_json_snapshot!(reqs);
 }
@@ -574,7 +600,8 @@ fn reconcile_retarget_https_route_removes_before_adds() {
     assert!(
         remove_idx < add_idx,
         "old HTTPS frontend must be removed before the new one is added, \
-         got remove at {remove_idx}, add at {add_idx}: {reqs:#?}"
+         got remove at {remove_idx}, add at {add_idx}: {dump}",
+        dump = dump(&reqs)
     );
 }
 
@@ -712,7 +739,8 @@ fn reconcile_tolerates_exact_duplicate_l4_frontends() {
             .filter(|r| matches!(r.request_type, Some(RequestType::AddTcpFrontend(_))))
             .count(),
         1,
-        "exactly one AddTcpFrontend for the deduplicated pair: {reqs:#?}"
+        "exactly one AddTcpFrontend for the deduplicated pair: {dump}",
+        dump = dump(&reqs)
     );
     assert!(
         tr::reconcile(&model, &model).expect("idem").is_empty(),
@@ -838,6 +866,7 @@ fn two_spellings_of_one_prefix_never_fail_the_translation() {
             .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
             .count(),
         1,
-        "one route key, first frontend wins: {reqs:#?}"
+        "one route key, first frontend wins: {dump}",
+        dump = dump(&reqs)
     );
 }

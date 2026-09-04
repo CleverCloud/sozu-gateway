@@ -2392,6 +2392,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "mio",
+ "serde_json",
  "socket2",
  "sozu-command-lib",
  "sozu-gw-ir",
