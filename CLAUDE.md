@@ -87,13 +87,22 @@ then a no-op that still counts as a successful reconcile.
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
   **It does not cover a stream that goes silent without ending.** `watcher` retries internally, so
   a watch that stops delivering surfaces as neither an item nor an error and the reflector just
-  stops advancing; nothing bounds time-since-last-event, and no `sozu_gw_controller_*` signal
-  moves. Measured across a 1.35 → 1.36 cluster upgrade: every controller that predated the
-  control-plane replacement kept routing to backends removed minutes earlier — one was still
-  dialling an address withdrawn 2m25s and two resyncs before — while `reconcile_failures_total`
-  stayed 0 and `/readyz` stayed green. The first symptom was a `too old resource version …
-  Expired` warning four minutes in. Controllers started after the replacement were unaffected, so
-  the state is cured by a restart. Roughly a fifth of new connections failed for the duration.
+  stops advancing, and no `sozu_gw_controller_*` signal moves. What bounds it is the watch's own
+  idle timeout: the chart now sets `controller.watchTimeoutSecs: 60` by default
+  (see [docs/UPGRADING.md](docs/UPGRADING.md)), where the kube-rs default leaves it near five
+  minutes. Measured across three managed-cluster upgrades, the unbounded default cost
+  **19.7%, 17.1% and 14.7%** of fresh HTTP requests for the duration of node replacement — every
+  failure an HTTP 504 from Sōzu against a withdrawn backend, while bare TCP, DNS and the
+  application's own Service stayed clean, and `reconcile_failures_total` stayed 0 with `/readyz`
+  green throughout. At 60 the same upgrades measured **0.000%**.
+
+  Two traps around this, both measured rather than reasoned:
+  **restarting the controller is not a reliable cure** — an arm restarted on the provider's
+  control-plane-replaced event, confirmed Pod by Pod, still lost 16.53%, because the fresh watches
+  attach to an apiserver that is itself about to be withdrawn; and **blindness alone is free** —
+  four controllers cut off from the apiserver for eight minutes with no backend change lost
+  nothing at all. It costs traffic only when the world moves while they cannot see it, which is
+  why a quiet cluster never shows this and an upgrade always does.
 - The shadow is **persisted** to the shared volume (`--shadow-file`, default `/run/sozu/shadow.json`)
   on every successful apply and reloaded at startup, so restarting *only* the controller resumes from
   the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**

@@ -150,6 +150,54 @@ serving the routes it last saw, and every replica is then equally stale.
 
 ---
 
+## Watch blindness is bounded by default
+
+`controller.watchTimeoutSecs` now defaults to `60`, where the controller
+previously inherited kube-rs's own bound. A `helm upgrade` with unchanged values
+therefore rolls the Pod and changes how the controller talks to the apiserver.
+
+**What it fixes.** A control plane replaced underneath the controller does not
+close the connections its watches ride on: nothing errors, no event arrives, and
+the reflectors stop advancing while every reconcile keeps *succeeding* against a
+frozen cache. Sōzu then serves routes for backends that moved minutes ago, with
+`reconcile_failures_total` at `0` and `/readyz` green. Measured across two
+upgrades of a managed cluster, **17.1% and 14.7% of fresh HTTP requests through
+the gateway failed** for the duration of node replacement — every one an HTTP
+`504` from Sōzu against a withdrawn backend, while bare TCP, DNS and the
+application's own Service stayed clean. With this setting the same two upgrades
+measured `0.000%`.
+
+**What it costs.** One watch reconnect per watch per minute. The watcher resumes
+from the stored `resourceVersion` rather than re-listing, so a quiet cluster pays
+one request per watched kind per minute and nothing else. Set it back to `0` to
+restore the previous behaviour:
+
+```yaml
+controller:
+  watchTimeoutSecs: 0
+```
+
+**What the number means.** `60` is `timeoutSeconds` on every watch, which is also
+what kube-rs derives its client-side idle timeout from. Both are nominal: cutting
+controllers off from the apiserver and timing each to its first logged watch
+error gave **336–364s at the default and 117–132s at 60**. Idle expiry logs only
+at `DEBUG`, so those figures include the failed reconnect that follows it, and
+why they exceed their nominal bound is not established — only that they do. Size
+any staleness alert on the measured figures.
+
+**What it does not fix.** `/readyz` still latches green on a controller that has
+gone blind, and no `sozu_gw_controller_*` series moves while it is blind. The
+setting bounds how long that lasts; it does not make it visible.
+
+**A restart is not a substitute.** v0.3.0 suggested rolling the gateway once the
+control plane had been replaced. That was measured on the next upgrade and does
+not work: an arm whose three controllers were restarted on the provider's
+control-plane step — confirmed restarted, one Pod at a time — still lost
+**16.53%**, indistinguishable from the untreated control, because the fresh
+watches attach to an apiserver that is itself about to be withdrawn. Restarting
+is only safe once the *new* apiserver is serving, which the provider's step event
+does not tell you.
+
 ## Downgrading the controller
 
 Upgrades need nothing special. **Downgrades do**, and this is the procedure.
