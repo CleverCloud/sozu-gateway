@@ -73,7 +73,10 @@ single mpsc channel on any change (EndpointSlice pings are pre-filtered to servi
 actually references); a debounced
 (`SOZU_GW_DEBOUNCE_MS`) reconcile rebuilds the *entire* desired IR from the caches, diffs it
 against an in-memory **shadow** (the last successfully-applied `Ir`), and applies only the delta.
-A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
+A periodic resync (`SOZU_GW_RESYNC_SECS`) re-runs that rebuild, so it heals drift between the
+caches and Sōzu — but **not** between the caches and the apiserver. It re-reads the same
+reflectors, so a cache that has stopped receiving events re-diffs to "no change": the resync is
+then a no-op that still counts as a successful reconcile.
 
 - The shadow advances **only on a fully successful apply**. On failure it stays put, and
   re-diffing from the unchanged shadow converges — NOT because the requests are idempotent
@@ -82,6 +85,15 @@ A periodic resync (`SOZU_GW_RESYNC_SECS`) self-heals drift.
   duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`).
 - **Fail-fast philosophy:** if a watch stream ends or caches don't sync within the timeout, the
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
+  **It does not cover a stream that goes silent without ending.** `watcher` retries internally, so
+  a watch that stops delivering surfaces as neither an item nor an error and the reflector just
+  stops advancing; nothing bounds time-since-last-event, and no `sozu_gw_controller_*` signal
+  moves. Measured across a 1.35 → 1.36 cluster upgrade: every controller that predated the
+  control-plane replacement kept routing to backends removed minutes earlier — one was still
+  dialling an address withdrawn 2m25s and two resyncs before — while `reconcile_failures_total`
+  stayed 0 and `/readyz` stayed green. The first symptom was a `too old resource version …
+  Expired` warning four minutes in. Controllers started after the replacement were unaffected, so
+  the state is cured by a restart. Roughly a fifth of new connections failed for the duration.
 - The shadow is **persisted** to the shared volume (`--shadow-file`, default `/run/sozu/shadow.json`)
   on every successful apply and reloaded at startup, so restarting *only* the controller resumes from
   the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**
