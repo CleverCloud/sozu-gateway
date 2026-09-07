@@ -127,6 +127,34 @@ struct Args {
         action = clap::ArgAction::Set
     )]
     gateway_status_writes: bool,
+    /// Server-side `timeoutSeconds` on every watch, which also sets kube-rs's
+    /// **client-side** idle timeout (that timeout is derived from this value
+    /// plus a margin). `0` keeps kube-rs's default of 290 s.
+    ///
+    /// This is the bound on how long a watch can be silently dead before the
+    /// client gives up and re-lists. A control plane replaced underneath us
+    /// black-holes the connection without closing it: nothing errors, no event
+    /// arrives, and the reflector simply stops advancing while every reconcile
+    /// still "succeeds" against a frozen cache. At the default that blindness
+    /// lasts ~5 minutes.
+    #[arg(long, env = "SOZU_GW_WATCH_TIMEOUT_SECS", default_value = "0")]
+    watch_timeout_secs: u32,
+    /// Read timeout applied to the kube client's connections. `0` keeps
+    /// kube-rs's default, which is **no timeout at all**.
+    ///
+    /// kube's connector enables HTTP/1 only, so each watch holds its own
+    /// connection and this bounds each one independently: how long it may
+    /// deliver nothing before it is torn down and that watch re-lists.
+    ///
+    /// Prefer `watch_timeout_secs` to this. Both bound the blindness, but a
+    /// watch closed by its own timeout resumes from the stored
+    /// `resourceVersion`, while this tears the connection — which costs a watch
+    /// error and a backoff every time it fires, on every quiet watch. Measured
+    /// across two managed-cluster upgrades: the arm running this at 30 s logged
+    /// tens of watch errors per window and did not come out cleaner than the
+    /// arm running `watch_timeout_secs`.
+    #[arg(long, env = "SOZU_GW_KUBE_READ_TIMEOUT_SECS", default_value = "0")]
+    kube_read_timeout_secs: u64,
 }
 
 /// Reflector read handles for every watched resource type.
@@ -682,17 +710,24 @@ async fn main() -> Result<()> {
     let ready = Arc::new(AtomicBool::new(false));
     health::spawn(args.health_listen, ready.clone());
 
-    let client = Client::try_default()
-        .await
-        .context("create kube client (in-cluster or kubeconfig)")?;
+    let client = {
+        let mut cfg = kube::Config::infer()
+            .await
+            .context("create kube client (in-cluster or kubeconfig)")?;
+        if args.kube_read_timeout_secs > 0 {
+            cfg.read_timeout = Some(Duration::from_secs(args.kube_read_timeout_secs));
+        }
+        Client::try_from(cfg).context("create kube client (in-cluster or kubeconfig)")?
+    };
     // Second client for one-shot calls (status writes, Events, probes), with
-    // tight timeouts. The default client keeps kube's ~295s read timeout —
-    // deliberately longer than a watch request's 290s, which the long-lived
-    // watch streams need — but a *single* status write hanging on a
-    // black-holed connection would park the singleton reconcile loop for
-    // those same ~5 minutes: routing and status starve together (observed
-    // live under conformance-suite churn). One-shot calls get seconds, not
-    // minutes; a slow write fails fast and stays best-effort.
+    // tight timeouts. The default client has **no read timeout at all** —
+    // `kube::Config` sets `read_timeout: None` in every constructor, and the
+    // ~295 s often attributed to it is the *watcher's* idle timeout
+    // (`timeoutSeconds` + a 5 s margin), which guards watch streams and nothing
+    // else. So a single status write on a black-holed connection would park the
+    // singleton reconcile loop indefinitely, and routing and status would starve
+    // together (observed live under conformance-suite churn). One-shot calls get
+    // seconds; a slow write fails fast and stays best-effort.
     let ops_client = {
         let mut cfg = kube::Config::infer()
             .await
@@ -723,7 +758,18 @@ async fn main() -> Result<()> {
     // one only costs CPU.
     let referenced_services: Arc<RwLock<BTreeSet<String>>> = Arc::new(RwLock::new(BTreeSet::new()));
 
-    let watch_all = watcher::Config::default;
+    // Every watch carries the configured `timeoutSeconds`, which is also what
+    // kube-rs derives its client-side idle timeout from — the only bound on how
+    // long a silently-dead watch can keep a reflector frozen.
+    let watch_timeout_secs = args.watch_timeout_secs;
+    let watch_all = move || {
+        let cfg = watcher::Config::default();
+        if watch_timeout_secs > 0 {
+            cfg.timeout(watch_timeout_secs)
+        } else {
+            cfg
+        }
+    };
     let (ingresses, w) = reflector::store();
     spawn_watch::<Ingress>(
         Api::all(client.clone()),

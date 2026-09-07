@@ -145,6 +145,14 @@ spec:
               value: {{ .Values.controller.resyncSecs | quote }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
+            {{- if .Values.controller.watchTimeoutSecs }}
+            - name: SOZU_GW_WATCH_TIMEOUT_SECS
+              value: {{ .Values.controller.watchTimeoutSecs | quote }}
+            {{- end }}
+            {{- if .Values.controller.kubeReadTimeoutSecs }}
+            - name: SOZU_GW_KUBE_READ_TIMEOUT_SECS
+              value: {{ .Values.controller.kubeReadTimeoutSecs | quote }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"
