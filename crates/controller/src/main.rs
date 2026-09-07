@@ -137,10 +137,12 @@ struct Args {
     /// errors, no event arrives, and the reflector simply stops advancing while
     /// every reconcile still "succeeds" against a frozen cache.
     ///
-    /// The bound is nominal, and measures worse than it reads: it runs from each
-    /// watch's last received event, not from the moment the path breaks. Cutting
-    /// a controller off from the apiserver and timing how long it took to notice
-    /// gave 336-364 s at the default and 117-132 s at 60.
+    /// The bound is nominal and measures worse than it reads. Cutting
+    /// controllers off from the apiserver and timing each to its first logged
+    /// watch error gave 336-364 s at the default and 117-132 s at 60. Idle
+    /// expiry logs only at DEBUG, so what those figures time is the failed
+    /// reconnect that follows it, and why both exceed their nominal bound is
+    /// not established here — only that they do.
     #[arg(long, env = "SOZU_GW_WATCH_TIMEOUT_SECS", default_value = "0")]
     watch_timeout_secs: u32,
     /// Read timeout applied to the kube client's connections. `0` keeps
