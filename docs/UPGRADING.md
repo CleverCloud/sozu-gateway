@@ -103,6 +103,53 @@ TCPRoute or UDPRoute is unaffected either way.
 
 ---
 
+## The data plane defaults to three replicas, one per node
+
+`replicaCount` was `1`. It is now `3`, spread hard across nodes
+(`kubernetes.io/hostname`, `maxSkew: 1`, `whenUnsatisfiable: DoNotSchedule`), and
+a PodDisruptionBudget with `maxUnavailable: 1` is rendered alongside — it appears
+only above one replica, since over a single Pod a budget can only block every
+disruption or permit every one of them.
+
+A single replica has no one to fail over to: while its Pod is rescheduled the
+Service holds no endpoint at all, so callers get a connection error rather than a
+slower answer. A cluster upgrade triggers exactly that, by design, because the
+platform drains and replaces every worker in turn.
+
+**With fewer nodes than replicas the surplus Pods stay `Pending`, and a
+`helm upgrade --wait` does not complete.** That is the cost of spreading hard
+rather than preferring: a preference measurably does not hold — a soft constraint
+put two replicas on one node and left another empty on every rollout of a
+three-node cluster, and nothing moves a running Pod afterwards.
+
+Set the count to what the cluster can actually place:
+
+```yaml
+replicaCount: 2
+```
+
+or keep the count and relax the placement, accepting that replicas may share a
+node — which is the wrong shape behind `externalTrafficPolicy: Local`, where a
+Pod on every node is what matters rather than a count of Pods:
+
+```yaml
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+```
+
+Both defaults rely on `matchLabelKeys`, honoured from Kubernetes 1.27 and a hard
+rejection under strict field validation before it, so the chart now declares
+`kubeVersion: ">=1.27.0-0"` rather than leaving that to be discovered.
+
+This buys survival of a Pod or a node going away. It does **not** make a cluster
+upgrade lossless on its own — see the reconcile-loop limitation in
+[CLAUDE.md](../CLAUDE.md): a controller whose watches stop delivering keeps
+serving the routes it last saw, and every replica is then equally stale.
+
+---
+
 ## Downgrading the controller
 
 Upgrades need nothing special. **Downgrades do**, and this is the procedure.
