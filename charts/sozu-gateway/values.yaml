@@ -64,6 +64,13 @@ controller:
   # 0 restores kube-rs's default of 290s — i.e. up to ~5 minutes of blindness,
   # which is longer than a managed-cluster node replacement takes.
   #
+  # Those are nominal figures; the measured ones are worse, because the timeout
+  # runs from each watch's last received event rather than from the moment the
+  # path breaks. Cutting a controller off from the apiserver and timing how long
+  # it took to notice gave 336-364s at the default and 117-132s at 60 — so this
+  # buys roughly a 2.8x reduction in exposure, not the 4.5x the nominal numbers
+  # suggest.
+  #
   # Measured across two upgrades of a managed cluster (1.34->1.35, 1.35->1.36):
   # with the default, 17.1% and 14.7% of fresh HTTP requests through the gateway
   # failed during node replacement, all HTTP 504 from Sozu against backends that
