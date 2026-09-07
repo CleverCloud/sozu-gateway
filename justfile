@@ -71,6 +71,7 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=2 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=3 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowGatewayStatusWrites=false > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":5432,"bind":5432,"protocol":"TCP","transport":"TCP"},{"name":"dns","port":5353,"bind":5353,"protocol":"UDP","transport":"UDP"}]' > /dev/null
     # A budget with neither bound is accepted by the apiserver and then blocks

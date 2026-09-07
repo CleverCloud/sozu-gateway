@@ -4,9 +4,15 @@
 # it defaults to spare capacity rather than to the smallest possible footprint.
 # A single replica has no one to fail over to: while its Pod is being
 # rescheduled the Service holds no endpoint at all, and callers get a connection
-# error rather than a slower answer. Three, spread by the constraints below,
-# leave someone still serving when one Pod goes away.
-replicaCount: 3
+# error rather than a slower answer. Two, spread by the constraints below, leave
+# someone still serving when one Pod goes away — which is what a rolling node
+# replacement does, one worker at a time.
+#
+# Two is where the return stops: losing one Pod cost a single replica 4.8% and
+# 8.0% of fresh connections in two trials, and cost two and three replicas
+# nothing at all. The third replica only paid when a second loss overlapped the
+# first. Raise it above two if you want that margin as well.
+replicaCount: 2
 
 # Disruption budget for the replicas above. Only rendered with more than one
 # replica: over a single Pod a budget can only block every disruption or permit
@@ -327,11 +333,14 @@ resources:
 # The two belong together — hard spreading without that scoping would deadlock at
 # the first surge.
 #
-# The cost is explicit: with fewer nodes than replicas the surplus stays
-# `Pending`, and `helm --wait` will time out. That is the right shape for an edge
-# proxy behind `externalTrafficPolicy: Local`, where what matters is a Pod on
-# every node rather than a count of Pods — but it means `replicaCount` should not
-# exceed the node count. Lower it on smaller clusters.
+# What it costs is concentration, not schedulability. `maxSkew: 1` forbids a node
+# from holding two more Pods of a revision than the emptiest eligible node does;
+# it does not demand a node per Pod. Above the node count the replicas stack
+# evenly rather than staying `Pending` — measured, five replicas on four nodes
+# scheduled 2,1,1,1 and all reached `Running`. A Pod that does stay `Pending`
+# here is short of a node for some other reason (taints, resources), not short of
+# skew. The shape suits an edge proxy behind `externalTrafficPolicy: Local`,
+# where a Pod on every node matters more than a count of Pods.
 #
 # The zone constraint stays soft: a constraint whose `topologyKey` no node carries
 # is skipped in silence, so on a cluster without `topology.kubernetes.io/zone`

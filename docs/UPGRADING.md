@@ -4,6 +4,37 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## The data plane defaults to two replicas
+
+`replicaCount` was `3`. It is now `2`. Nothing else changes: the same hard
+hostname spread, the same `maxUnavailable: 1` budget.
+
+Three was chosen so that losing a Pod never empties the Service. Two does that
+already, and the difference was measured rather than assumed. Forcing the loss of
+one gateway Pod — which is what a rolling node replacement does, one worker at a
+time — cost a single replica **4.8%** and **8.0%** of fresh connections in two
+trials, and cost two and three replicas **nothing**, on the same cluster with the
+same probes. The third replica earned its keep only when a *second* loss
+overlapped the first: two Pods destroyed at once cost the two-replica deployment
+3.2% while the three-replica one stayed clean.
+
+So the third replica buys tolerance of a concurrent second failure, not
+protection against ordinary maintenance. It is worth keeping if you want that
+margin, and worth its capacity to say so:
+
+```yaml
+replicaCount: 3
+```
+
+Two replicas are also the safer default on small clusters, where the hard
+hostname spread has fewer domains to work with.
+
+**Nothing needs doing on upgrade** unless you set `replicaCount` yourself, in
+which case your value still wins. A release that adopts the new default rolls one
+Pod out; the budget and the drain keep that gap-free.
+
+---
+
 ## Sōzu is drained on shutdown, and the grace period grows to 40s
 
 The data-plane container gets a `preStop` hook and
@@ -103,7 +134,7 @@ TCPRoute or UDPRoute is unaffected either way.
 
 ---
 
-## The data plane defaults to three replicas, one per node
+## The data plane moved from one replica to three, one per node
 
 `replicaCount` was `1`. It is now `3`, spread hard across nodes
 (`kubernetes.io/hostname`, `maxSkew: 1`, `whenUnsatisfiable: DoNotSchedule`), and
@@ -116,13 +147,20 @@ Service holds no endpoint at all, so callers get a connection error rather than 
 slower answer. A cluster upgrade triggers exactly that, by design, because the
 platform drains and replaces every worker in turn.
 
-**With fewer nodes than replicas the surplus Pods stay `Pending`, and a
-`helm upgrade --wait` does not complete.** That is the cost of spreading hard
-rather than preferring: a preference measurably does not hold — a soft constraint
-put two replicas on one node and left another empty on every rollout of a
-three-node cluster, and nothing moves a running Pod afterwards.
+Spreading hard rather than preferring is what makes that hold: a preference
+measurably does not — a soft constraint put two replicas on one node and left
+another empty on every rollout of a three-node cluster, and nothing moves a
+running Pod afterwards.
 
-Set the count to what the cluster can actually place:
+**An earlier version of this note claimed that with fewer nodes than replicas the
+surplus Pods stay `Pending` and `helm upgrade --wait` never completes. That is
+wrong.** `maxSkew: 1` permits an uneven-by-one distribution; it does not demand a
+node per Pod. Tested directly: five replicas on a four-node cluster all reached
+`Running`, spread 2,1,1,1. A Pod that does stay `Pending` under this constraint is
+short of a node for another reason — taints, resources — not short of skew.
+
+Lowering the count on a smaller cluster is still reasonable, for capacity rather
+than for schedulability:
 
 ```yaml
 replicaCount: 2
