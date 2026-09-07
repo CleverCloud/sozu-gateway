@@ -52,6 +52,32 @@ controller:
                           # detection then only runs on a command-socket reconnect)
   healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
 
+  # How long a watch may be silently dead before the client gives up and
+  # re-lists. A replaced control plane leaves the connection open and silent
+  # rather than closing it: no error, no event, and the reflector freezes while
+  # every reconcile still "succeeds" against the frozen cache — the controller
+  # serves stale routes while reporting healthy, and nothing in
+  # `sozu_gw_controller_*` moves.
+  #
+  # This sets `timeoutSeconds` on every watch, which is also what kube-rs
+  # derives its *client-side* idle timeout from (that value plus a 5s margin).
+  # 0 restores kube-rs's default of 290s — i.e. up to ~5 minutes of blindness,
+  # which is longer than a managed-cluster node replacement takes.
+  #
+  # Measured across two upgrades of a managed cluster (1.34->1.35, 1.35->1.36):
+  # with the default, 17.1% and 14.7% of fresh HTTP requests through the gateway
+  # failed during node replacement, all HTTP 504 from Sozu against backends that
+  # had already moved. At 60 both runs measured 0.000%, in every window, with no
+  # watch errors. The cost is one watch reconnect per watch per minute, resumed
+  # from the stored resourceVersion — not a re-LIST.
+  watchTimeoutSecs: 60
+  # Read timeout on the kube client's connections. kube enables HTTP/1 only, so
+  # this bounds each watch's own connection. It also bounds the blindness, but
+  # by tearing the connection: it costs a watch error and a backoff every time
+  # it fires on a quiet watch, where watchTimeoutSecs resumes cleanly. Prefer
+  # watchTimeoutSecs; 0 keeps kube-rs's default, which is *no* timeout.
+  kubeReadTimeoutSecs: 0
+
 # Prometheus /metrics on the controller. Each scrape serves the controller's own
 # health signals (sozu_gw_controller_*: last successful reconcile, failures,
 # shadow resets) and pulls Sōzu's data-plane metrics over the command socket
