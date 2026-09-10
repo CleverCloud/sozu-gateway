@@ -129,6 +129,11 @@ covers the Service-port → in-pod-bind mapping the exposure table exists for.
 | Second TCPRoute claiming port 9000 | `Accepted=False`, reason `RouteConflict`, incumbent untouched |
 | Traffic during that conflict | **still served** — the losing route does not fail the reconcile |
 
+These results predate the [L4 attachment correction](https://github.com/CleverCloud/sozu-gateway/pull/72).
+That change keeps both competing routes accepted and counted, and identifies the
+winner in the losing parent's `Accepted` message. Its e2e expectations reflect
+the new behavior; the historical measurements above remain unchanged.
+
 The last two rows are the point of settling layer-4 port conflicts in the builder rather than in
 the translator: a `TranslatorError` is propagated by `?` out of `reconcile`, so one tenant's second
 route would have stopped routing for every other tenant, HTTP included.
@@ -198,7 +203,35 @@ sessions, WebSockets and idle keep-alives are cut once the delay elapses, so
 
 ---
 
-## 6. Gateway API conformance (GATEWAY-HTTP)
+## 6. Gateway API conformance (HTTP, TCP and UDP)
+
+The latest full campaign ran the official **v1.6.2** suite and standard CRDs
+against master **431017f** and **Sōzu 2.2.1** on 2026-09-10:
+
+| Profile | Core | Extended |
+| ------- | ---- | -------- |
+| GATEWAY-HTTP | **18 / 37** | **1 / 3** |
+| GATEWAY-TCP | **14 / 19** | not selected |
+| GATEWAY-UDP | **16 / 20** | not selected |
+
+None passes. The profiles share Gateway tests: their union is **57 distinct
+tests, 31 passed and 26 failed**, with no selected test skipped. One UDP PASS
+returns without behavioral assertions because TLSRoute was not selected.
+The [full analysis](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.md)
+records assertion coverage, failure attribution, environment, reproduction
+and the [unaltered report](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.yaml).
+
+The HTTP result is not a controlled regression measurement against August:
+v1.6.2 fixes a reporter that could record parallel tests as passed before
+their assertions. The two changed verdicts are Gateway status gaps in code
+that predates the proxy upgrade. The latest analysis also supersedes the
+broad historical collision explanations below: wildcard depth, certificate
+names, POST path ordering and header replacement have distinct evidence.
+
+The [repository runner](../tests/conformance/README.md) now provides a pinned, reproducible
+procedure and CI checks; the stored report remains the original measurement.
+
+The earlier HTTP campaigns and their contemporary interpretations follow.
 
 The **official** `kubernetes-sigs/gateway-api` conformance suite, `GATEWAY-HTTP` profile, run
 against a live cluster (`GatewayClass=sozu`, `rbac.allowStatusWrites=true`).
@@ -221,12 +254,10 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 | 2026-08-04 | v1.6.1 | v1.6.1 | **did not run** | did not run | same three | [gateway-http_crd-v1.6.1_2026-08-04_setup-blocked.md](conformance/gateway-http_crd-v1.6.1_2026-08-04_setup-blocked.md) | the suite aborts in setup — see below. Nothing to compare |
 | 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_selector-excluded.yaml) | **conditioned run** — the `Selector` base Gateway carries `gateway-api/skip-this-for-readiness`, without which nothing runs at all. **Not comparable to row 1**: different suite, denominator 33 → 37, and a base object excluded |
 | 2026-08-04 | v1.6.1 | v1.6.1 | 17 / 37 | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-04_master-control.yaml) | **control run** on `master` (c68a72d, i.e. E0–E6), same conditioning as row 3. Identical result *and identical failed-test set* → E7–E11 moved no test either way |
-
 | 2026-08-05 | v1.6.1 | v1.6.1 | **18 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-05_selector-evaluated.yaml) | **unconditioned** — nothing excluded, nothing annotated. `from: Selector` is evaluated for real, so the setup gate passes on its own; `HTTPRouteCrossNamespace` newly passes |
-
 | 2026-08-10 | v1.6.1 | v1.6.1 | **19 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-10.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-10.yaml) | unconditioned, on `master` 5fe5713. `GatewayWithAttachedRoutes` newly passes — a route sharing no hostname with its listener now reads `Accepted: False` / `NoMatchingListenerHostname` and no longer inflates `attachedRoutes`. Nothing regressed |
-
 | 2026-08-11 | v1.6.1 | v1.6.1 | **20 / 37** | **1 / 3** | same three | [gateway-http_crd-v1.6.1_2026-08-11.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-11.yaml) | unconditioned. Redirect hostname/path/port targets wired: `HTTPRouteRedirectHostAndStatus` passes, and `HTTPRouteRedirectScheme` becomes the **first extended test to pass** — two of its four cases carry a `hostname`, so the whole test failed on them |
+| 2026-09-10 | v1.6.2 | v1.6.2 | **18 / 37** | **1 / 3** | same three | [gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.yaml](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.yaml) | unconditioned, master 431017f / Sōzu 2.2.1; also TCP 14/19 and UDP 16/20. Two Gateway status verdicts change; the old parallel reporter prevents attributing this delta to the proxy upgrade |
 
 > **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
 > number to quote — quoting `17/37` without "with a base Gateway excluded from readiness" is exactly
@@ -314,8 +345,14 @@ go test . -run TestConformance -timeout 150m -args \
   --version=<version under test> --report-output=report.yaml
 ```
 
+For the current v1.6.2 wrapper and combined profiles, use the
+[2026-09-10 reproduction](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.md#reproduction-and-retained-evidence).
+The commands above retain the historical v1.6.1 procedure.
+
 The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
-Name the resulting file `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml` and add a row above.
+For the historical HTTP-only command, name the report `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml`;
+combined HTTP/TCP/UDP campaigns use `gateway-http-tcp-udp_crd-<bundle>_<YYYY-MM-DD>.yaml`.
+Add a row above for each complete campaign.
 
 It runs unconditioned now. Rows 2–4 predate the `Selector` implementation, when the suite aborted
 in setup; the workaround they used was to keep the base Gateway out of the readiness gate while the
@@ -338,10 +375,10 @@ base manifests add grpc/tls/tcp/coredns backends — so re-run once the images a
 Published, and **empty**. That is a result, not a stub.
 
 `FeatureName` is an upstream, boolean-per-feature vocabulary, and the conformance tooling
-cross-checks what an implementation declares. At the last recorded run no feature's tests pass
-cleanly — extended is 0/3 on the three the runs have always declared via `--supported-features` —
-so naming any of them would publish a claim in the one machine-readable channel that exists for
-honesty, and one the next run contradicts immediately.
+cross-checks what an implementation declares. The latest run selected the three
+extensions explicitly through `--supported-features`: scheme redirect passed,
+while method matching and response header modification failed. That test
+selection did not change the controller's empty published feature list.
 
 Publishing the field empty rather than leaving it absent is deliberate: "we claim nothing" is a
 statement, and it makes the first genuine entry visible as a change. The list lives in one constant
@@ -357,7 +394,11 @@ one non-empty Sōzu `Header` for Gateway `set`, so an existing `X-Env: staging` 
 emits a deletion followed by an append on the same frontend ([PROTOCOL.md §13](../PROTOCOL.md)).
 Empty `set`/`add` values are explicitly refused. The historical reports above remain unchanged.
 
-**Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
+**Historical limits recorded for the earlier runs:**
+
+This is the historical interpretation. For the measured 2.2.1 behavior and
+its limits, use the [2026-09-10 analysis](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.md).
+
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
   `backendRef` yields 503, but the spec/tests want exactly 500 → the `HTTPRouteInvalid*BackendRef` /
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
@@ -484,5 +525,25 @@ on Ubuntu 24.04 (it requires GLIBC 2.39), with public CA certificates and uid/gi
 1000, then distributed by digest through `ttl.sh` with a 24-hour tag. The Sōzu
 image was unmodified. This run does **not** validate the shipped Debian bookworm
 Dockerfile. HTTP/TLS suite probes used pod port-forwarding; the external
-LoadBalancer addresses were unreachable from the workspace. Full Gateway API
-conformance was not rerun, so the historical scores above remain unchanged.
+LoadBalancer addresses were unreachable from the workspace. This upgrade
+check did not rerun full Gateway API conformance; the subsequent
+[2026-09-10 campaign](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.md)
+records that separate measurement from an in-cluster runner.
+
+
+## Gateway API conformance fixes (2026-09-10)
+
+The [separate controller-fixes campaign](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10_after-fixes.md)
+records the combined candidate from PRs #62–#77 against the same 57 official
+v1.6.2 tests: **53 PASS / 4 FAIL**, compared with **31 PASS / 26 FAIL** at baseline.
+HTTP records 34/37 core and 2/3 extended; TCP records 19/19 and UDP 20/20.
+The four remaining HTTP failures exercise unsupported header predicates.
+
+The tested integration included the workarounds from #66, #67, #74 and #75,
+which were subsequently closed in favor of native Sōzu work, and the unmerged
+wildcard workaround in #69. **53/57 is a historical experimental result, not
+the conformance of the current default branch.** The report links an archive of complete original logs,
+intermediate failures, UDP startup retries, the listener-rejection test that
+returns without behavioral assertions, and manual availability measurements.
+It also records restoration of the original deployment and its remaining UDP
+smoke failures. Profile totals alone do not establish overall conformance.

@@ -1,0 +1,132 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-09-10T11:13:47Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.2
+implementation:
+  contact:
+  - https://github.com/CleverCloud/sozu-gateway/issues
+  organization: clevercloud
+  project: sozu-gateway
+  url: https://github.com/CleverCloud/sozu-gateway
+  version: 431017f81045d5ca04be289a1016dcfaedf1c1b2-sozu-2.2.1
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    failedTests:
+    - GatewayInvalidParametersRef
+    - GatewayListenerUnsupportedProtocol
+    - HTTPRouteHTTPSListener
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMatchingAcrossRoutes
+    - HTTPRouteMultipleGateways
+    - HTTPRouteNoBackendRefs
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteReferenceGrant
+    - HTTPRouteRequestHeaderModifier
+    - HTTPRouteWeight
+    result: failure
+    statistics:
+      Failed: 19
+      Passed: 18
+      Skipped: 0
+  extended:
+    failedTests:
+    - HTTPRouteMethodMatching
+    - HTTPRouteResponseHeaderModifier
+    result: failure
+    statistics:
+      Failed: 2
+      Passed: 1
+      Skipped: 0
+    supportedFeatures:
+    - HTTPRouteMethodMatching
+    - HTTPRouteResponseHeaderModification
+    - HTTPRouteSchemeRedirect
+    unsupportedFeatures:
+    - BackendTLSPolicy
+    - BackendTLSPolicySANValidation
+    - GatewayAddressEmpty
+    - GatewayBackendClientCertificate
+    - GatewayFrontendClientCertificateValidation
+    - GatewayFrontendClientCertificateValidationInsecureFallback
+    - GatewayHTTPListenerIsolation
+    - GatewayHTTPSListenerDetectMisdirectedRequests
+    - GatewayInfrastructurePropagation
+    - GatewayPort8080
+    - GatewayStaticAddresses
+    - HTTPRoute303RedirectStatusCode
+    - HTTPRoute307RedirectStatusCode
+    - HTTPRoute308RedirectStatusCode
+    - HTTPRouteBackendProtocolH2C
+    - HTTPRouteBackendProtocolWebSocket
+    - HTTPRouteBackendRequestHeaderModification
+    - HTTPRouteBackendTimeout
+    - HTTPRouteCORS
+    - HTTPRouteDestinationPortMatching
+    - HTTPRouteHostRewrite
+    - HTTPRouteNamedRouteRule
+    - HTTPRouteParentRefPort
+    - HTTPRoutePathRedirect
+    - HTTPRoutePathRewrite
+    - HTTPRoutePortRedirect
+    - HTTPRouteQueryParamMatching
+    - HTTPRouteRequestMirror
+    - HTTPRouteRequestMultipleMirrors
+    - HTTPRouteRequestPercentageMirror
+    - HTTPRouteRequestTimeout
+    - HTTPRouteRetry
+    - HTTPRouteRetryBackendTimeout
+    - HTTPRouteRetryConnectionError
+    - ListenerSet
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 19 test failures. Extended tests failed with 2 test
+    failures.
+- core:
+    failedTests:
+    - GatewayInvalidParametersRef
+    - GatewayListenerUnsupportedProtocol
+    - TCPRouteInvalidNonTCPListener
+    - TCPRouteMultipleRoutesAttachment
+    - TCPRouteWeightedRouting
+    result: failure
+    statistics:
+      Failed: 5
+      Passed: 14
+      Skipped: 0
+  name: GATEWAY-TCP
+  summary: Core tests failed with 5 test failures.
+- core:
+    failedTests:
+    - GatewayInvalidParametersRef
+    - GatewayListenerUnsupportedProtocol
+    - UDPRouteMultipleRoutesAttachment
+    - UDPRouteWeightedRouting
+    result: failure
+    statistics:
+      Failed: 4
+      Passed: 16
+      Skipped: 0
+  name: GATEWAY-UDP
+  summary: Core tests failed with 4 test failures.
+succeededProvisionalTests:
+- TCPRouteInvalidBackendRefNonexistent
+- TCPRouteInvalidCrossNamespaceBackendRef
+- TCPRouteParentRefAttachAll
+- TCPRouteParentRefPortAndSectionName
+- TCPRouteReferenceGrant
+- UDPRoute
+- UDPRouteInvalidBackendRefNonexistent
+- UDPRouteInvalidCrossNamespaceBackendRef
+- UDPRouteNotAllowedByListeners
+- UDPRouteParentRefAttachAllListeners
+- UDPRouteParentRefPortAndSectionName
+- UDPRouteReferenceGrant

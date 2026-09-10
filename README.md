@@ -123,6 +123,7 @@ PR, please make sure the CI gate is green (`protoc` is required to build — `so
 ```console
 just lint   # cargo fmt --check + clippy -D warnings
 just test   # unit + golden/snapshot tests
+just conformance-test  # runner orchestration tests, no cluster needed
 ```
 
 ---
@@ -134,3 +135,6 @@ Licensed under the [Apache License 2.0](LICENSE).
 The controller links `sozu-command-lib` (LGPL-3.0) only for the command-socket protocol types, which
 the LGPL permits from Apache-2.0 code. Sōzu itself (AGPL-3.0) runs as a separate process reached over
 a socket, so its license does not extend to this controller.
+
+Gateway API conformance uses the [pinned upstream runner](tests/conformance/README.md),
+with focused CI checks and a full campaign available through workflow dispatch.

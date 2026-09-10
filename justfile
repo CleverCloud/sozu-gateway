@@ -119,6 +119,14 @@ e2e-all:
     bash scripts/e2e-gateway.sh
     bash scripts/e2e-l4-routes.sh
 
+# Build the pinned official Gateway API conformance runner (Docker only).
+conformance-image:
+    docker build -t sozu-gateway-conformance:local tests/conformance
+
+# Verify runner selection, verdict handling and resource ownership without a cluster.
+conformance-test:
+    python3 -m unittest discover -s tests/conformance -p 'test_*.py' -v
+
 # Tear down e2e resources + cargo clean.
 clean:
     -helm uninstall {{HELM_RELEASE}} -n {{HELM_NS}}

@@ -4,6 +4,8 @@
 
 # Local probe / e2e scratch
 /.scratch
+/conformance-results/
+/docs/conformance/artifacts/
 /tmp
 *.sock
 

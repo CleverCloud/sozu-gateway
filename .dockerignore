@@ -6,3 +6,4 @@
 **/*.md
 **/snapshots
 .devcontainer
+/docs/conformance/artifacts
