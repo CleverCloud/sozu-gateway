@@ -1,0 +1,38 @@
+{
+  "fullnameOverride": "sozu-auto",
+  "replicaCount": 1,
+  "image": {
+    "controller": {
+      "repository": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e",
+      "digest": "sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982"
+    }
+  },
+  "gatewayProvisioning": {
+    "enabled": true,
+    "replicaCount": 1,
+    "service": {
+      "type": "ClusterIP"
+    }
+  },
+  "service": {
+    "type": "ClusterIP"
+  },
+  "ingressClass": {
+    "name": "sozu-auto-0910",
+    "controllerValue": "sozu.io/auto-conformance-0910"
+  },
+  "resources": {
+    "controller": {
+      "requests": {
+        "cpu": "0.1",
+        "memory": "128Mi"
+      }
+    },
+    "sozu": {
+      "requests": {
+        "cpu": "0.25",
+        "memory": "256Mi"
+      }
+    }
+  }
+}

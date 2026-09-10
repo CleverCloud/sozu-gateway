@@ -67,6 +67,9 @@ Recreating the template ConfigMap, including a `fullnameOverride` change,
 changes the installation UID: its old instances are collected and replacements
 receive new names and addresses. Preserve that ConfigMap's identity during
 ordinary upgrades.
+Edit the template through Helm. Direct ConfigMap edits leave the running
+provisioner NotReady until a Helm upgrade or a restart of the provisioner
+Deployment reloads the template; it does not reload mounted changes in place.
 
 Each Pod has its own command socket and persisted shadow. Route status updates
 preserve the full parent references and entries from other instances. Service

@@ -1,0 +1,59 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-09-10T16:12:20Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.2
+implementation:
+  contact:
+  - https://github.com/CleverCloud/sozu-gateway/issues
+  organization: clevercloud
+  project: sozu-gateway
+  url: https://github.com/CleverCloud/sozu-gateway
+  version: a8d54a3c5e03018316fe1fb0f262380d0da77d02 (clevercloud/sozu:2.2.1)
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    result: partial
+    skippedTests:
+    - GatewayClassObservedGenerationBump
+    - GatewayInvalidParametersRef
+    - GatewayInvalidRouteKind
+    - GatewayInvalidTLSConfiguration
+    - GatewayListenerUnsupportedProtocol
+    - GatewayModifyListeners
+    - GatewayObservedGenerationBump
+    - GatewaySecretInvalidReferenceGrant
+    - GatewaySecretMissingReferenceGrant
+    - GatewaySecretReferenceGrantAllInNamespace
+    - GatewaySecretReferenceGrantSpecific
+    - GatewayWithAttachedRoutes
+    - HTTPRouteCrossNamespace
+    - HTTPRouteExactPathMatching
+    - HTTPRouteHTTPSListener
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidCrossNamespaceParentRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidParentRefNotMatchingSectionName
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMatchingAcrossRoutes
+    - HTTPRouteNoBackendRefs
+    - HTTPRouteObservedGenerationBump
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteRedirectHostAndStatus
+    - HTTPRouteReferenceGrant
+    - HTTPRouteRequestHeaderModifier
+    - HTTPRouteServiceTypes
+    - HTTPRouteSimpleSameNamespace
+    - HTTPRouteWeight
+    statistics:
+      Failed: 0
+      Passed: 1
+      Skipped: 36
+  name: GATEWAY-HTTP
+  summary: Core tests partially succeeded with 36 test skips.

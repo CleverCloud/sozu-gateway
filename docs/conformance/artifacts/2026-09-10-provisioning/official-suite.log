@@ -1,0 +1,727 @@
+=== RUN   TestGatewayConformance
+    runner_test.go:137: Upstream ca6c2a65454737236fb7a937bd9b17e42b07e9de; Kubernetes API QPS=100 burst=200
+    conformance.go:117: Running conformance tests with:
+    conformance.go:137:   GatewayClass: sozu-auto-0910
+    conformance.go:138:   Cleanup Base Resources: true
+    conformance.go:139:   Cleanup Test Resources: true
+    conformance.go:140:   Debug: false
+    conformance.go:141:   Enable All Features: false
+    conformance.go:142:   Supported Features: [Gateway HTTPRoute]
+    conformance.go:143:   ExemptFeatures: []
+    conformance.go:144:   ConformanceProfiles: [GATEWAY-HTTP]
+    suite.go:389: 2026-09-10T16:11:44.124797565Z: Test Setup: Ensuring GatewayClass has been accepted
+    suite.go:395: 2026-09-10T16:11:44.147993556Z: Test Setup: Applying base manifests
+    apply.go:271: 2026-09-10T16:11:44.196660789Z: Creating gateway-conformance-infra Namespace
+    apply.go:271: 2026-09-10T16:11:44.266368393Z: Creating same-namespace Gateway
+    apply.go:271: 2026-09-10T16:11:44.409951106Z: Creating same-namespace-with-https-listener Gateway
+    apply.go:271: 2026-09-10T16:11:45.15771545Z: Creating all-namespaces Gateway
+    apply.go:271: 2026-09-10T16:11:45.30647746Z: Creating backend-namespaces Gateway
+    apply.go:271: 2026-09-10T16:11:45.426301279Z: Creating infra-backend-v1 Service
+    apply.go:271: 2026-09-10T16:11:45.648880645Z: Creating infra-backend-v1 Deployment
+    apply.go:271: 2026-09-10T16:11:45.713402524Z: Creating infra-backend-v2 Service
+    apply.go:271: 2026-09-10T16:11:45.827467814Z: Creating infra-backend-v2 Deployment
+    apply.go:271: 2026-09-10T16:11:45.890102321Z: Creating infra-backend-v3 Service
+    apply.go:271: 2026-09-10T16:11:46.393295525Z: Creating infra-backend-v3 Deployment
+    apply.go:271: 2026-09-10T16:11:46.509917912Z: Creating tls-backend Service
+    apply.go:271: 2026-09-10T16:11:47.225944914Z: Creating tls-backend Deployment
+    apply.go:271: 2026-09-10T16:11:47.287586938Z: Creating tls-backend-2 Service
+    apply.go:271: 2026-09-10T16:11:47.600226435Z: Creating tls-backend-2 Deployment
+    apply.go:271: 2026-09-10T16:11:48.859486699Z: Creating gateway-conformance-app-backend Namespace
+    apply.go:271: 2026-09-10T16:11:49.00339766Z: Creating tls-backend Service
+    apply.go:271: 2026-09-10T16:11:50.140325528Z: Creating tls-backend Deployment
+    apply.go:271: 2026-09-10T16:11:50.279335648Z: Creating app-backend-v1 Service
+    apply.go:271: 2026-09-10T16:11:50.411332131Z: Creating app-backend-v1 Deployment
+    apply.go:271: 2026-09-10T16:11:50.525255818Z: Creating app-backend-v2 Service
+    apply.go:271: 2026-09-10T16:11:52.218430939Z: Creating app-backend-v2 Deployment
+    apply.go:271: 2026-09-10T16:11:52.400610767Z: Creating gateway-conformance-web-backend Namespace
+    apply.go:271: 2026-09-10T16:11:52.474413314Z: Creating web-backend Service
+    apply.go:271: 2026-09-10T16:11:54.399734935Z: Creating web-backend Deployment
+    apply.go:271: 2026-09-10T16:11:54.655100126Z: Creating grpc-infra-backend-v1 Service
+    apply.go:271: 2026-09-10T16:11:55.479695073Z: Creating grpc-infra-backend-v1 Deployment
+    apply.go:271: 2026-09-10T16:11:55.567077653Z: Creating grpc-infra-backend-v2 Service
+    apply.go:271: 2026-09-10T16:11:55.73934178Z: Creating grpc-infra-backend-v2 Deployment
+    apply.go:271: 2026-09-10T16:11:55.914034971Z: Creating grpc-infra-backend-v3 Service
+    apply.go:271: 2026-09-10T16:11:56.380327555Z: Creating grpc-infra-backend-v3 Deployment
+    apply.go:271: 2026-09-10T16:11:56.481268951Z: Creating coredns Service
+    apply.go:271: 2026-09-10T16:11:56.576372225Z: Creating coredns Deployment
+    apply.go:271: 2026-09-10T16:11:57.374189641Z: Creating coredns ConfigMap
+    apply.go:271: 2026-09-10T16:11:57.47353178Z: Creating tcp-backend Service
+    apply.go:271: 2026-09-10T16:11:57.761286568Z: Creating tcp-backend Deployment
+    suite.go:398: 2026-09-10T16:11:58.525105168Z: Test Setup: Applying programmatic resources
+    apply.go:222: 2026-09-10T16:11:58.702271456Z: Creating certificate 
+    apply.go:222: 2026-09-10T16:11:58.928780838Z: Creating tls-validity-checks-certificate 
+    apply.go:222: 2026-09-10T16:11:58.9943744Z: Creating web-backend-cm 
+    apply.go:222: 2026-09-10T16:11:59.09063057Z: Creating tls-validity-checks-ca-certificate 
+    apply.go:222: 2026-09-10T16:11:59.169355357Z: Creating tls-validity-checks-client-certificate 
+    apply.go:222: 2026-09-10T16:12:00.460986653Z: Creating tls-validity-checks-per-port-ca-certificate 
+    apply.go:222: 2026-09-10T16:12:00.591111803Z: Creating tls-validity-checks-per-port-client-certificate 
+    apply.go:222: 2026-09-10T16:12:00.839850515Z: Creating tls-checks-ca-certificate 
+    apply.go:222: 2026-09-10T16:12:01.058641434Z: Creating tls-checks-certificate 
+    apply.go:222: 2026-09-10T16:12:01.238157663Z: Creating tls-checks-client-certificate 
+    apply.go:222: 2026-09-10T16:12:01.478988848Z: Creating tls-passthrough-checks-certificate 
+    apply.go:222: 2026-09-10T16:12:01.540071518Z: Creating tls-passthrough-checks-certificate 
+    apply.go:222: 2026-09-10T16:12:01.975741825Z: Creating tls-terminate-checks-certificate 
+    apply.go:222: 2026-09-10T16:12:02.230815829Z: Creating mismatch-ca-certificate 
+    suite.go:437: 2026-09-10T16:12:03.139671884Z: Test Setup: Ensuring Gateways and Pods from base manifests are ready
+    helpers.go:301: 2026-09-10T16:12:03.442612322Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:03.442658333Z: Pod gateway-conformance-infra/coredns-6865854ccb-k96xc not ready yet
+    helpers.go:301: 2026-09-10T16:12:03.709187883Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:03.709224994Z: Pod gateway-conformance-infra/coredns-6865854ccb-k96xc not ready yet
+    helpers.go:301: 2026-09-10T16:12:03.972615095Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:03.972661816Z: Pod gateway-conformance-infra/grpc-infra-backend-v1-b9ccc7769-dn48j not ready yet
+    helpers.go:301: 2026-09-10T16:12:04.504234404Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:04.504278575Z: Pod gateway-conformance-infra/grpc-infra-backend-v1-b9ccc7769-dn48j not ready yet
+    helpers.go:301: 2026-09-10T16:12:04.772209518Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:04.772250449Z: Pod gateway-conformance-infra/grpc-infra-backend-v1-b9ccc7769-dn48j not ready yet
+    helpers.go:301: 2026-09-10T16:12:05.036507117Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:05.036538418Z: Pod gateway-conformance-infra/grpc-infra-backend-v1-b9ccc7769-dn48j not ready yet
+    helpers.go:301: 2026-09-10T16:12:05.302245191Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:05.302282432Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:05.302293772Z: Pod gateway-conformance-infra/grpc-infra-backend-v1-b9ccc7769-sj78l not ready yet
+    helpers.go:301: 2026-09-10T16:12:05.567229647Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:05.567270888Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:05.567282629Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:05.831731702Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:05.831766663Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:05.831777693Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:06.096431262Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:06.096467073Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:06.096477393Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:06.365952539Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:06.36598556Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:06.36599606Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:06.634569578Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:06.634609308Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:06.634625849Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:06.900631598Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:06.900682979Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:06.900703009Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:07.17619139Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:07.176226311Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:07.176236851Z: Pod gateway-conformance-infra/tls-backend-865686dd8-lbdg2 not ready yet
+    helpers.go:301: 2026-09-10T16:12:07.706020069Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:07.70605627Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:07.7060752Z: Pod gateway-conformance-app-backend/tls-backend-754cdff949-m5lh6 not ready yet
+    helpers.go:301: 2026-09-10T16:12:08.246957757Z: Ready condition set to False, expected True
+    helpers.go:301: 2026-09-10T16:12:08.246996138Z: Ready was not in conditions list
+    helpers.go:304: 2026-09-10T16:12:08.247007588Z: Pod gateway-conformance-app-backend/tls-backend-754cdff949-m5lh6 not ready yet
+    helpers.go:309: 2026-09-10T16:12:09.060762056Z: Gateways and Pods in gateway-conformance-infra, gateway-conformance-app-backend, gateway-conformance-web-backend namespaces ready
+=== RUN   TestGatewayConformance/MeshGRPCRouteWeight
+    conformance.go:56: Skipping MeshGRPCRouteWeight: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRoute303Redirect
+    conformance.go:56: Skipping MeshHTTPRoute303Redirect: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRoute307Redirect
+    conformance.go:56: Skipping MeshHTTPRoute307Redirect: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRoute308Redirect
+    conformance.go:56: Skipping MeshHTTPRoute308Redirect: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteMatching
+    conformance.go:56: Skipping MeshHTTPRouteMatching: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteNamedRule
+    conformance.go:56: Skipping MeshHTTPRouteNamedRule: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteQueryParamMatching
+    conformance.go:56: Skipping MeshHTTPRouteQueryParamMatching: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteRedirectHostAndStatus
+    conformance.go:56: Skipping MeshHTTPRouteRedirectHostAndStatus: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteRedirectPath
+    conformance.go:56: Skipping MeshHTTPRouteRedirectPath: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteRedirectPort
+    conformance.go:56: Skipping MeshHTTPRouteRedirectPort: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteSchemeRedirect
+    conformance.go:56: Skipping MeshHTTPRouteSchemeRedirect: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteRequestHeaderModifier
+    conformance.go:56: Skipping MeshHTTPRouteRequestHeaderModifier: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteBackendRequestHeaderModifier
+    conformance.go:56: Skipping MeshHTTPRouteBackendRequestHeaderModifier: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteRewritePath
+    conformance.go:56: Skipping MeshHTTPRouteRewritePath: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteSimpleSameNamespace
+    conformance.go:56: Skipping MeshHTTPRouteSimpleSameNamespace: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshHTTPRouteWeight
+    conformance.go:56: Skipping MeshHTTPRouteWeight: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshBasic
+    conformance.go:56: Skipping MeshBasic: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshConsumerRoute
+    conformance.go:56: Skipping MeshConsumerRoute: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshFrontendHostname
+    conformance.go:56: Skipping MeshFrontendHostname: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshFrontend
+    conformance.go:56: Skipping MeshFrontend: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshPorts
+    conformance.go:56: Skipping MeshPorts: suite does not support Mesh
+=== RUN   TestGatewayConformance/MeshTrafficSplit
+    conformance.go:56: Skipping MeshTrafficSplit: suite does not support Mesh
+=== RUN   TestGatewayConformance/BackendTLSPolicyConflictResolution
+    conformance.go:56: Skipping BackendTLSPolicyConflictResolution: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/BackendTLSPolicyInvalidCACertificateRef
+    conformance.go:56: Skipping BackendTLSPolicyInvalidCACertificateRef: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/BackendTLSPolicyInvalidKind
+    conformance.go:56: Skipping BackendTLSPolicyInvalidKind: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/BackendTLSPolicyObservedGenerationBump
+    conformance.go:56: Skipping BackendTLSPolicyObservedGenerationBump: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/BackendTLSPolicySANValidation
+    conformance.go:56: Skipping BackendTLSPolicySANValidation: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/BackendTLSPolicy
+    conformance.go:56: Skipping BackendTLSPolicy: suite does not support BackendTLSPolicy
+=== RUN   TestGatewayConformance/GatewayHTTPListenerIsolation
+    conformance.go:56: Skipping GatewayHTTPListenerIsolation: suite does not support GatewayHTTPListenerIsolation
+=== RUN   TestGatewayConformance/GatewayInfrastructure
+    conformance.go:56: Skipping GatewayInfrastructure: suite does not support GatewayInfrastructurePropagation
+=== RUN   TestGatewayConformance/GatewayFrontendInvalidDefaultClientCertificateValidation
+    conformance.go:56: Skipping GatewayFrontendInvalidDefaultClientCertificateValidation: suite does not support GatewayFrontendClientCertificateValidation
+=== RUN   TestGatewayConformance/GatewayListenerUnsupportedProtocol
+    conformance.go:68: Skipping GatewayListenerUnsupportedProtocol: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayInvalidParametersRef
+    conformance.go:68: Skipping GatewayInvalidParametersRef: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayInvalidRouteKind
+    conformance.go:68: Skipping GatewayInvalidRouteKind: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayInvalidTLSBackendConfiguration
+    conformance.go:56: Skipping GatewayInvalidTLSBackendConfiguration: suite does not support GatewayBackendClientCertificate
+=== RUN   TestGatewayConformance/GatewayInvalidTLSConfiguration
+    conformance.go:68: Skipping GatewayInvalidTLSConfiguration: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayModifyListeners
+    conformance.go:68: Skipping GatewayModifyListeners: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayObservedGenerationBump
+    conformance.go:68: Skipping GatewayObservedGenerationBump: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayOptionalAddressValue
+    conformance.go:56: Skipping GatewayOptionalAddressValue: suite does not support GatewayAddressEmpty
+=== RUN   TestGatewayConformance/GatewaySecretInvalidReferenceGrant
+    conformance.go:68: Skipping GatewaySecretInvalidReferenceGrant: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewaySecretMissingReferenceGrant
+    conformance.go:68: Skipping GatewaySecretMissingReferenceGrant: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewaySecretReferenceGrantAllInNamespace
+    conformance.go:68: Skipping GatewaySecretReferenceGrantAllInNamespace: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewaySecretReferenceGrantSpecific
+    conformance.go:68: Skipping GatewaySecretReferenceGrantSpecific: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayStaticAddresses
+    conformance.go:56: Skipping GatewayStaticAddresses: suite does not support GatewayStaticAddresses
+=== RUN   TestGatewayConformance/GatewayTLSBackendClientCertificate
+    conformance.go:56: Skipping GatewayTLSBackendClientCertificate: suite does not support GatewayBackendClientCertificate
+=== RUN   TestGatewayConformance/GatewayWithAttachedRoutes
+    conformance.go:68: Skipping GatewayWithAttachedRoutes: test explicitly skipped
+=== RUN   TestGatewayConformance/GatewayWithAttachedRoutesWithPort8080
+    conformance.go:56: Skipping GatewayWithAttachedRoutesWithPort8080: suite does not support GatewayPort8080
+=== RUN   TestGatewayConformance/GatewayFrontendClientCertificateValidationInsecureFallback
+    conformance.go:56: Skipping GatewayFrontendClientCertificateValidationInsecureFallback: suite does not support GatewayFrontendClientCertificateValidation
+=== RUN   TestGatewayConformance/GatewayFrontendClientCertificateValidation
+    conformance.go:56: Skipping GatewayFrontendClientCertificateValidation: suite does not support GatewayFrontendClientCertificateValidation
+=== RUN   TestGatewayConformance/GatewayInvalidFrontendClientCertificateValidation
+    conformance.go:56: Skipping GatewayInvalidFrontendClientCertificateValidation: suite does not support GatewayFrontendClientCertificateValidation
+=== RUN   TestGatewayConformance/GatewayClassObservedGenerationBump
+    conformance.go:68: Skipping GatewayClassObservedGenerationBump: test explicitly skipped
+=== RUN   TestGatewayConformance/GRPCExactMethodMatching
+    conformance.go:56: Skipping GRPCExactMethodMatching: suite does not support GRPCRoute
+=== RUN   TestGatewayConformance/GRPCRouteHeaderMatching
+    conformance.go:56: Skipping GRPCRouteHeaderMatching: suite does not support GRPCRoute
+=== RUN   TestGatewayConformance/GRPCRouteListenerHostnameMatching
+    conformance.go:56: Skipping GRPCRouteListenerHostnameMatching: suite does not support GRPCRoute
+=== RUN   TestGatewayConformance/GRPCRouteNamedRule
+    conformance.go:56: Skipping GRPCRouteNamedRule: suite does not support GRPCRoute
+=== RUN   TestGatewayConformance/GRPCRouteWeight
+    conformance.go:56: Skipping GRPCRouteWeight: suite does not support GRPCRoute
+=== RUN   TestGatewayConformance/HTTPRoute303Redirect
+    conformance.go:56: Skipping HTTPRoute303Redirect: suite does not support HTTPRoute303RedirectStatusCode
+=== RUN   TestGatewayConformance/HTTPRoute307Redirect
+    conformance.go:56: Skipping HTTPRoute307Redirect: suite does not support HTTPRoute307RedirectStatusCode
+=== RUN   TestGatewayConformance/HTTPRoute308Redirect
+    conformance.go:56: Skipping HTTPRoute308Redirect: suite does not support HTTPRoute308RedirectStatusCode
+=== RUN   TestGatewayConformance/HTTPRouteBackendProtocolH2C
+    conformance.go:56: Skipping HTTPRouteBackendProtocolH2C: suite does not support HTTPRouteBackendProtocolH2C
+=== RUN   TestGatewayConformance/HTTPRouteBackendProtocolWebSocket
+    conformance.go:56: Skipping HTTPRouteBackendProtocolWebSocket: suite does not support HTTPRouteBackendProtocolWebSocket
+=== RUN   TestGatewayConformance/HTTPRouteCORS
+    conformance.go:56: Skipping HTTPRouteCORS: suite does not support HTTPRouteCORS
+=== RUN   TestGatewayConformance/HTTPRouteCrossNamespace
+    conformance.go:68: Skipping HTTPRouteCrossNamespace: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteDisallowedKind
+    conformance.go:56: Skipping HTTPRouteDisallowedKind: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/HTTPRouteExactPathMatching
+    conformance.go:68: Skipping HTTPRouteExactPathMatching: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteHeaderMatching
+    conformance.go:68: Skipping HTTPRouteHeaderMatching: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteHostnameIntersection
+    conformance.go:68: Skipping HTTPRouteHostnameIntersection: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteHTTPSListenerDetectMisdirectedRequests
+    conformance.go:56: Skipping HTTPRouteHTTPSListenerDetectMisdirectedRequests: suite does not support GatewayHTTPSListenerDetectMisdirectedRequests
+=== RUN   TestGatewayConformance/HTTPRouteHTTPSListener
+    conformance.go:68: Skipping HTTPRouteHTTPSListener: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidBackendRefUnknownKind
+    conformance.go:68: Skipping HTTPRouteInvalidBackendRefUnknownKind: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidCrossNamespaceBackendRef
+    conformance.go:68: Skipping HTTPRouteInvalidCrossNamespaceBackendRef: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidCrossNamespaceParentRef
+    conformance.go:68: Skipping HTTPRouteInvalidCrossNamespaceParentRef: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidNonExistentBackendRef
+    conformance.go:68: Skipping HTTPRouteInvalidNonExistentBackendRef: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidParentRefNotMatchingListenerPort
+    conformance.go:56: Skipping HTTPRouteInvalidParentRefNotMatchingListenerPort: suite does not support HTTPRouteDestinationPortMatching
+=== RUN   TestGatewayConformance/HTTPRouteInvalidParentRefNotMatchingSectionName
+    conformance.go:68: Skipping HTTPRouteInvalidParentRefNotMatchingSectionName: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteInvalidParentRefSectionNameNotMatchingPort
+    conformance.go:56: Skipping HTTPRouteInvalidParentRefSectionNameNotMatchingPort: suite does not support HTTPRouteParentRefPort
+=== RUN   TestGatewayConformance/HTTPRouteInvalidReferenceGrant
+    conformance.go:68: Skipping HTTPRouteInvalidReferenceGrant: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteListenerHostnameMatching
+    conformance.go:68: Skipping HTTPRouteListenerHostnameMatching: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteListenerPortMatching
+    conformance.go:56: Skipping HTTPRouteListenerPortMatching: suite does not support HTTPRouteParentRefPort
+=== RUN   TestGatewayConformance/HTTPRouteMatchingAcrossRoutes
+    conformance.go:68: Skipping HTTPRouteMatchingAcrossRoutes: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteMatching
+    conformance.go:68: Skipping HTTPRouteMatching: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteMethodMatching
+    conformance.go:56: Skipping HTTPRouteMethodMatching: suite does not support HTTPRouteMethodMatching
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways
+    conformance.go:72: 2026-09-10T16:12:09.088573871Z: Applying tests/httproute-multiple-gateways.yaml
+    apply.go:271: 2026-09-10T16:12:09.133809505Z: Creating multiple-gateways-shared-route HTTPRoute
+    apply.go:271: 2026-09-10T16:12:09.237730287Z: Creating same-namespace-dedicated-route HTTPRoute
+    apply.go:271: 2026-09-10T16:12:09.322790456Z: Creating all-namespaces-dedicated-route HTTPRoute
+    conformance.go:77: 2026-09-10T16:12:09.353867473Z: Running HTTPRouteMultipleGateways, relying on the following features: Gateway-standard, HTTPRoute-standard
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace
+=== PAUSE TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces
+=== PAUSE TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces
+=== CONT  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace
+=== CONT  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces
+=== NAME  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace
+    helpers.go:821: 2026-09-10T16:12:09.699169842Z: Conditions matched expectations
+    helpers.go:821: 2026-09-10T16:12:09.699235283Z: Route gateway-conformance-infra/multiple-gateways-shared-route Parents matched expectations
+=== NAME  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces
+    helpers.go:821: 2026-09-10T16:12:09.699166052Z: Route gateway-conformance-infra/multiple-gateways-shared-route ParentReference.Name doesn't match
+    helpers.go:821: 2026-09-10T16:12:09.802436069Z: Route gateway-conformance-infra/multiple-gateways-shared-route ParentReference.Name doesn't match
+=== NAME  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace
+    helpers.go:821: 2026-09-10T16:12:09.826510819Z: Conditions matched expectations
+    helpers.go:821: 2026-09-10T16:12:09.82654808Z: Route gateway-conformance-infra/same-namespace-dedicated-route Parents matched expectations
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace/shared_route_is_accessible_and_routed_to_infra-backend-v1
+    httproute-multiple-gateways.go:54: 2026-09-10T16:12:09.849393932Z: Making GET request to host  via http://172.30.153.98/shared
+    http.go:331: 2026-09-10T16:12:09.856284847Z: Request passed
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace/dedicated_route_is_accessible_and_routed_to_infra-backend-v2
+    httproute-multiple-gateways.go:62: 2026-09-10T16:12:09.856375309Z: Making GET request to host  via http://172.30.153.98/
+    http.go:331: 2026-09-10T16:12:09.863220463Z: Request passed
+=== NAME  TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces
+    helpers.go:821: 2026-09-10T16:12:09.902860162Z: Conditions matched expectations
+    helpers.go:821: 2026-09-10T16:12:09.902909743Z: Route gateway-conformance-infra/multiple-gateways-shared-route ParentReference.Name doesn't match
+    helpers.go:821: 2026-09-10T16:12:09.902924213Z: Route gateway-conformance-infra/multiple-gateways-shared-route Parents matched expectations
+    helpers.go:821: 2026-09-10T16:12:09.923907144Z: Conditions matched expectations
+    helpers.go:821: 2026-09-10T16:12:09.923943225Z: Route gateway-conformance-infra/all-namespaces-dedicated-route Parents matched expectations
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces/shared_route_is_accessible_and_routed_to_infra-backend-v1
+    httproute-multiple-gateways.go:82: 2026-09-10T16:12:09.944026385Z: Making GET request to host  via http://172.29.162.172/shared
+    http.go:331: 2026-09-10T16:12:09.954629274Z: Request passed
+=== RUN   TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces/dedicated_route_is_accessible_and_routed_to_infra-backend-v3
+    httproute-multiple-gateways.go:90: 2026-09-10T16:12:09.954700045Z: Making GET request to host  via http://172.29.162.172/
+    http.go:331: 2026-09-10T16:12:09.967036362Z: Request passed
+=== NAME  TestGatewayConformance/HTTPRouteMultipleGateways
+    apply.go:279: 2026-09-10T16:12:09.967110964Z: Deleting all-namespaces-dedicated-route HTTPRoute
+    apply.go:279: 2026-09-10T16:12:10.053092383Z: Deleting same-namespace-dedicated-route HTTPRoute
+    apply.go:279: 2026-09-10T16:12:10.104513067Z: Deleting multiple-gateways-shared-route HTTPRoute
+=== RUN   TestGatewayConformance/HTTPRouteNamedRule
+    conformance.go:56: Skipping HTTPRouteNamedRule: suite does not support HTTPRouteNamedRouteRule
+=== RUN   TestGatewayConformance/HTTPRouteObservedGenerationBump
+    conformance.go:68: Skipping HTTPRouteObservedGenerationBump: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteNoBackendRefs
+    conformance.go:68: Skipping HTTPRouteNoBackendRefs: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    conformance.go:68: Skipping HTTPRoutePartiallyInvalidViaInvalidReferenceGrant: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRoutePathMatchOrder
+    conformance.go:68: Skipping HTTPRoutePathMatchOrder: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteQueryParamMatching
+    conformance.go:56: Skipping HTTPRouteQueryParamMatching: suite does not support HTTPRouteQueryParamMatching
+=== RUN   TestGatewayConformance/HTTPRouteRedirectHostAndStatus
+    conformance.go:68: Skipping HTTPRouteRedirectHostAndStatus: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteRedirectPath
+    conformance.go:56: Skipping HTTPRouteRedirectPath: suite does not support HTTPRoutePathRedirect
+=== RUN   TestGatewayConformance/HTTPRouteRedirectPortAndScheme
+    conformance.go:56: Skipping HTTPRouteRedirectPortAndScheme: suite does not support HTTPRoutePortRedirect
+=== RUN   TestGatewayConformance/HTTPRouteRedirectPort
+    conformance.go:56: Skipping HTTPRouteRedirectPort: suite does not support HTTPRoutePortRedirect
+=== RUN   TestGatewayConformance/HTTPRouteRedirectScheme
+    conformance.go:56: Skipping HTTPRouteRedirectScheme: suite does not support HTTPRouteSchemeRedirect
+=== RUN   TestGatewayConformance/HTTPRouteReferenceGrant
+    conformance.go:68: Skipping HTTPRouteReferenceGrant: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteRequestHeaderModifierBackendWeights
+    conformance.go:56: Skipping HTTPRouteRequestHeaderModifierBackendWeights: suite does not support HTTPRouteBackendRequestHeaderModification
+=== RUN   TestGatewayConformance/HTTPRouteRequestHeaderModifier
+    conformance.go:68: Skipping HTTPRouteRequestHeaderModifier: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteBackendRequestHeaderModifier
+    conformance.go:56: Skipping HTTPRouteBackendRequestHeaderModifier: suite does not support HTTPRouteBackendRequestHeaderModification
+=== RUN   TestGatewayConformance/HTTPRouteRequestMirror
+    conformance.go:56: Skipping HTTPRouteRequestMirror: suite does not support HTTPRouteRequestMirror
+=== RUN   TestGatewayConformance/HTTPRouteRequestMultipleMirrors
+    conformance.go:56: Skipping HTTPRouteRequestMultipleMirrors: suite does not support HTTPRouteRequestMirror
+=== RUN   TestGatewayConformance/HTTPRouteRequestPercentageMirror
+    conformance.go:56: Skipping HTTPRouteRequestPercentageMirror: suite does not support HTTPRouteRequestPercentageMirror
+=== RUN   TestGatewayConformance/HTTPRouteResponseHeaderModifier
+    conformance.go:56: Skipping HTTPRouteResponseHeaderModifier: suite does not support HTTPRouteResponseHeaderModification
+=== RUN   TestGatewayConformance/HTTPRouteRetry
+    conformance.go:56: Skipping HTTPRouteRetry: suite does not support HTTPRouteRetry
+=== RUN   TestGatewayConformance/HTTPRouteRewriteHost
+    conformance.go:56: Skipping HTTPRouteRewriteHost: suite does not support HTTPRouteHostRewrite
+=== RUN   TestGatewayConformance/HTTPRouteRewritePath
+    conformance.go:56: Skipping HTTPRouteRewritePath: suite does not support HTTPRoutePathRewrite
+=== RUN   TestGatewayConformance/HTTPRouteServiceTypes
+    conformance.go:68: Skipping HTTPRouteServiceTypes: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteSimpleSameNamespace
+    conformance.go:68: Skipping HTTPRouteSimpleSameNamespace: test explicitly skipped
+=== RUN   TestGatewayConformance/HTTPRouteTimeoutBackendRequest
+    conformance.go:56: Skipping HTTPRouteTimeoutBackendRequest: suite does not support HTTPRouteBackendTimeout
+=== RUN   TestGatewayConformance/HTTPRouteTimeoutRequest
+    conformance.go:56: Skipping HTTPRouteTimeoutRequest: suite does not support HTTPRouteRequestTimeout
+=== RUN   TestGatewayConformance/HTTPRouteWeight
+    conformance.go:68: Skipping HTTPRouteWeight: test explicitly skipped
+=== RUN   TestGatewayConformance/ListenerSetAllowedNamespaceNone
+    conformance.go:56: Skipping ListenerSetAllowedNamespaceNone: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetAllowedNamespaceSame
+    conformance.go:56: Skipping ListenerSetAllowedNamespaceSame: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetAllowedNamespaceSelector
+    conformance.go:56: Skipping ListenerSetAllowedNamespaceSelector: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetAllowedRoutesNamespaces
+    conformance.go:56: Skipping ListenerSetAllowedRoutesNamespaces: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetAllowedRoutesSupportedKinds
+    conformance.go:56: Skipping ListenerSetAllowedRoutesSupportedKinds: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetDefaultNotAllowed
+    conformance.go:56: Skipping ListenerSetDefaultNotAllowed: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetDualParentRefIndependence
+    conformance.go:56: Skipping ListenerSetDualParentRefIndependence: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetGatewayParentSectionNameNotFound
+    conformance.go:56: Skipping ListenerSetGatewayParentSectionNameNotFound: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetHostnameConflict
+    conformance.go:56: Skipping ListenerSetHostnameConflict: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetHTTPRouting
+    conformance.go:56: Skipping ListenerSetHTTPRouting: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetProtocolConflict
+    conformance.go:56: Skipping ListenerSetProtocolConflict: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetReferenceGrant
+    conformance.go:56: Skipping ListenerSetReferenceGrant: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/ListenerSetRouteStatusScopedToParentRef
+    conformance.go:56: Skipping ListenerSetRouteStatusScopedToParentRef: suite does not support ListenerSet
+=== RUN   TestGatewayConformance/TCPRouteInvalidBackendRefNonexistent
+    conformance.go:56: Skipping TCPRouteInvalidBackendRefNonexistent: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteInvalidCrossNamespaceBackendRef
+    conformance.go:56: Skipping TCPRouteInvalidCrossNamespaceBackendRef: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteInvalidNonTCPListener
+    conformance.go:56: Skipping TCPRouteInvalidNonTCPListener: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteMultipleRoutesAttachment
+    conformance.go:56: Skipping TCPRouteMultipleRoutesAttachment: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteParentRefAttachAll
+    conformance.go:56: Skipping TCPRouteParentRefAttachAll: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteParentRefPortAndSectionName
+    conformance.go:56: Skipping TCPRouteParentRefPortAndSectionName: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteReferenceGrant
+    conformance.go:56: Skipping TCPRouteReferenceGrant: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TCPRouteWeightedRouting
+    conformance.go:56: Skipping TCPRouteWeightedRouting: suite does not support TCPRoute
+=== RUN   TestGatewayConformance/TLSRouteHostnameIntersection
+    conformance.go:56: Skipping TLSRouteHostnameIntersection: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteInvalidBackendRefNonexistent
+    conformance.go:56: Skipping TLSRouteInvalidBackendRefNonexistent: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteInvalidBackendRefUnknownKind
+    conformance.go:56: Skipping TLSRouteInvalidBackendRefUnknownKind: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteInvalidNoMatchingListenerHostname
+    conformance.go:56: Skipping TLSRouteInvalidNoMatchingListenerHostname: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteInvalidNoMatchingListener
+    conformance.go:56: Skipping TLSRouteInvalidNoMatchingListener: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteInvalidReferenceGrant
+    conformance.go:56: Skipping TLSRouteInvalidReferenceGrant: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteListenerMixedTerminationNotSupported
+    conformance.go:56: Skipping TLSRouteListenerMixedTerminationNotSupported: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteListenerPassthroughSupportedKinds
+    conformance.go:56: Skipping TLSRouteListenerPassthroughSupportedKinds: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteListenerTerminateNotSupported
+    conformance.go:56: Skipping TLSRouteListenerTerminateNotSupported: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteListenerTerminateSupportedKinds
+    conformance.go:56: Skipping TLSRouteListenerTerminateSupportedKinds: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteMixedTerminationSameNamespace
+    conformance.go:56: Skipping TLSRouteMixedTerminationSameNamespace: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteSimpleSameNamespace
+    conformance.go:56: Skipping TLSRouteSimpleSameNamespace: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/TLSRouteTerminateSimpleSameNamespace
+    conformance.go:56: Skipping TLSRouteTerminateSimpleSameNamespace: suite does not support TLSRoute
+=== RUN   TestGatewayConformance/UDPRouteInvalidBackendRefNonexistent
+    conformance.go:56: Skipping UDPRouteInvalidBackendRefNonexistent: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteInvalidCrossNamespaceBackendRef
+    conformance.go:56: Skipping UDPRouteInvalidCrossNamespaceBackendRef: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteMultipleRoutesAttachment
+    conformance.go:56: Skipping UDPRouteMultipleRoutesAttachment: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteNotAllowedByListeners
+    conformance.go:56: Skipping UDPRouteNotAllowedByListeners: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteParentRefAttachAllListeners
+    conformance.go:56: Skipping UDPRouteParentRefAttachAllListeners: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteParentRefPortAndSectionName
+    conformance.go:56: Skipping UDPRouteParentRefPortAndSectionName: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteReferenceGrant
+    conformance.go:56: Skipping UDPRouteReferenceGrant: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRoute
+    conformance.go:56: Skipping UDPRoute: suite does not support UDPRoute
+=== RUN   TestGatewayConformance/UDPRouteWeightedRouting
+    conformance.go:56: Skipping UDPRouteWeightedRouting: suite does not support UDPRoute
+=== NAME  TestGatewayConformance
+    apply.go:235: 2026-09-10T16:12:10.183273684Z: Deleting mismatch-ca-certificate 
+    apply.go:235: 2026-09-10T16:12:10.227988287Z: Deleting tls-terminate-checks-certificate 
+    apply.go:235: 2026-09-10T16:12:10.267290929Z: Deleting tls-passthrough-checks-certificate 
+    apply.go:235: 2026-09-10T16:12:10.331446359Z: Deleting tls-passthrough-checks-certificate 
+    apply.go:235: 2026-09-10T16:12:10.379257772Z: Deleting tls-checks-client-certificate 
+    apply.go:235: 2026-09-10T16:12:10.422132693Z: Deleting tls-checks-certificate 
+    apply.go:235: 2026-09-10T16:12:10.46253251Z: Deleting tls-checks-ca-certificate 
+    apply.go:235: 2026-09-10T16:12:10.557533902Z: Deleting tls-validity-checks-per-port-client-certificate 
+    apply.go:235: 2026-09-10T16:12:10.595706278Z: Deleting tls-validity-checks-per-port-ca-certificate 
+    apply.go:235: 2026-09-10T16:12:10.636876601Z: Deleting tls-validity-checks-client-certificate 
+    apply.go:235: 2026-09-10T16:12:10.710148815Z: Deleting tls-validity-checks-ca-certificate 
+    apply.go:235: 2026-09-10T16:12:10.747719569Z: Deleting web-backend-cm 
+    apply.go:235: 2026-09-10T16:12:10.785485936Z: Deleting tls-validity-checks-certificate 
+    apply.go:235: 2026-09-10T16:12:10.826946776Z: Deleting certificate 
+    apply.go:279: 2026-09-10T16:12:10.868211992Z: Deleting tcp-backend Deployment
+    apply.go:279: 2026-09-10T16:12:10.919108754Z: Deleting tcp-backend Service
+    apply.go:279: 2026-09-10T16:12:11.085308733Z: Deleting coredns ConfigMap
+    apply.go:279: 2026-09-10T16:12:11.156317236Z: Deleting coredns Deployment
+    apply.go:279: 2026-09-10T16:12:11.204510278Z: Deleting coredns Service
+    apply.go:279: 2026-09-10T16:12:11.387010853Z: Deleting grpc-infra-backend-v3 Deployment
+    apply.go:279: 2026-09-10T16:12:11.475785875Z: Deleting grpc-infra-backend-v3 Service
+    apply.go:279: 2026-09-10T16:12:12.119617121Z: Deleting grpc-infra-backend-v2 Deployment
+    apply.go:279: 2026-09-10T16:12:12.162269047Z: Deleting grpc-infra-backend-v2 Service
+    apply.go:279: 2026-09-10T16:12:12.316002457Z: Deleting grpc-infra-backend-v1 Deployment
+    apply.go:279: 2026-09-10T16:12:12.361029397Z: Deleting grpc-infra-backend-v1 Service
+    apply.go:279: 2026-09-10T16:12:13.181084897Z: Deleting web-backend Deployment
+    apply.go:279: 2026-09-10T16:12:13.255532266Z: Deleting web-backend Service
+    apply.go:279: 2026-09-10T16:12:13.516326788Z: Deleting gateway-conformance-web-backend Namespace
+    apply.go:279: 2026-09-10T16:12:13.611968854Z: Deleting app-backend-v2 Deployment
+    apply.go:279: 2026-09-10T16:12:14.28305774Z: Deleting app-backend-v2 Service
+    apply.go:279: 2026-09-10T16:12:15.922072134Z: Deleting app-backend-v1 Deployment
+    apply.go:279: 2026-09-10T16:12:15.975281717Z: Deleting app-backend-v1 Service
+    apply.go:279: 2026-09-10T16:12:16.333786661Z: Deleting tls-backend Deployment
+    apply.go:279: 2026-09-10T16:12:16.445508247Z: Deleting tls-backend Service
+    apply.go:279: 2026-09-10T16:12:16.66358618Z: Deleting gateway-conformance-app-backend Namespace
+    apply.go:279: 2026-09-10T16:12:16.842265309Z: Deleting tls-backend-2 Deployment
+    apply.go:279: 2026-09-10T16:12:16.935389738Z: Deleting tls-backend-2 Service
+    apply.go:279: 2026-09-10T16:12:17.277834061Z: Deleting tls-backend Deployment
+    apply.go:279: 2026-09-10T16:12:17.32324249Z: Deleting tls-backend Service
+    apply.go:279: 2026-09-10T16:12:18.197691688Z: Deleting infra-backend-v3 Deployment
+    apply.go:279: 2026-09-10T16:12:18.307514602Z: Deleting infra-backend-v3 Service
+    apply.go:279: 2026-09-10T16:12:18.525501233Z: Deleting infra-backend-v2 Deployment
+    apply.go:279: 2026-09-10T16:12:18.638630001Z: Deleting infra-backend-v2 Service
+    apply.go:279: 2026-09-10T16:12:18.790728553Z: Deleting infra-backend-v1 Deployment
+    apply.go:279: 2026-09-10T16:12:18.843292462Z: Deleting infra-backend-v1 Service
+    apply.go:279: 2026-09-10T16:12:19.222585892Z: Deleting backend-namespaces Gateway
+    apply.go:279: 2026-09-10T16:12:20.233154373Z: Deleting all-namespaces Gateway
+    apply.go:279: 2026-09-10T16:12:20.294254533Z: Deleting same-namespace-with-https-listener Gateway
+    apply.go:279: 2026-09-10T16:12:20.3404445Z: Deleting same-namespace Gateway
+    apply.go:279: 2026-09-10T16:12:20.380280013Z: Deleting gateway-conformance-infra Namespace
+    conformance.go:158: Conformance report:
+        apiVersion: gateway.networking.k8s.io/v1
+        date: "2026-09-10T16:12:20Z"
+        gatewayAPIChannel: standard
+        gatewayAPIVersion: v1.6.2
+        implementation:
+          contact:
+          - https://github.com/CleverCloud/sozu-gateway/issues
+          organization: clevercloud
+          project: sozu-gateway
+          url: https://github.com/CleverCloud/sozu-gateway
+          version: a8d54a3c5e03018316fe1fb0f262380d0da77d02 (clevercloud/sozu:2.2.1)
+        kind: ConformanceReport
+        mode: default
+        profiles:
+        - core:
+            result: partial
+            skippedTests:
+            - GatewayClassObservedGenerationBump
+            - GatewayInvalidParametersRef
+            - GatewayInvalidRouteKind
+            - GatewayInvalidTLSConfiguration
+            - GatewayListenerUnsupportedProtocol
+            - GatewayModifyListeners
+            - GatewayObservedGenerationBump
+            - GatewaySecretInvalidReferenceGrant
+            - GatewaySecretMissingReferenceGrant
+            - GatewaySecretReferenceGrantAllInNamespace
+            - GatewaySecretReferenceGrantSpecific
+            - GatewayWithAttachedRoutes
+            - HTTPRouteCrossNamespace
+            - HTTPRouteExactPathMatching
+            - HTTPRouteHTTPSListener
+            - HTTPRouteHeaderMatching
+            - HTTPRouteHostnameIntersection
+            - HTTPRouteInvalidBackendRefUnknownKind
+            - HTTPRouteInvalidCrossNamespaceBackendRef
+            - HTTPRouteInvalidCrossNamespaceParentRef
+            - HTTPRouteInvalidNonExistentBackendRef
+            - HTTPRouteInvalidParentRefNotMatchingSectionName
+            - HTTPRouteInvalidReferenceGrant
+            - HTTPRouteListenerHostnameMatching
+            - HTTPRouteMatching
+            - HTTPRouteMatchingAcrossRoutes
+            - HTTPRouteNoBackendRefs
+            - HTTPRouteObservedGenerationBump
+            - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+            - HTTPRoutePathMatchOrder
+            - HTTPRouteRedirectHostAndStatus
+            - HTTPRouteReferenceGrant
+            - HTTPRouteRequestHeaderModifier
+            - HTTPRouteServiceTypes
+            - HTTPRouteSimpleSameNamespace
+            - HTTPRouteWeight
+            statistics:
+              Failed: 0
+              Passed: 1
+              Skipped: 36
+          name: GATEWAY-HTTP
+          summary: Core tests partially succeeded with 36 test skips.
+--- PASS: TestGatewayConformance (36.74s)
+    --- SKIP: TestGatewayConformance/MeshGRPCRouteWeight (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRoute303Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRoute307Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRoute308Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteMatching (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteNamedRule (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteQueryParamMatching (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteRedirectHostAndStatus (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteRedirectPath (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteRedirectPort (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteSchemeRedirect (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteRequestHeaderModifier (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteBackendRequestHeaderModifier (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteRewritePath (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteSimpleSameNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/MeshHTTPRouteWeight (0.00s)
+    --- SKIP: TestGatewayConformance/MeshBasic (0.00s)
+    --- SKIP: TestGatewayConformance/MeshConsumerRoute (0.00s)
+    --- SKIP: TestGatewayConformance/MeshFrontendHostname (0.00s)
+    --- SKIP: TestGatewayConformance/MeshFrontend (0.00s)
+    --- SKIP: TestGatewayConformance/MeshPorts (0.00s)
+    --- SKIP: TestGatewayConformance/MeshTrafficSplit (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicyConflictResolution (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicyInvalidCACertificateRef (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicyInvalidKind (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicyObservedGenerationBump (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicySANValidation (0.00s)
+    --- SKIP: TestGatewayConformance/BackendTLSPolicy (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayHTTPListenerIsolation (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInfrastructure (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayFrontendInvalidDefaultClientCertificateValidation (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayListenerUnsupportedProtocol (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInvalidParametersRef (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInvalidRouteKind (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInvalidTLSBackendConfiguration (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInvalidTLSConfiguration (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayModifyListeners (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayObservedGenerationBump (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayOptionalAddressValue (0.00s)
+    --- SKIP: TestGatewayConformance/GatewaySecretInvalidReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/GatewaySecretMissingReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/GatewaySecretReferenceGrantAllInNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/GatewaySecretReferenceGrantSpecific (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayStaticAddresses (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayTLSBackendClientCertificate (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayWithAttachedRoutes (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayWithAttachedRoutesWithPort8080 (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayFrontendClientCertificateValidationInsecureFallback (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayFrontendClientCertificateValidation (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayInvalidFrontendClientCertificateValidation (0.00s)
+    --- SKIP: TestGatewayConformance/GatewayClassObservedGenerationBump (0.00s)
+    --- SKIP: TestGatewayConformance/GRPCExactMethodMatching (0.00s)
+    --- SKIP: TestGatewayConformance/GRPCRouteHeaderMatching (0.00s)
+    --- SKIP: TestGatewayConformance/GRPCRouteListenerHostnameMatching (0.00s)
+    --- SKIP: TestGatewayConformance/GRPCRouteNamedRule (0.00s)
+    --- SKIP: TestGatewayConformance/GRPCRouteWeight (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRoute303Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRoute307Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRoute308Redirect (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteBackendProtocolH2C (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteBackendProtocolWebSocket (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteCORS (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteCrossNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteDisallowedKind (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteExactPathMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteHeaderMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteHostnameIntersection (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteHTTPSListenerDetectMisdirectedRequests (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteHTTPSListener (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidBackendRefUnknownKind (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidCrossNamespaceBackendRef (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidCrossNamespaceParentRef (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidNonExistentBackendRef (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidParentRefNotMatchingListenerPort (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidParentRefNotMatchingSectionName (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidParentRefSectionNameNotMatchingPort (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteInvalidReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteListenerHostnameMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteListenerPortMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteMatchingAcrossRoutes (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteMethodMatching (0.00s)
+    --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways (0.46s)
+        --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace (0.51s)
+            --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace/shared_route_is_accessible_and_routed_to_infra-backend-v1 (0.01s)
+            --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_same-namespace/dedicated_route_is_accessible_and_routed_to_infra-backend-v2 (0.01s)
+        --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces (0.61s)
+            --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces/shared_route_is_accessible_and_routed_to_infra-backend-v1 (0.01s)
+            --- PASS: TestGatewayConformance/HTTPRouteMultipleGateways/Gateway_all-namespaces/dedicated_route_is_accessible_and_routed_to_infra-backend-v3 (0.01s)
+    --- SKIP: TestGatewayConformance/HTTPRouteNamedRule (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteObservedGenerationBump (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteNoBackendRefs (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRoutePartiallyInvalidViaInvalidReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRoutePathMatchOrder (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteQueryParamMatching (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRedirectHostAndStatus (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRedirectPath (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRedirectPortAndScheme (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRedirectPort (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRedirectScheme (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRequestHeaderModifierBackendWeights (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRequestHeaderModifier (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteBackendRequestHeaderModifier (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRequestMirror (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRequestMultipleMirrors (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRequestPercentageMirror (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteResponseHeaderModifier (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRetry (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRewriteHost (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteRewritePath (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteServiceTypes (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteSimpleSameNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteTimeoutBackendRequest (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteTimeoutRequest (0.00s)
+    --- SKIP: TestGatewayConformance/HTTPRouteWeight (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetAllowedNamespaceNone (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetAllowedNamespaceSame (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetAllowedNamespaceSelector (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetAllowedRoutesNamespaces (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetAllowedRoutesSupportedKinds (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetDefaultNotAllowed (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetDualParentRefIndependence (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetGatewayParentSectionNameNotFound (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetHostnameConflict (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetHTTPRouting (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetProtocolConflict (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/ListenerSetRouteStatusScopedToParentRef (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteInvalidBackendRefNonexistent (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteInvalidCrossNamespaceBackendRef (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteInvalidNonTCPListener (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteMultipleRoutesAttachment (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteParentRefAttachAll (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteParentRefPortAndSectionName (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/TCPRouteWeightedRouting (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteHostnameIntersection (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteInvalidBackendRefNonexistent (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteInvalidBackendRefUnknownKind (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteInvalidNoMatchingListenerHostname (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteInvalidNoMatchingListener (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteInvalidReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteListenerMixedTerminationNotSupported (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteListenerPassthroughSupportedKinds (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteListenerTerminateNotSupported (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteListenerTerminateSupportedKinds (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteMixedTerminationSameNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteSimpleSameNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/TLSRouteTerminateSimpleSameNamespace (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteInvalidBackendRefNonexistent (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteInvalidCrossNamespaceBackendRef (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteMultipleRoutesAttachment (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteNotAllowedByListeners (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteParentRefAttachAllListeners (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteParentRefPortAndSectionName (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteReferenceGrant (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRoute (0.00s)
+    --- SKIP: TestGatewayConformance/UDPRouteWeightedRouting (0.00s)
+PASS

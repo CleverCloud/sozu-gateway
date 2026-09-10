@@ -1,0 +1,102 @@
+{
+  "started": "2026-09-10T16:10:58.092231+00:00",
+  "context": "sozu-gateway-upgrade@kubernetes_01M257SQRH3TT7QCXPQB7RM1FH",
+  "installation_namespace": "sozu-auto-test-0910",
+  "gateway_class": "sozu-auto-0910",
+  "test_namespace": "sozu-provision-e2e-9d4ac4b0f08b",
+  "result": "PASS",
+  "steps": [
+    {
+      "name": "existing-installation-verified",
+      "time": "2026-09-10T16:10:58.448700+00:00",
+      "anchor": {
+        "name": "sozu-auto-gateway-template",
+        "namespace": "sozu-auto-test-0910",
+        "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+        "resourceVersion": "125288",
+        "labels": {
+          "app.kubernetes.io/instance": "sozu-auto",
+          "app.kubernetes.io/managed-by": "Helm",
+          "app.kubernetes.io/name": "sozu-gateway",
+          "app.kubernetes.io/part-of": "sozu-gateway",
+          "helm.sh/chart": "sozu-gateway-0.1.0"
+        }
+      },
+      "gateway_class": {
+        "name": "sozu-auto-0910",
+        "uid": "04bd5388-a9db-4c62-be58-0012b2cc6726",
+        "generation": 1,
+        "resourceVersion": "122041"
+      }
+    },
+    {
+      "name": "temporary-backends-and-probe-ready",
+      "time": "2026-09-10T16:11:06.376160+00:00",
+      "runner": "sozu-provision-e2e-9d4ac4b0f08b/probe"
+    },
+    {
+      "name": "independent-default-routes",
+      "time": "2026-09-10T16:11:23.888547+00:00",
+      "requests": 40,
+      "failures": 0
+    },
+    {
+      "name": "workers-cannot-create-deployments",
+      "time": "2026-09-10T16:11:24.178165+00:00",
+      "checks": 2
+    },
+    {
+      "name": "deleted-gateway-instance-collected",
+      "time": "2026-09-10T16:11:35.014247+00:00",
+      "gateway_uid": "3ab18f4a-26df-480f-80ba-90a52354cef2"
+    },
+    {
+      "name": "same-name-recreation",
+      "time": "2026-09-10T16:11:51.777947+00:00",
+      "requests": 40,
+      "failures": 0
+    },
+    {
+      "name": "route-backend-update",
+      "time": "2026-09-10T16:11:58.732595+00:00",
+      "requests": 40,
+      "failures": 0
+    },
+    {
+      "name": "installation-template-unchanged",
+      "time": "2026-09-10T16:11:58.881740+00:00",
+      "anchor": {
+        "name": "sozu-auto-gateway-template",
+        "namespace": "sozu-auto-test-0910",
+        "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+        "resourceVersion": "125288",
+        "labels": {
+          "app.kubernetes.io/instance": "sozu-auto",
+          "app.kubernetes.io/managed-by": "Helm",
+          "app.kubernetes.io/name": "sozu-gateway",
+          "app.kubernetes.io/part-of": "sozu-gateway",
+          "helm.sh/chart": "sozu-gateway-0.1.0"
+        }
+      }
+    }
+  ],
+  "cleanup_errors": [],
+  "installation": {
+    "name": "sozu-auto-gateway-template",
+    "namespace": "sozu-auto-test-0910",
+    "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+    "resourceVersion": "125288",
+    "labels": {
+      "app.kubernetes.io/instance": "sozu-auto",
+      "app.kubernetes.io/managed-by": "Helm",
+      "app.kubernetes.io/name": "sozu-gateway",
+      "app.kubernetes.io/part-of": "sozu-gateway",
+      "helm.sh/chart": "sozu-gateway-0.1.0"
+    }
+  },
+  "controller_image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "sozu_image": "clevercloud/sozu:2.2.1",
+  "template_sha256": "98e8fac43513ec881f15c0db5ee9a5576c99db28e07797075275a7630d127de0",
+  "test_namespace_uid": "6e1c6219-6181-428f-9090-b68d53d5670f",
+  "finished": "2026-09-10T16:13:17.131978+00:00"
+}

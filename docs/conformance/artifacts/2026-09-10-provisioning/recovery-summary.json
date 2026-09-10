@@ -1,0 +1,117 @@
+{
+  "started": "2026-09-10T16:15:55.863279+00:00",
+  "context": "sozu-gateway-upgrade@kubernetes_01M257SQRH3TT7QCXPQB7RM1FH",
+  "installation_namespace": "sozu-auto-test-0910",
+  "gateway_class": "sozu-auto-0910",
+  "test_namespace": "sozu-repair-probe-884d27afa21d",
+  "result": "PASS",
+  "steps": [
+    {
+      "name": "existing-installation-verified",
+      "time": "2026-09-10T16:15:56.224552+00:00",
+      "anchor": {
+        "name": "sozu-auto-gateway-template",
+        "namespace": "sozu-auto-test-0910",
+        "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+        "resourceVersion": "125288",
+        "labels": {
+          "app.kubernetes.io/instance": "sozu-auto",
+          "app.kubernetes.io/managed-by": "Helm",
+          "app.kubernetes.io/name": "sozu-gateway",
+          "app.kubernetes.io/part-of": "sozu-gateway",
+          "helm.sh/chart": "sozu-gateway-0.1.0"
+        }
+      },
+      "gateway_class": {
+        "name": "sozu-auto-0910",
+        "uid": "04bd5388-a9db-4c62-be58-0012b2cc6726",
+        "generation": 1,
+        "resourceVersion": "122041"
+      }
+    },
+    {
+      "name": "dedicated-instance-ready",
+      "time": "2026-09-10T16:17:06.144927+00:00",
+      "gateway_uid": "1c56130d-67a2-481e-9580-e4b5624e6dd3",
+      "deployment_uid": "b4797aad-4251-459f-b68d-b12bb5464d70",
+      "service_uid": "f3080201-ac65-49b4-afef-903594d2eb1d"
+    },
+    {
+      "name": "owned-deployment-scaled-to-zero",
+      "time": "2026-09-10T16:17:06.401346+00:00",
+      "deployment": "sozu-gw-9461b660-1c56130d-67a2-481e-9580-e4b5624e6dd3",
+      "uid": "b4797aad-4251-459f-b68d-b12bb5464d70"
+    },
+    {
+      "name": "deployment-drift-repaired",
+      "time": "2026-09-10T16:17:24.584573+00:00",
+      "elapsed_seconds": 18.183525267999357
+    },
+    {
+      "name": "owned-service-deleted",
+      "time": "2026-09-10T16:17:31.206194+00:00",
+      "service": "sozu-gw-9461b660-1c56130d-67a2-481e-9580-e4b5624e6dd3",
+      "uid": "f3080201-ac65-49b4-afef-903594d2eb1d",
+      "ip": "172.28.187.64"
+    },
+    {
+      "name": "service-recreated-and-address-published",
+      "time": "2026-09-10T16:17:34.919907+00:00",
+      "old_uid": "f3080201-ac65-49b4-afef-903594d2eb1d",
+      "new_uid": "0191a6f2-7559-4b22-b887-b26ae87c3a0a",
+      "old_ip": "172.28.187.64",
+      "new_ip": "172.25.13.231",
+      "address_changed": true,
+      "gateway_addresses": [
+        {
+          "type": "IPAddress",
+          "value": "172.25.13.231"
+        }
+      ]
+    }
+  ],
+  "cleanup_errors": [],
+  "revision": "a8d54a3c5e03018316fe1fb0f262380d0da77d02",
+  "expected_image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "test": "Deployment replica drift and Service recreation",
+  "attribution": "Observed convergence bounds; Gateway status events may also wake the provisioner.",
+  "sources": {
+    "recovery-probe.py": "9b230340a74dcf064d774291ef7e3f180955f55e2b7fd5a31b882cb7b27596e1",
+    "e2e-gateway-provisioning.py": "de9c71cc38712bab6cf54b313728561fc7d5be736d34ca834b59829d369c6c9b"
+  },
+  "installation": {
+    "name": "sozu-auto-gateway-template",
+    "namespace": "sozu-auto-test-0910",
+    "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+    "resourceVersion": "125288",
+    "labels": {
+      "app.kubernetes.io/instance": "sozu-auto",
+      "app.kubernetes.io/managed-by": "Helm",
+      "app.kubernetes.io/name": "sozu-gateway",
+      "app.kubernetes.io/part-of": "sozu-gateway",
+      "helm.sh/chart": "sozu-gateway-0.1.0"
+    }
+  },
+  "controller_image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "sozu_image": "clevercloud/sozu:2.2.1",
+  "template_sha256": "98e8fac43513ec881f15c0db5ee9a5576c99db28e07797075275a7630d127de0",
+  "provisioner_resync_secs": 60,
+  "test_namespace_uid": "dd65acde-c96a-438d-be8a-dd405aeefb5d",
+  "replica_repair_seconds_after_patch_response": 18.183525267999357,
+  "service_recreation_seconds_after_delete_response": 2.697267016999831,
+  "service_recreation": {
+    "old_uid": "f3080201-ac65-49b4-afef-903594d2eb1d",
+    "new_uid": "0191a6f2-7559-4b22-b887-b26ae87c3a0a",
+    "old_ip": "172.28.187.64",
+    "new_ip": "172.25.13.231",
+    "address_changed": true,
+    "gateway_addresses": [
+      {
+        "type": "IPAddress",
+        "value": "172.25.13.231"
+      }
+    ]
+  },
+  "provisioner_unchanged": true,
+  "finished": "2026-09-10T16:18:01.317858+00:00"
+}

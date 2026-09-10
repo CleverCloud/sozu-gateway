@@ -1,0 +1,1261 @@
+{
+  "independent-default-routes": [
+    {
+      "target": "gateway-a",
+      "sample": 0,
+      "time_ns": 1789056683462422423,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 1,
+      "time_ns": 1789056683471686626,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 2,
+      "time_ns": 1789056683476220554,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 3,
+      "time_ns": 1789056683481117099,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 4,
+      "time_ns": 1789056683564221579,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 5,
+      "time_ns": 1789056683569177004,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 6,
+      "time_ns": 1789056683574472287,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 7,
+      "time_ns": 1789056683579098174,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 8,
+      "time_ns": 1789056683583626151,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 9,
+      "time_ns": 1789056683588521496,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 10,
+      "time_ns": 1789056683592991494,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 11,
+      "time_ns": 1789056683597314652,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 12,
+      "time_ns": 1789056683602101228,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 13,
+      "time_ns": 1789056683606568745,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 14,
+      "time_ns": 1789056683611108962,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 15,
+      "time_ns": 1789056683615142451,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 16,
+      "time_ns": 1789056683619838487,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 17,
+      "time_ns": 1789056683625045762,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 18,
+      "time_ns": 1789056683631785757,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 19,
+      "time_ns": 1789056683636503554,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 0,
+      "time_ns": 1789056683663781735,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 1,
+      "time_ns": 1789056683664946169,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 2,
+      "time_ns": 1789056683666364332,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 3,
+      "time_ns": 1789056683667472237,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 4,
+      "time_ns": 1789056683668420702,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 5,
+      "time_ns": 1789056683669473147,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 6,
+      "time_ns": 1789056683670554781,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 7,
+      "time_ns": 1789056683671477907,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 8,
+      "time_ns": 1789056683672846040,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 9,
+      "time_ns": 1789056683673853974,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 10,
+      "time_ns": 1789056683674824030,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 11,
+      "time_ns": 1789056683714803147,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 12,
+      "time_ns": 1789056683716175971,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 13,
+      "time_ns": 1789056683717583444,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 14,
+      "time_ns": 1789056683718497049,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 15,
+      "time_ns": 1789056683719404404,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 16,
+      "time_ns": 1789056683760152239,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 17,
+      "time_ns": 1789056683761920989,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 18,
+      "time_ns": 1789056683763169294,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 19,
+      "time_ns": 1789056683764310318,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    }
+  ],
+  "same-name-recreation": [
+    {
+      "target": "gateway-a",
+      "sample": 0,
+      "time_ns": 1789056710966643617,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 1,
+      "time_ns": 1789056711160027428,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 2,
+      "time_ns": 1789056711164960678,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 3,
+      "time_ns": 1789056711169577799,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 4,
+      "time_ns": 1789056711263556566,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 5,
+      "time_ns": 1789056711269060303,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 6,
+      "time_ns": 1789056711363821227,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 7,
+      "time_ns": 1789056711368268909,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 8,
+      "time_ns": 1789056711463363211,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 9,
+      "time_ns": 1789056711468310331,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 10,
+      "time_ns": 1789056711472418964,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 11,
+      "time_ns": 1789056711476469917,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 12,
+      "time_ns": 1789056711481685256,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 13,
+      "time_ns": 1789056711485848639,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 14,
+      "time_ns": 1789056711518052867,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 15,
+      "time_ns": 1789056711563487983,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 16,
+      "time_ns": 1789056711568192853,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 17,
+      "time_ns": 1789056711573046183,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 18,
+      "time_ns": 1789056711577215207,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 19,
+      "time_ns": 1789056711582487975,
+      "status": 200,
+      "pod": "backend-a-84fb9cd969-dkw44",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 0,
+      "time_ns": 1789056711586420569,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 1,
+      "time_ns": 1789056711587356885,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 2,
+      "time_ns": 1789056711588312531,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 3,
+      "time_ns": 1789056711589168158,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 4,
+      "time_ns": 1789056711589917414,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 5,
+      "time_ns": 1789056711590688221,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 6,
+      "time_ns": 1789056711591430118,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 7,
+      "time_ns": 1789056711592352045,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 8,
+      "time_ns": 1789056711593189811,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 9,
+      "time_ns": 1789056711593909908,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 10,
+      "time_ns": 1789056711594588525,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 11,
+      "time_ns": 1789056711595284283,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 12,
+      "time_ns": 1789056711595954550,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 13,
+      "time_ns": 1789056711596891616,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 14,
+      "time_ns": 1789056711597631413,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 15,
+      "time_ns": 1789056711660011098,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 16,
+      "time_ns": 1789056711661242574,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 17,
+      "time_ns": 1789056711662149710,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 18,
+      "time_ns": 1789056711663490614,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 19,
+      "time_ns": 1789056711664384951,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    }
+  ],
+  "route-backend-update": [
+    {
+      "target": "gateway-a",
+      "sample": 0,
+      "time_ns": 1789056718271199717,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 1,
+      "time_ns": 1789056718367690283,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 2,
+      "time_ns": 1789056718376629696,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 3,
+      "time_ns": 1789056718381381536,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 4,
+      "time_ns": 1789056718386008397,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 5,
+      "time_ns": 1789056718390268649,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 6,
+      "time_ns": 1789056718459816675,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 7,
+      "time_ns": 1789056718464624995,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 8,
+      "time_ns": 1789056718468715269,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 9,
+      "time_ns": 1789056718473451459,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 10,
+      "time_ns": 1789056718478170320,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 11,
+      "time_ns": 1789056718482716502,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 12,
+      "time_ns": 1789056718489112485,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 13,
+      "time_ns": 1789056718494379124,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 14,
+      "time_ns": 1789056718498707376,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 15,
+      "time_ns": 1789056718504519562,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 16,
+      "time_ns": 1789056718509135883,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 17,
+      "time_ns": 1789056718513805585,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 18,
+      "time_ns": 1789056718518469095,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-a",
+      "sample": 19,
+      "time_ns": 1789056718522485688,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 0,
+      "time_ns": 1789056718529249491,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 1,
+      "time_ns": 1789056718530380166,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 2,
+      "time_ns": 1789056718531992020,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 3,
+      "time_ns": 1789056718532928886,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 4,
+      "time_ns": 1789056718533959822,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 5,
+      "time_ns": 1789056718534755989,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 6,
+      "time_ns": 1789056718559993406,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 7,
+      "time_ns": 1789056718561279360,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 8,
+      "time_ns": 1789056718562579554,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 9,
+      "time_ns": 1789056718563661020,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 10,
+      "time_ns": 1789056718564604766,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 11,
+      "time_ns": 1789056718565646492,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 12,
+      "time_ns": 1789056718566630528,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 13,
+      "time_ns": 1789056718567634393,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 14,
+      "time_ns": 1789056718568649409,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 15,
+      "time_ns": 1789056718569695326,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 16,
+      "time_ns": 1789056718570635841,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 17,
+      "time_ns": 1789056718614707112,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 18,
+      "time_ns": 1789056718616036306,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    },
+    {
+      "target": "gateway-b",
+      "sample": 19,
+      "time_ns": 1789056718616997812,
+      "status": 200,
+      "pod": "backend-b-5b6d748dd6-r94mz",
+      "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+    }
+  ],
+  "surviving-gateway": {
+    "errors": [],
+    "rows": [
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056685361476348,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056685366148824,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056686822300347,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056686917365547,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056688462434921,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056688559880018,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056689967069120,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056690060160390,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056691519526637,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056691614909036,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056693063069300,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056693067849455,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056694523241523,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056694618498622,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056696062121529,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056696066567136,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056697521081260,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056697616842776,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056699215768590,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056699220105278,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056700670608112,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056700763502793,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056702117076776,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056702121085886,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056703565922433,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056703660126529,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056705019074570,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056705023034654,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056706367015734,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056706460225424,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056708417629570,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056708421404034,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056711263577566,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056711359738163,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 0,
+        "time_ns": 1789056712817696064,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      },
+      {
+        "target": "gateway-b",
+        "sample": 1,
+        "time_ns": 1789056712822391763,
+        "status": 200,
+        "pod": "backend-b-5b6d748dd6-r94mz",
+        "namespace": "sozu-provision-e2e-9d4ac4b0f08b"
+      }
+    ]
+  }
+}
