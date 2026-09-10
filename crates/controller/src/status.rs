@@ -766,18 +766,21 @@ mod tests {
 
     #[test]
     fn gateway_listener_acceptance_conditions_are_correct_and_stable() {
-        for (protocols, accepted, reason) in [
-            (vec!["HTTP"], "True", "Accepted"),
+        for (protocols, parameters, accepted, reason) in [
+            (vec!["HTTP"], false, "True", "Accepted"),
             (
                 vec!["example.com/unsupported"],
+                false,
                 "False",
                 "ListenersNotValid",
             ),
             (
                 vec!["HTTP", "example.com/unsupported"],
+                false,
                 "True",
                 "ListenersNotValid",
             ),
+            (vec!["HTTP"], true, "False", "InvalidParameters"),
         ] {
             let listeners: Vec<_> = protocols
                 .iter()
@@ -786,9 +789,12 @@ mod tests {
                     json!({ "name": format!("listener-{index}"), "protocol": protocol, "port": 80 })
                 })
                 .collect();
+            let infrastructure = parameters.then(|| json!({
+                "parametersRef": { "group": "invalid.io", "kind": "InvalidParameters", "name": "invalid" }
+            }));
             let mut current: Gateway = serde_json::from_value(json!({
                 "metadata": { "name": "gw", "namespace": "demo", "generation": 3 },
-                "spec": { "gatewayClassName": "sozu", "listeners": listeners }
+                "spec": { "gatewayClassName": "sozu", "listeners": listeners, "infrastructure": infrastructure }
             }))
             .unwrap();
             let class: GatewayClass = serde_json::from_value(json!({
@@ -810,15 +816,24 @@ mod tests {
             if reason == "ListenersNotValid" {
                 assert!(conditions[0].message.contains("example.com/unsupported"));
             }
+            if parameters {
+                assert_eq!(conditions[1].status, "False");
+                assert!(conditions[0]
+                    .message
+                    .contains("invalid.io/InvalidParameters demo/invalid"));
+                assert!(conditions[0].message.contains("not supported"));
+            }
 
             let mut listeners = build_listeners_status(gateway, &current, Some(3));
             for (listener, protocol) in listeners.iter().zip(&protocols) {
                 assert_eq!(
                     listener.conditions[0].reason,
-                    if *protocol == "HTTP" {
-                        "Accepted"
-                    } else {
+                    if *protocol != "HTTP" {
                         "UnsupportedProtocol"
+                    } else if parameters {
+                        "Invalid"
+                    } else {
+                        "Accepted"
                     }
                 );
             }

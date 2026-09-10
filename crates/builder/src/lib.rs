@@ -365,6 +365,11 @@ pub enum Problem {
     GatewaySpecUnsupported {
         field: &'static str,
     },
+    /// No infrastructure parameter kinds are supported. Reject the Gateway
+    /// instead of claiming to apply configuration that was never interpreted.
+    GatewayParametersUnsupported {
+        reference: String,
+    },
 }
 
 impl Problem {
@@ -396,6 +401,7 @@ impl Problem {
             Problem::FilterUnsupported { .. } => "FilterUnsupported",
             Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
             Problem::GatewaySpecUnsupported { .. } => "GatewaySpecUnsupported",
+            Problem::GatewayParametersUnsupported { .. } => "GatewayParametersUnsupported",
         }
     }
 
@@ -515,6 +521,11 @@ impl std::fmt::Display for Problem {
             Problem::GatewaySpecUnsupported { field } => write!(
                 f,
                 "Gateway field {field} is not honoured by this controller and is ignored"
+            ),
+            Problem::GatewayParametersUnsupported { reference } => write!(
+                f,
+                "Gateway infrastructure.parametersRef {reference} is not supported by this \
+                 controller; the Gateway cannot be configured"
             ),
         }
     }
