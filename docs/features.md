@@ -24,7 +24,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets. Each TLS entry must list `hosts` — a hostless entry is reported (`TlsEntryWithoutHosts`) and skipped |
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
-| TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
+| TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` when the leaf fingerprint changes; changing only SNI names reloads the certificate with a brief TLS availability gap |
 | TLS | HTTP → HTTPS redirect | ✅ | automatic for TLS-enabled Ingress hosts (301); opt out with `sozu.io/ssl-redirect: "false"` |
 | Routing | Backends = pod IPs from EndpointSlice | ✅ | never the Service ClusterIP; `addressType: IPv4`/`IPv6` only — an FQDN slice is reported (`FqdnEndpointsUnsupported`) and ignored |
 | Routing | Multi-port Service (match by port name) | ✅ | |

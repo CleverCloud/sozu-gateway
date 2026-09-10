@@ -57,6 +57,21 @@ paths retain deterministic ordering, without a promised specificity relation.
 
 ---
 
+## Certificate name updates
+
+Changing the SNI names of an existing certificate now reloads it on the affected
+listener. Sōzu 2.2.1 ignores `ReplaceCertificate` when the old and new leaf
+fingerprints match, so earlier controllers could report a successful update
+while workers kept serving the previous names.
+
+A name update uses `RemoveCertificate` followed by `AddCertificate`. New TLS
+connections that require this certificate can fail between those commands. If
+the add fails, that window lasts until a retry succeeds. Other certificates and
+listeners retain their usual lifecycle. Rotating to a different leaf fingerprint
+continues to use `ReplaceCertificate` without this removal gap.
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's
