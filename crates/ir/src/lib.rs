@@ -171,7 +171,9 @@ pub struct Certificate {
     pub chain: Vec<String>,
     /// Private key, PEM.
     pub key: String,
-    /// SNI names to serve this cert for (the Ingress TLS hosts).
+    /// SNI names to serve this cert for: explicit hostnames, or inferred CN/SAN
+    /// names for Gateway listeners without a hostname. An empty list in an
+    /// older shadow still delegates inference to Sōzu.
     pub names: Vec<String>,
 }
 

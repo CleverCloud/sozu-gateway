@@ -810,22 +810,11 @@ fn load_listener_certs(
             None => problems.push(Problem::SecretNotFound {
                 secret: cref.name.clone(),
             }),
-            Some(secret) => match extract_cert(secret) {
-                Ok((leaf, chain, key, fingerprint)) => {
-                    certificates.push(FingerprintedCert {
-                        fingerprint,
-                        cert: ir::Certificate {
-                            // The listener's own bind, not "the HTTPS bind":
-                            // the exposure table may carry several HTTPS ports,
-                            // and a certificate loaded onto the wrong one
-                            // serves nobody while reading as loaded.
-                            listener: bind,
-                            certificate: leaf,
-                            chain,
-                            key,
-                            names: names.clone(),
-                        },
-                    });
+            // Keep the listener's own bind: the same certificate may be
+            // exposed at several addresses with different name overrides.
+            Some(secret) => match extract_cert(secret, bind, names.clone()) {
+                Ok(cert) => {
+                    certificates.push(cert);
                     loaded = true;
                 }
                 Err(reason) => problems.push(Problem::InvalidCertificate {
