@@ -4,68 +4,65 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
-## Separate Gateway instances
+## Automatic Gateway instances
 
-`gatewayInstances` can assign a Gateway to its own controller, Sōzu Pods and
-Service. The default instance excludes those Gateways automatically and remains
-the only instance that handles Ingress and GatewayClass status. The empty list
-preserves the existing Deployment identity and selectors.
+Enable automatic provisioning once for the Helm release:
 
 ```yaml
-gatewayInstances:
-  - name: public
-    gateway:
-      namespace: apps
-      name: public
-    replicaCount: 2
-    service:
-      type: LoadBalancer
+gatewayProvisioning:
+  enabled: true
+  # Optional: otherwise inherit replicaCount and Service settings.
+  replicaCount: 2
+  service:
+    type: LoadBalancer
 ```
 
-Each entry provisions a separate Deployment, Service, ConfigMap, disruption
-budget and enabled metrics resources. Images, exposure, resource settings and
-the ServiceAccount are shared settings; each Pod has its own command socket
-and persisted shadow. `service` overrides and `replicaCount` are optional. Each
-provided Service field replaces that field from the release, including maps:
-`service.annotations: {}` explicitly removes inherited annotations.
-Use a LoadBalancer Service for a public Gateway address. ClusterIP Services can
-publish their internal addresses for in-cluster clients; a pending LoadBalancer
-never publishes its ClusterIP as an external address. A configured publish
-LoadBalancer or ClusterIP Service without an assigned address keeps the Gateway
-`Programmed=False` with `AddressNotAssigned`, even if the local listeners are
-ready. The same pending state applies while a valid configured publish Service
-is absent from the cache. Observed NodePort and ExternalName Services and
-deployments without a valid publish Service setting retain listener-based
-programming status; node address publication is not implemented.
+Every Gateway whose GatewayClass names this controller then gets a dedicated
+controller + Sōzu Deployment, Service and ConfigMap in the release namespace.
+Enabled disruption budgets and metrics resources are provisioned with it. Adding
+a Gateway requires no Helm change. The original Deployment and Service continue
+serving Ingress; they remain the only writers of Ingress and GatewayClass status.
+There is no list of Gateway names. The earlier, unreleased `gatewayInstances`
+setting is rejected so it cannot silently stop isolating configured Gateways.
 
-Instance Pods use `app.kubernetes.io/instance: <release>_gateway` together with
-`sozu.io/gateway-instance: <instance>`. User-managed NetworkPolicies and monitors
-that select only the default release label need selectors for these Pods too.
-Route status parents owned by this controller are sorted consistently across
-instances, which can cause a one-time reorder when upgrading.
+Provisioning is disabled by default to preserve existing addresses and routing
+on upgrade. Enabling it moves all owned Gateways to new Services; disabling it
+moves their routes back to the shared instance. Neither migration is atomic.
+Allow for LoadBalancer provisioning, watch `Programmed` and update DNS or clients
+before relying on the new addresses. Private `ClusterIP` Services publish their
+internal addresses. Pending LoadBalancers never publish their ClusterIP as an
+external address. NodePort address publication is not implemented.
 
-Creating, removing or retargeting an entry moves the Gateway to a different
-address. Allow for LoadBalancer provisioning and update DNS or clients; this
-handoff is not atomic. Until the new address is assigned, existing status
-addresses remain visible: ownership scope alone cannot identify which prior
-Service published them. Consumers must check `Programmed` during migration.
-The assigned address replaces the previous list. Gateway and instance names must be unique within the
-release. Overlong names fail rendering instead of being truncated into another
-instance's resource or selector. Service names also reserve the `-metrics`
-suffix, so an instance cannot claim another instance's metrics Service.
+The provisioner runs separately with one replica and a `Recreate` update strategy.
+Its write permissions cover infrastructure only in the release namespace;
+workers retain their existing routing permissions and cannot create workloads.
+Each worker still keeps its own Kubernetes caches and programs its co-located
+Sōzu through the local command socket. This change automates infrastructure; a
+shared routing controller and remote configuration transport are separate work.
 
-Outside Helm, `--gateway-scope namespace/name` owns one Gateway and ignores
-Ingress; the default controller must receive matching `--exclude-gateway`
-arguments. Keep that ownership partition disjoint. All instances may use the
-same `controllerName`: route status retains other instances' parent entries,
-including their complete references, preserves the relative order of entries
-from other controllers, and retries conflicting updates against
-the latest resourceVersion. A route losing its last local parent also has its
-stale status removed. The shadow format is unchanged.
+Instances inherit images, resources, exposure, scheduling, drain, TLS hardening,
+timeouts and metrics settings from the release. `gatewayProvisioning.replicaCount`
+and `gatewayProvisioning.service` override the generated instances only. An
+explicit Service field replaces that field, including maps: `annotations: {}`
+clears inherited annotations. Listener ports still use the chart's `exposure`
+table; automatic provisioning does not add support for arbitrary HTTP binds.
 
-When using the Helm topology with Ingress status RBAC disabled, the controller
-still publishes its Service for Gateway addresses and disables Ingress status
-writes explicitly. The standalone equivalent is `--ingress-status-writes=false`.
+Names and ownership distinguish the installation UID and Gateway UID. Recreating
+a Gateway under the same namespace/name creates a new instance; an old worker
+cannot claim the replacement. The provisioner reconciles on Gateway/Class changes
+and retries every five seconds, checking current API identity before updating or
+removing resources. It refuses to adopt a foreign object with a colliding name.
+Gateway deletion or loss of class ownership removes that Gateway's generated
+resources. The Helm-managed template ConfigMap owns them within the release
+namespace, so uninstalling the release also triggers Kubernetes garbage
+collection. An absent provisioner delays Gateway cleanup until it returns.
+
+Each Pod has its own command socket and persisted shadow. Route status updates
+preserve the full parent references and entries from other instances. Service
+addresses are published only by the worker that owns the corresponding Gateway.
+The shadow format is unchanged. Existing NetworkPolicies and monitors selecting
+only the default Deployment's labels need selectors for generated Pods too;
+`sozu.io/installation-uid` and `sozu.io/gateway-uid` identify those instances.
 
 ---
 

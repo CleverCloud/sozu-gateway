@@ -1,0 +1,85 @@
+{{- define "sozu-gateway.gateway-provisioner-rbac" -}}
+{{- if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+rules:
+  # Infrastructure ownership needs Gateway identity and class membership.
+  # Routing objects and TLS Secrets remain available only to route controllers.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "sozu-gateway.provisionerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sozu-gateway.provisionerName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+rules:
+  # All generated workloads live beside the installation anchor. Gateway
+  # namespaces never acquire workloads or write grants from this provisioner.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Keep cleanup possible after ServiceMonitor creation is disabled. A missing
+  # CRD is tolerated by the provisioner; a forbidden read is not its absence.
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors"]
+    verbs: ["get", "list", "delete"]
+  {{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors"]
+    verbs: ["create", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sozu-gateway.provisionerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sozu-gateway.provisionerName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end -}}
+{{ include "sozu-gateway.gateway-provisioner-rbac" . }}

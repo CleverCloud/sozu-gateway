@@ -76,7 +76,7 @@ The controller is configured entirely through the Helm chart
 | Value | Default | Description |
 | ----- | ------- | ----------- |
 | `replicaCount` | `2` | Data-plane replicas. `topologySpreadConstraints` prefers one per node, and per zone where nodes are labelled |
-| `gatewayInstances` | `[]` | Separate Deployments and Services for named Gateways, automatically excluded by the default controller. [Configuration and migration](docs/UPGRADING.md#separate-gateway-instances) |
+| `gatewayProvisioning.enabled` | `false` | Automatically create dedicated Deployments and Services for owned Gateways; keep the default instance for Ingress. [Configuration and migration](docs/UPGRADING.md#automatic-gateway-instances) |
 | `ingressClass.name` | `sozu` | Name of the created `IngressClass` (and `GatewayClass`) |
 | `ingressClass.default` | `false` | Make it the cluster's default `IngressClass` |
 | `service.type` | `LoadBalancer` | How the proxy is exposed |

@@ -250,83 +250,77 @@ number the user never wrote.
 {{- end -}}
 {{- end -}}
 
-{{/* An explicit list provisions independent Pods and addresses. Reject names
-     instead of truncating them into another instance's selectors or resources. */}}
-{{- define "sozu-gateway.validateGatewayInstances" -}}
-{{- $names := dict -}}
-{{- $gateways := dict -}}
-{{- $base := include "sozu-gateway.baseFullname" . -}}
-{{- $services := dict $base "default" (printf "%s-metrics" $base) "default metrics" -}}
-{{- $instances := .Values.gatewayInstances | default list -}}
-{{- if not (kindIs "slice" $instances) -}}
-  {{- fail "gatewayInstances must be a list" -}}
+{{/* Automatic provisioning is opt-in so an upgrade does not move existing
+     Gateway addresses. Old unreleased static entries must not disappear silently. */}}
+{{- define "sozu-gateway.gatewayProvisioningEnabled" -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- if hasKey $settings "enabled" -}}{{ $settings.enabled }}{{- else -}}false{{- end -}}
 {{- end -}}
-{{- $label := "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" -}}
-{{- range $i, $instance := $instances -}}
-  {{- if not (kindIs "map" $instance) -}}
-    {{- fail (printf "gatewayInstances[%d] must be a mapping" $i) -}}
+
+{{- define "sozu-gateway.validateGatewayProvisioning" -}}
+{{- if .Values.gatewayInstances -}}
+  {{- fail "gatewayInstances has been replaced by gatewayProvisioning.enabled: automatic provisioning creates an instance for each managed Gateway; migrate existing addresses before enabling it" -}}
+{{- end -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- if not (kindIs "map" $settings) -}}{{- fail "gatewayProvisioning must be a mapping" -}}{{- end -}}
+{{- if and (hasKey $settings "enabled") (not (kindIs "bool" $settings.enabled)) -}}
+  {{- fail "gatewayProvisioning.enabled must be a boolean" -}}
+{{- end -}}
+{{- if and (hasKey $settings "service") (not (kindIs "map" $settings.service)) -}}
+  {{- fail "gatewayProvisioning.service must be a mapping" -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $settings.replicaCount) -}}
+  {{- if or (not (regexMatch "^[1-9][0-9]*$" (printf "%v" $settings.replicaCount))) (gt (int $settings.replicaCount) 2147483647) -}}
+    {{- fail "gatewayProvisioning.replicaCount must be a positive integer or null" -}}
   {{- end -}}
-  {{- $name := required (printf "gatewayInstances[%d].name is required" $i) $instance.name -}}
-  {{- if or (not (kindIs "string" $name)) (not (regexMatch $label $name)) (gt (len $name) 63) -}}
-    {{- fail (printf "gatewayInstances[%d].name must be a DNS label" $i) -}}
-  {{- end -}}
-  {{- if hasKey $names $name -}}{{- fail (printf "gatewayInstances repeats instance name %q" $name) -}}{{- end -}}
-  {{- $_ := set $names $name true -}}
-  {{- $full := printf "%s-%s" (include "sozu-gateway.baseFullname" $) $name -}}
-  {{- if gt (len $full) 55 -}}
-    {{- fail (printf "gatewayInstances name %q is too long with this release: use a shorter name or fullnameOverride (the -metrics suffix must fit 63 characters)" $name) -}}
-  {{- end -}}
-  {{- range $serviceName := list $full (printf "%s-metrics" $full) -}}
-    {{- if hasKey $services $serviceName -}}
-      {{- fail (printf "gatewayInstances name %q collides with Service %s (%s)" $name $serviceName (get $services $serviceName)) -}}
-    {{- end -}}
-    {{- $_ := set $services $serviceName $name -}}
-  {{- end -}}
-  {{- $gateway := required (printf "gatewayInstances[%d].gateway is required" $i) $instance.gateway -}}
-  {{- if not (kindIs "map" $gateway) -}}{{- fail "gatewayInstances[].gateway must be a mapping" -}}{{- end -}}
-  {{- $ns := required "gatewayInstances[].gateway.namespace is required" $gateway.namespace -}}
-  {{- $gwName := required "gatewayInstances[].gateway.name is required" $gateway.name -}}
-  {{- if or (not (kindIs "string" $ns)) (not (regexMatch $label $ns)) (gt (len $ns) 63) -}}
-    {{- fail "gatewayInstances[].gateway.namespace must be a DNS label" -}}
-  {{- end -}}
-  {{- if or (not (kindIs "string" $gwName)) (gt (len $gwName) 253) -}}{{- fail "gatewayInstances[].gateway.name must be a DNS subdomain" -}}{{- end -}}
-  {{- range $part := splitList "." $gwName -}}
-    {{- if or (not (regexMatch $label $part)) (gt (len $part) 63) -}}{{- fail "gatewayInstances[].gateway.name must be a DNS subdomain" -}}{{- end -}}
-  {{- end -}}
-  {{- $key := printf "%s/%s" $ns $gwName -}}
-  {{- if hasKey $gateways $key -}}{{- fail (printf "gatewayInstances assigns Gateway %s more than once" $key) -}}{{- end -}}
-  {{- $_ := set $gateways $key true -}}
-  {{- if and (hasKey $instance "service") (not (kindIs "map" $instance.service)) -}}{{- fail "gatewayInstances[].service must be a mapping" -}}{{- end -}}
-  {{- if hasKey $instance "replicaCount" -}}
-    {{- if or (not (regexMatch "^[1-9][0-9]*$" (printf "%v" $instance.replicaCount))) (gt (int $instance.replicaCount) 2147483647) -}}
-      {{- fail "gatewayInstances[].replicaCount must be a positive integer" -}}
-    {{- end -}}
+{{- end -}}
+{{- if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" -}}
+  {{- if gt (len (include "sozu-gateway.baseFullname" .)) 46 -}}
+    {{- fail "automatic Gateway provisioning requires fullnameOverride shorter than 47 characters so its template and metrics resource names fit Kubernetes limits" -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Render one resource template for the default instance, then each explicit
-     Gateway instance. Only Service settings and replica count may differ;
-     all use the release's exposure, image and shared ServiceAccount. */}}
-{{- define "sozu-gateway.renderInstances" -}}
-{{- $root := .root -}}
-{{- $template := .template -}}
-{{- include "sozu-gateway.validateGatewayInstances" $root -}}
-{{- include $template $root -}}
-{{- range $instance := $root.Values.gatewayInstances | default list -}}
-  {{- $values := deepCopy $root.Values -}}
-  {{- if hasKey $instance "service" -}}
-    {{- $service := deepCopy $root.Values.service -}}
-    {{- range $key, $value := $instance.service -}}
-      {{- $_ := set $service $key $value -}}
-    {{- end -}}
-    {{- $_ := set $values "service" $service -}}
-  {{- end -}}
-  {{- if hasKey $instance "replicaCount" -}}{{- $_ := set $values "replicaCount" $instance.replicaCount -}}{{- end -}}
-  {{- $context := deepCopy $root -}}
-  {{- $_ := set $context "gatewayInstance" $instance -}}
-  {{- $_ := set $context "Values" $values -}}
-  {{- $rendered := include $template $context -}}
-  {{- if trim $rendered -}}{{ printf "\n---\n%s" $rendered }}{{- end -}}
+{{/* Helm owns the existing default instance. Gateway instances are created at
+     runtime from the template below, without a predeclared list of Gateways. */}}
+{{- define "sozu-gateway.renderDefault" -}}
+{{- include "sozu-gateway.validateGatewayProvisioning" .root -}}
+{{- include .template .root -}}
 {{- end -}}
+
+{{- define "sozu-gateway.gatewayTemplateName" -}}
+{{ include "sozu-gateway.baseFullname" . }}-gateway-template
+{{- end -}}
+
+{{- define "sozu-gateway.provisionerName" -}}
+{{ include "sozu-gateway.baseFullname" . }}-provisioner
+{{- end -}}
+
+{{/* Typed Kubernetes resource templates retain every release-level setting.
+     Names and selectors here are placeholders: the provisioner replaces them
+     with the installation and Gateway identities before creating resources. */}}
+{{- define "sozu-gateway.gatewayTemplate" -}}
+{{- $values := deepCopy .Values -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- $service := deepCopy .Values.service -}}
+{{- range $key, $value := $settings.service | default dict -}}
+  {{- $_ := set $service $key $value -}}
+{{- end -}}
+{{- $_ := set $values "service" $service -}}
+{{- if not (kindIs "invalid" $settings.replicaCount) -}}
+  {{- $_ := set $values "replicaCount" $settings.replicaCount -}}
+{{- end -}}
+{{- $context := deepCopy . -}}
+{{- $_ := set $context "Values" $values -}}
+{{- $_ := set $context "gatewayInstance" (dict "name" "template" "gateway" (dict "namespace" "template" "name" "template")) -}}
+{{- $config := dict "namespace" .Release.Namespace "template_config_map" (include "sozu-gateway.gatewayTemplateName" .) -}}
+{{- range $key, $template := dict "deployment" "deployment" "service" "service" "config_map" "configmap" "pod_disruption_budget" "pdb" "metrics_service" "metrics-service" "service_monitor" "servicemonitor" -}}
+  {{- $rendered := include (printf "sozu-gateway.%s" $template) $context -}}
+  {{- if trim $rendered -}}
+    {{- $resource := fromYaml $rendered -}}
+    {{- if hasKey $resource "Error" -}}{{- fail (get $resource "Error") -}}{{- end -}}
+    {{- $_ := set $config $key $resource -}}
+  {{- end -}}
+{{- end -}}
+{{ toJson $config }}
 {{- end -}}

@@ -47,6 +47,9 @@ impl fmt::Display for GatewayId {
 
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct GatewayScope {
+    /// Serve Ingress only; Gateway instances are provisioned independently.
+    #[arg(long, env = "SOZU_GW_INGRESS_ONLY", conflicts_with_all = ["gateway_scope", "exclude_gateway"])]
+    pub ingress_only: bool,
     /// Own only this Gateway (namespace/name), excluding Ingress and GatewayClass status.
     #[arg(
         long,
@@ -75,6 +78,9 @@ impl GatewayScope {
     }
 
     pub fn owns_gateway(&self, namespace: &str, name: &str) -> bool {
+        if self.ingress_only {
+            return false;
+        }
         let matches = |gateway: &GatewayId| gateway.namespace == namespace && gateway.name == name;
         match &self.gateway_scope {
             Some(gateway) => matches(gateway),
@@ -119,6 +125,32 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn ingress_only_never_claims_gateway_parents() {
+        let scope = GatewayScope {
+            ingress_only: true,
+            ..Default::default()
+        };
+        assert!(
+            scope.is_default(),
+            "the default instance still writes GatewayClass status"
+        );
+        assert!(!scope.owns_gateway("demo", "gw"));
+        assert!(!scope.owns_parent("demo", None, None, None, "gw"));
+        let mut inputs = Inputs::default();
+        inputs.ingresses.push(Arc::new(Default::default()));
+        inputs.gateways.push(Arc::new(
+            serde_json::from_value(json!({
+                "metadata": {"namespace": "demo", "name": "gw"},
+                "spec": {"gatewayClassName": "sozu", "listeners": []}
+            }))
+            .unwrap(),
+        ));
+        scope.filter_inputs(&mut inputs);
+        assert_eq!(inputs.ingresses.len(), 1);
+        assert!(inputs.gateways.is_empty());
+    }
+
+    #[test]
     fn gateway_ids_reject_ambiguous_or_invalid_names() {
         for name in ["namespace/name", "demo/my.gateway", "ns0/1"] {
             assert!(name.parse::<GatewayId>().is_ok());
@@ -134,6 +166,7 @@ mod tests {
         let scope = GatewayScope {
             gateway_scope: None,
             exclude_gateway: vec!["ns/gw".parse().unwrap(); 2],
+            ..Default::default()
         };
         assert!(scope.validate().is_err());
     }

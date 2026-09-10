@@ -1,0 +1,142 @@
+{{- define "sozu-gateway.gateway-provisioner" -}}
+{{- include "sozu-gateway.validateGatewayProvisioning" . -}}
+{{- if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sozu-gateway.gatewayTemplateName" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+data:
+  template.json: |
+    {{- include "sozu-gateway.gatewayTemplate" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sozu-gateway.provisionerName" . }}
+  labels:
+    {{- include "sozu-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # A single owner reconciles generated infrastructure. A configuration update
+  # replaces that owner without running two template revisions concurrently.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
+      app.kubernetes.io/instance: {{ printf "%s_manager" .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
+        app.kubernetes.io/instance: {{ printf "%s_manager" .Release.Name }}
+      annotations:
+        checksum/template: {{ include "sozu-gateway.gatewayTemplate" . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "sozu-gateway.provisionerName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.runAsUser }}
+        runAsGroup: {{ .Values.runAsUser }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: provisioner
+          {{- if .Values.image.controller.digest }}
+          image: "{{ .Values.image.controller.repository }}@{{ .Values.image.controller.digest }}"
+          {{- else }}
+          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: SOZU_GW_PROVISION_TEMPLATE
+              value: /etc/sozu-gateway/template.json
+            - name: SOZU_GW_CONTROLLER
+              value: {{ .Values.ingressClass.controllerValue | quote }}
+            - name: SOZU_GW_DEBOUNCE_MS
+              value: {{ .Values.controller.debounceMs | quote }}
+            - name: SOZU_GW_HEALTH_LISTEN
+              value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
+            {{- if .Values.controller.watchTimeoutSecs }}
+            - name: SOZU_GW_WATCH_TIMEOUT_SECS
+              value: {{ .Values.controller.watchTimeoutSecs | quote }}
+            {{- end }}
+            {{- if .Values.controller.kubeReadTimeoutSecs }}
+            - name: SOZU_GW_KUBE_READ_TIMEOUT_SECS
+              value: {{ .Values.controller.kubeReadTimeoutSecs | quote }}
+            {{- end }}
+            - name: RUST_LOG
+              value: {{ .Values.controller.logLevel | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.controller.healthPort | default 8081 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: gateway-template
+              mountPath: /etc/sozu-gateway
+              readOnly: true
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources.controller | nindent 12 }}
+      volumes:
+        - name: gateway-template
+          configMap:
+            name: {{ include "sozu-gateway.gatewayTemplateName" . }}
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end -}}
+{{ include "sozu-gateway.gateway-provisioner" . }}

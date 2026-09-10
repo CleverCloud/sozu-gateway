@@ -139,13 +139,9 @@ spec:
             {{- if .gatewayInstance }}
             - name: SOZU_GW_GATEWAY_SCOPE
               value: {{ printf "%s/%s" .gatewayInstance.gateway.namespace .gatewayInstance.gateway.name | quote }}
-            {{- else if .Values.gatewayInstances }}
-            {{- $excluded := list }}
-            {{- range .Values.gatewayInstances }}
-            {{- $excluded = append $excluded (printf "%s/%s" .gateway.namespace .gateway.name) }}
-            {{- end }}
-            - name: SOZU_GW_EXCLUDE_GATEWAY
-              value: {{ join "," (sortAlpha $excluded) | quote }}
+            {{- else if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" }}
+            - name: SOZU_GW_INGRESS_ONLY
+              value: "true"
             {{- end }}
             # Ports this gateway exposes: what a Gateway listener may declare,
             # and where Sōzu listens for it. Rendered from `exposure`.
@@ -169,13 +165,13 @@ spec:
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"
             {{- end }}
-            {{- if or .Values.rbac.allowStatusWrites (and .Values.rbac.allowGatewayStatusWrites (or .gatewayInstance .Values.gatewayInstances)) }}
+            {{- if or .Values.rbac.allowStatusWrites (and .Values.rbac.allowGatewayStatusWrites .gatewayInstance) }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'
             # .status (needs the ingresses/status grant gated by the same flag).
             - name: SOZU_GW_PUBLISH_SERVICE
               value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
             {{- end }}
-            {{- if and (or .gatewayInstance .Values.gatewayInstances) (not .Values.rbac.allowStatusWrites) }}
+            {{- if and .gatewayInstance (not .Values.rbac.allowStatusWrites) }}
             - name: SOZU_GW_INGRESS_STATUS_WRITES
               value: "false"
             {{- end }}
@@ -285,4 +281,4 @@ spec:
       {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.deployment") }}
+{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.deployment") }}

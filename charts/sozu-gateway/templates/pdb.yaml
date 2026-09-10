@@ -24,4 +24,4 @@ spec:
 {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.pdb") }}
+{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.pdb") }}

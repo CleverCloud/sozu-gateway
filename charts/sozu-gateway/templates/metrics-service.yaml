@@ -23,4 +23,4 @@ spec:
 {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.metrics-service") }}
+{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.metrics-service") }}
