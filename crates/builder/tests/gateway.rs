@@ -131,6 +131,8 @@ fn http_route_maps_to_ir() {
     assert_eq!(out.ir.frontends.len(), 1, "one HTTP frontend");
     assert!(!out.ir.frontends[0].tls);
     assert!(out.gateway_classes[0].accepted);
+    assert!(out.gateways[0].accepted);
+    assert_eq!(out.gateways[0].accepted_reason, "Accepted");
     assert!(out.gateways[0].programmed);
     assert_eq!(out.routes.len(), 1);
     assert!(out.routes[0].parents[0].resolved_refs);
@@ -167,6 +169,25 @@ fn https_listener_loads_cert() {
     assert_eq!(out.ir.frontends.len(), 1);
     assert!(out.ir.frontends[0].tls, "HTTPS frontend");
     assert!(out.routes[0].parents[0].resolved_refs);
+}
+
+#[test]
+fn missing_listener_certificate_preserves_gateway_acceptance() {
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![https_gateway()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let gateway = &out.gateways[0];
+    assert!(gateway.accepted);
+    assert_eq!(gateway.accepted_reason, "Accepted");
+    assert!(!gateway.programmed);
+    let listener = &gateway.listeners[0];
+    assert!(listener.accepted);
+    assert!(!listener.programmed);
+    assert!(!listener.resolved_refs);
+    assert_eq!(listener.resolved_refs_reason, "InvalidCertificateRef");
 }
 
 #[test]
@@ -1363,6 +1384,8 @@ fn listener_port_mismatch_is_reported_and_not_programmed() {
     let out = build(&BuildConfig::default(), &inputs);
 
     assert!(out.ir.frontends.is_empty(), "no traffic on the wrong port");
+    assert!(!out.gateways[0].accepted);
+    assert_eq!(out.gateways[0].accepted_reason, "ListenersNotValid");
     assert!(out.gateways[0].problems.contains(&Problem::PortNotExposed {
         listener: "http-alt".to_string(),
         declared: 8080,
@@ -1488,6 +1511,62 @@ fn standard_gateway_ports_are_accepted_on_unprivileged_binds() {
     assert_eq!(out.ir.frontends.len(), 2, "HTTP + HTTPS frontends emitted");
     assert_eq!(out.ir.certificates.len(), 1, "listener cert loaded");
     assert!(out.routes[0].parents[0].accepted);
+}
+
+#[test]
+fn gateway_without_accepted_listeners_is_rejected() {
+    let mut gw = http_gateway();
+    gw.spec.listeners[0].protocol = "example.com/unsupported".to_string();
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let gateway = &out.gateways[0];
+
+    assert!(!gateway.accepted);
+    assert_eq!(gateway.accepted_reason, "ListenersNotValid");
+    assert!(!gateway.programmed);
+    let listener = &gateway.listeners[0];
+    assert!(!listener.accepted);
+    assert_eq!(listener.accepted_reason, "UnsupportedProtocol");
+    assert!(listener.supported_kinds.is_empty());
+    assert_eq!(listener.attached_routes, 0);
+}
+
+#[test]
+fn gateway_keeps_valid_listeners_when_another_protocol_is_unsupported() {
+    let mut gw = http_gateway();
+    let mut invalid = gw.spec.listeners[0].clone();
+    invalid.name = "invalid".to_string();
+    invalid.protocol = "example.com/unsupported".to_string();
+    gw.spec.listeners.push(invalid);
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![gw]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let gateway = &out.gateways[0];
+
+    assert!(gateway.accepted);
+    assert_eq!(gateway.accepted_reason, "ListenersNotValid");
+    assert!(gateway.programmed);
+    assert!(gateway.listeners[0].accepted);
+    assert_eq!(gateway.listeners[0].accepted_reason, "Accepted");
+    assert!(!gateway.listeners[1].accepted);
+    assert_eq!(gateway.listeners[1].accepted_reason, "UnsupportedProtocol");
+    assert_eq!(gateway.listeners[0].attached_routes, 1);
+    assert_eq!(gateway.listeners[1].attached_routes, 0);
+    assert_eq!(
+        out.ir.frontends.len(),
+        1,
+        "the valid listener still serves its route"
+    );
 }
 
 #[test]

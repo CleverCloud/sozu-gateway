@@ -308,28 +308,22 @@ fn build_listeners_status(
         .collect()
 }
 
-async fn write_gateway(
-    client: &Client,
-    gw: &GatewayResult,
-    addresses: &[GatewayStatusAddresses],
-) -> Result<(), kube::Error> {
-    let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
-    let current = api.get(&gw.name).await?;
+fn build_gateway_conditions(gw: &GatewayResult, current: &Gateway) -> Vec<Condition> {
     let cur = current
         .status
         .as_ref()
         .and_then(|s| s.conditions.as_deref());
     let all_problems: Vec<&Problem> = gw.problems.iter().collect();
-    let desired = build_conditions(
+    build_conditions(
         &[
             Desired {
                 type_: "Accepted",
                 status: gw.accepted,
-                reason: if gw.accepted { "Accepted" } else { "Invalid" },
-                message: if gw.accepted {
+                reason: gw.accepted_reason,
+                message: if gw.accepted_reason == "Accepted" {
                     "Accepted by sozu-gateway".to_string()
                 } else {
-                    problems_message(&all_problems, "Gateway rejected")
+                    problems_message(&all_problems, "One or more listeners are invalid")
                 },
             },
             Desired {
@@ -349,7 +343,21 @@ async fn write_gateway(
         ],
         cur,
         current.metadata.generation,
-    );
+    )
+}
+
+async fn write_gateway(
+    client: &Client,
+    gw: &GatewayResult,
+    addresses: &[GatewayStatusAddresses],
+) -> Result<(), kube::Error> {
+    let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
+    let current = api.get(&gw.name).await?;
+    let cur = current
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref());
+    let desired = build_gateway_conditions(gw, &current);
     let listeners = build_listeners_status(gw, &current, current.metadata.generation);
     // Publish the LoadBalancer address into the Gateway's status (what
     // external-dns's gateway-httproute source reads). Skipped when there is no
@@ -754,6 +762,103 @@ mod tests {
         );
         assert_eq!(parents.len(), 2);
         assert!(parents.contains(&theirs));
+    }
+
+    #[test]
+    fn gateway_listener_acceptance_conditions_are_correct_and_stable() {
+        for (protocols, accepted, reason) in [
+            (vec!["HTTP"], "True", "Accepted"),
+            (
+                vec!["example.com/unsupported"],
+                "False",
+                "ListenersNotValid",
+            ),
+            (
+                vec!["HTTP", "example.com/unsupported"],
+                "True",
+                "ListenersNotValid",
+            ),
+        ] {
+            let listeners: Vec<_> = protocols
+                .iter()
+                .enumerate()
+                .map(|(index, protocol)| {
+                    json!({ "name": format!("listener-{index}"), "protocol": protocol, "port": 80 })
+                })
+                .collect();
+            let mut current: Gateway = serde_json::from_value(json!({
+                "metadata": { "name": "gw", "namespace": "demo", "generation": 3 },
+                "spec": { "gatewayClassName": "sozu", "listeners": listeners }
+            }))
+            .unwrap();
+            let class: GatewayClass = serde_json::from_value(json!({
+                "metadata": { "name": "sozu" },
+                "spec": { "controllerName": "sozu.io/gateway-controller" }
+            }))
+            .unwrap();
+            let inputs = sozu_gw_builder::Inputs {
+                gateway_classes: vec![std::sync::Arc::new(class)],
+                gateways: vec![std::sync::Arc::new(current.clone())],
+                ..Default::default()
+            };
+            let result = sozu_gw_builder::build(&sozu_gw_builder::BuildConfig::default(), &inputs);
+            let gateway = &result.gateways[0];
+            let mut conditions = build_gateway_conditions(gateway, &current);
+            assert_eq!(conditions[0].status, accepted);
+            assert_eq!(conditions[0].reason, reason);
+            assert_eq!(conditions[0].observed_generation, Some(3));
+            if reason == "ListenersNotValid" {
+                assert!(conditions[0].message.contains("example.com/unsupported"));
+            }
+
+            let mut listeners = build_listeners_status(gateway, &current, Some(3));
+            for (listener, protocol) in listeners.iter().zip(&protocols) {
+                assert_eq!(
+                    listener.conditions[0].reason,
+                    if *protocol == "HTTP" {
+                        "Accepted"
+                    } else {
+                        "UnsupportedProtocol"
+                    }
+                );
+            }
+
+            // Existing timestamps make accidental renewal visible even when
+            // two reconciles run within the same clock tick.
+            let previous = Time("2000-01-01T00:00:00Z".parse().unwrap());
+            for condition in &mut conditions {
+                condition.last_transition_time = previous.clone();
+            }
+            for listener in &mut listeners {
+                for condition in &mut listener.conditions {
+                    condition.last_transition_time = previous.clone();
+                }
+            }
+            current.status = Some(
+                serde_json::from_value(json!({
+                    "conditions": conditions,
+                    "listeners": listeners
+                }))
+                .unwrap(),
+            );
+            let rebuilt = build_gateway_conditions(gateway, &current);
+            assert!(
+                conditions_equal(&conditions, &rebuilt),
+                "reconciliation must be a no-op"
+            );
+            assert_eq!(
+                serde_json::to_value(&listeners).unwrap(),
+                serde_json::to_value(build_listeners_status(gateway, &current, Some(3))).unwrap()
+            );
+
+            current.metadata.generation = Some(4);
+            let updated = build_gateway_conditions(gateway, &current);
+            assert!(!conditions_equal(&conditions, &updated));
+            for condition in updated {
+                assert_eq!(condition.observed_generation, Some(4));
+                assert_eq!(condition.last_transition_time, previous);
+            }
+        }
     }
 
     fn features(names: &[&str]) -> Vec<GatewayClassStatusSupportedFeatures> {
