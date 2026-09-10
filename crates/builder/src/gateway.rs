@@ -619,7 +619,20 @@ pub(crate) fn build_gateway(
     // the routes bound to it (`Gateway.status.listeners[].attachedRoutes`).
     let mut routes = Vec::new();
     let mut attached: BTreeMap<(String, String, String), i32> = BTreeMap::new();
-    for route in &inputs.http_routes {
+    // Gateway API breaks otherwise identical matches by oldest creation time,
+    // then the alphabetical namespace/name, then the first rule in that route.
+    // Keep this emission order through collision resolution: backend identity
+    // (including a rejection backend) must never determine the winning route.
+    let mut http_routes: Vec<_> = inputs.http_routes.iter().collect();
+    http_routes.sort_by_cached_key(|route| {
+        let (namespace, name) = meta_nn(&route.metadata.namespace, &route.metadata.name);
+        (
+            route.metadata.creation_timestamp.is_none(),
+            route.metadata.creation_timestamp.clone(),
+            format!("{namespace}/{name}"),
+        )
+    });
+    for route in http_routes {
         let (rns, rname) = meta_nn(&route.metadata.namespace, &route.metadata.name);
         let mut parents = Vec::new();
 
@@ -1093,7 +1106,7 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
         Some(HttpRouteRulesMatchesPathType::Exact) => ir::PathMatch::Exact(value),
         Some(HttpRouteRulesMatchesPathType::RegularExpression) => ir::PathMatch::Regex(value),
         // PathPrefix (the default) or unset.
-        _ => ir::PathMatch::Prefix(value),
+        _ => ir::PathMatch::Prefix(crate::canonical_prefix(&value)),
     }
 }
 
