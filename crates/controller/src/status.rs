@@ -539,7 +539,12 @@ fn route_parents(
                     status: parent.accepted,
                     reason: parent.accepted_reason,
                     message: if parent.accepted {
-                        "Route accepted by sozu-gateway".to_string()
+                        let conflicts: Vec<_> = parent_problems
+                            .iter()
+                            .copied()
+                            .filter(|problem| matches!(problem, Problem::L4RouteConflict { .. }))
+                            .collect();
+                        problems_message(&conflicts, "Route accepted by sozu-gateway")
                     } else {
                         problems_message(&parent_problems, "Route does not bind to this parent")
                     },
@@ -735,6 +740,113 @@ mod tests {
         let first = route_parents(controller, &r, &[], Some(3));
         let second = route_parents(controller, &r, &first, Some(3));
         assert_eq!(first, second, "a second pass must be a no-op");
+    }
+
+    #[test]
+    fn l4_conflict_is_reported_only_on_the_affected_parent() {
+        for (kind, protocol) in [(RouteKind::TcpRoute, "TCP"), (RouteKind::UdpRoute, "UDP")] {
+            let mut competing = parent(Some("shared"), true);
+            competing.problems.push(Problem::L4RouteConflict {
+                port: 5432,
+                protocol,
+                winner: "other/older".into(),
+            });
+            let mut r = route(vec![competing, parent(Some("dedicated"), true)]);
+            r.kind = kind;
+            let parents = route_parents("sozu.io/gateway-controller", &r, &[], Some(3));
+            let accepted = &parents[0].conditions[0];
+            assert_eq!(accepted.status, "True");
+            assert_eq!(accepted.reason, "Accepted");
+            assert!(accepted.message.contains(&format!("{protocol} port 5432")));
+            assert!(accepted.message.contains("other/older"));
+            assert!(accepted.message.contains("does not receive traffic"));
+            for parent in &parents {
+                let refs = &parent.conditions[1];
+                assert_eq!(refs.status, "True");
+                assert_eq!(refs.reason, "ResolvedRefs");
+                assert_eq!(refs.message, "All backend references resolved");
+            }
+            assert_eq!(
+                parents[1].conditions[0].message,
+                "Route accepted by sozu-gateway"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_reference_errors_stay_in_the_resolved_refs_message() {
+        let mut unresolved = parent(Some("tcp"), true);
+        unresolved.resolved_refs = false;
+        unresolved.resolved_refs_reason = "BackendNotFound";
+        unresolved.problems.push(Problem::ServiceNotFound {
+            service: "missing-backend".into(),
+        });
+        let mut r = route(vec![unresolved]);
+        r.kind = RouteKind::TcpRoute;
+        let parents = route_parents("sozu.io/gateway-controller", &r, &[], Some(3));
+        let accepted = &parents[0].conditions[0];
+        assert_eq!(accepted.status, "True");
+        assert_eq!(accepted.reason, "Accepted");
+        assert_eq!(accepted.message, "Route accepted by sozu-gateway");
+        let refs = &parents[0].conditions[1];
+        assert_eq!(refs.status, "False");
+        assert_eq!(refs.reason, "BackendNotFound");
+        assert!(refs.message.contains("missing-backend"));
+    }
+
+    #[test]
+    fn l4_conflict_messages_are_stable_across_reconciles() {
+        let controller = "sozu.io/gateway-controller";
+        let mut competing = parent(None, true);
+        for (port, winner) in [(5433, "other/b"), (5432, "other/a")] {
+            competing.problems.push(Problem::L4RouteConflict {
+                port,
+                protocol: "TCP",
+                winner: winner.into(),
+            });
+        }
+        let mut r = route(vec![competing]);
+        r.kind = RouteKind::TcpRoute;
+        let mut first = route_parents(controller, &r, &[], Some(3));
+        for condition in &mut first[0].conditions {
+            condition.last_transition_time =
+                serde_json::from_value(json!("2026-01-01T00:00:00Z")).unwrap();
+        }
+        r.parents[0].problems.reverse();
+        let duplicate = r.parents[0].problems[0].clone();
+        r.parents[0].problems.push(duplicate);
+        let second = route_parents(controller, &r, &first, Some(3));
+        assert_eq!(
+            first, second,
+            "order and duplicate diagnostics must not cause a patch"
+        );
+    }
+
+    #[test]
+    fn l4_conflict_message_clears_when_the_route_can_forward() {
+        let controller = "sozu.io/gateway-controller";
+        let mut competing = parent(Some("shared"), true);
+        competing.problems.push(Problem::L4RouteConflict {
+            port: 5432,
+            protocol: "TCP",
+            winner: "other/older".into(),
+        });
+        let mut r = route(vec![competing, parent(Some("dedicated"), true)]);
+        r.kind = RouteKind::TcpRoute;
+        let first = route_parents(controller, &r, &[], Some(3));
+        r.parents[0].problems.clear();
+        let cleared = route_parents(controller, &r, &first, Some(3));
+        let accepted = &cleared[0].conditions[0];
+        assert_eq!(accepted.status, "True");
+        assert_eq!(accepted.reason, "Accepted");
+        assert_eq!(accepted.message, "Route accepted by sozu-gateway");
+        assert_ne!(
+            cleared[0].conditions[0].message,
+            first[0].conditions[0].message
+        );
+        assert_eq!(cleared[0].conditions[1], first[0].conditions[1]);
+        assert_eq!(cleared[1], first[1]);
+        assert_eq!(route_parents(controller, &r, &cleared, Some(3)), cleared);
     }
 
     /// Entries written by another controller are carried through untouched:

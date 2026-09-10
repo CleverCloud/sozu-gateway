@@ -1832,43 +1832,72 @@ fn tcp_and_udp_routes_map_to_l4_frontends() {
     assert_eq!(out.gateways[0].listeners[1].supported_kinds, ["UDPRoute"]);
 }
 
-/// Two routes claiming one socket for different Services: the older keeps it,
-/// the younger is dropped with a Problem on its own status — and the build as
-/// a whole still succeeds. That last part is the point: settling this in the
-/// translator returns an error that fails the *entire* reconcile, so one
-/// tenant's second route would stop routing for every other tenant.
+/// Attachment status counts both routes, while only the oldest backend can
+/// receive traffic. Cache ordering must change neither decision.
 #[test]
 fn the_older_route_keeps_a_contested_socket() {
-    let inputs = l4_inputs(
-        vec![
-            tcp_route(
-                "younger",
-                Some("2026-02-01T00:00:00Z"),
-                json!([{ "name": "postgres-b", "port": 5432 }]),
-            ),
-            tcp_route(
-                "older",
-                Some("2026-01-01T00:00:00Z"),
-                json!([{ "name": "postgres", "port": 5432 }]),
-            ),
-        ],
-        vec![],
-    );
-    let out = build(&l4_config(), &inputs);
+    for protocol in [ir::L4Protocol::Tcp, ir::L4Protocol::Udp] {
+        for reverse in [false, true] {
+            let route = |name, created, service| {
+                json!({
+                    "metadata": { "name": name, "namespace": "demo",
+                        "creationTimestamp": created },
+                    "spec": {
+                        "parentRefs": [{ "name": "gw" }],
+                        "rules": [{ "backendRefs": [{ "name": service, "port": 5432 }] }]
+                    }
+                })
+            };
+            let mut routes = vec![
+                route("younger", "2026-02-01T00:00:00Z", "postgres-b"),
+                route("older", "2026-01-01T00:00:00Z", "postgres"),
+            ];
+            if reverse {
+                routes.reverse();
+            }
+            let inputs = match protocol {
+                ir::L4Protocol::Tcp => {
+                    l4_inputs(routes.into_iter().map(from_json).collect(), vec![])
+                }
+                ir::L4Protocol::Udp => {
+                    l4_inputs(vec![], routes.into_iter().map(from_json).collect())
+                }
+            };
+            let out = build(&l4_config(), &inputs);
 
-    assert_eq!(out.ir.l4_frontends.len(), 1, "a socket carries one route");
-    assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
-
-    let younger = out.routes.iter().find(|r| r.name == "younger").unwrap();
-    assert!(!younger.parents[0].accepted);
-    assert_eq!(younger.parents[0].accepted_reason, "RouteConflict");
-    assert!(matches!(
-        younger.parents[0].problems.first(),
-        Some(Problem::L4RouteConflict { port: 5432, protocol: "TCP", winner }) if winner == "demo/older"
-    ));
-    let older = out.routes.iter().find(|r| r.name == "older").unwrap();
-    assert!(older.parents[0].accepted);
-    assert!(older.parents[0].problems.is_empty());
+            assert_eq!(out.ir.l4_frontends.len(), 1, "a socket carries one route");
+            assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+            assert_eq!(out.ir.l4_frontends[0].protocol, protocol);
+            for route in &out.routes {
+                assert!(route.parents[0].accepted, "{}", route.name);
+                assert_eq!(route.parents[0].accepted_reason, "Accepted");
+                assert!(route.parents[0].resolved_refs);
+            }
+            let younger = out.routes.iter().find(|r| r.name == "younger").unwrap();
+            let (port, protocol_name, listener) = match protocol {
+                ir::L4Protocol::Tcp => (5432, "TCP", "postgres"),
+                ir::L4Protocol::Udp => (5353, "UDP", "dns"),
+            };
+            assert_eq!(
+                younger.parents[0].problems,
+                [Problem::L4RouteConflict {
+                    port,
+                    protocol: protocol_name,
+                    winner: "demo/older".into(),
+                }]
+            );
+            let older = out.routes.iter().find(|r| r.name == "older").unwrap();
+            assert!(older.parents[0].problems.is_empty());
+            for status in &out.gateways[0].listeners {
+                assert_eq!(
+                    status.attached_routes,
+                    if status.name == listener { 2 } else { 0 },
+                    "listener {}",
+                    status.name
+                );
+            }
+        }
+    }
 }
 
 /// `creationTimestamp` has one-second granularity, so two routes applied
@@ -1898,6 +1927,8 @@ fn a_creation_timestamp_tie_is_broken_by_name() {
             out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432",
             "input order {order:?} must not decide the winner"
         );
+        assert!(out.routes.iter().all(|r| r.parents[0].accepted));
+        assert_eq!(out.gateways[0].listeners[0].attached_routes, 2);
     }
 }
 
@@ -1923,6 +1954,107 @@ fn a_route_without_a_creation_timestamp_never_evicts_one_with_it() {
     let out = build(&l4_config(), &inputs);
     assert_eq!(out.ir.l4_frontends.len(), 1);
     assert_eq!(out.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+}
+
+#[test]
+fn accepted_l4_routes_with_unresolved_backends_count_as_attached() {
+    let mut udp = udp_route("dns");
+    udp.spec.rules[0].backend_refs[0].name = "missing".into();
+    let inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "missing", "port": 5432 }]),
+        )],
+        vec![udp],
+    );
+    let out = build(&l4_config(), &inputs);
+    assert!(out.ir.l4_frontends.is_empty());
+    for route in &out.routes {
+        let parent = &route.parents[0];
+        assert!(parent.accepted);
+        assert_eq!(parent.accepted_reason, "Accepted");
+        assert!(!parent.resolved_refs);
+        assert_eq!(parent.resolved_refs_reason, "BackendNotFound");
+    }
+    for listener in &out.gateways[0].listeners {
+        assert_eq!(listener.attached_routes, 1);
+    }
+}
+
+#[test]
+fn a_missing_l4_service_releases_the_socket_but_empty_endpoints_do_not() {
+    let mut inputs = l4_inputs(
+        vec![
+            tcp_route(
+                "older",
+                Some("2026-01-01T00:00:00Z"),
+                json!([{ "name": "postgres", "port": 5432 }]),
+            ),
+            tcp_route(
+                "younger",
+                Some("2026-02-01T00:00:00Z"),
+                json!([{ "name": "postgres-b", "port": 5432 }]),
+            ),
+        ],
+        vec![],
+    );
+    let before = build(&l4_config(), &inputs);
+    assert_eq!(before.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+
+    inputs
+        .endpointslices
+        .retain(|slice| slice.metadata.name.as_deref() != Some("postgres-1"));
+    let empty = build(&l4_config(), &inputs);
+    assert_eq!(empty.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+
+    inputs
+        .services
+        .retain(|service| service.metadata.name.as_deref() != Some("postgres"));
+    let missing = build(&l4_config(), &inputs);
+    assert_eq!(missing.ir.l4_frontends.len(), 1);
+    assert_eq!(
+        missing.ir.l4_frontends[0].cluster_id,
+        "demo.postgres-b.5432"
+    );
+    assert_eq!(missing.gateways[0].listeners[0].attached_routes, 2);
+    assert!(missing.routes.iter().all(|route| route.parents[0].accepted));
+    let older = missing
+        .routes
+        .iter()
+        .find(|route| route.name == "older")
+        .unwrap();
+    assert!(!older.parents[0].resolved_refs);
+    assert_eq!(older.parents[0].resolved_refs_reason, "BackendNotFound");
+}
+
+#[test]
+fn overlapping_l4_parent_refs_count_each_route_once_per_listener() {
+    // API validation rejects overlapping references. The pure builder still
+    // counts routes, not parentRefs, if such an input reaches it.
+    let refs = json!([
+        { "name": "gw" },
+        { "name": "gw", "sectionName": "postgres" },
+        { "name": "gw", "port": 5432 }
+    ]);
+    let mut tcp = tcp_route("db", None, json!([{ "name": "postgres", "port": 5432 }]));
+    tcp.spec.parent_refs = Some(from_json(refs));
+    let mut udp = udp_route("dns");
+    udp.spec.parent_refs = Some(from_json(json!([
+        { "name": "gw" },
+        { "name": "gw", "sectionName": "dns" },
+        { "name": "gw", "port": 5353 }
+    ])));
+    let out = build(&l4_config(), &l4_inputs(vec![tcp], vec![udp]));
+    assert_eq!(out.ir.l4_frontends.len(), 2);
+    for route in &out.routes {
+        assert_eq!(route.parents.len(), 3);
+        assert!(route.parents.iter().all(|p| p.accepted));
+        assert!(route.parents.iter().all(|p| p.problems.is_empty()));
+    }
+    for listener in &out.gateways[0].listeners {
+        assert_eq!(listener.attached_routes, 1);
+    }
 }
 
 /// The rejections HTTPRoute already applies hold unchanged at layer 4. The

@@ -115,12 +115,17 @@ spec:
 EOF
 sleep 8
 
-reason="$(kubectl -n "$DEMO_NS" get tcproute/echo-tcp-intruder \
-  -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].reason}')"
-assert_eq "$reason" "RouteConflict" "second claimant is refused"
-still="$(kubectl -n "$DEMO_NS" get tcproute/echo-tcp \
-  -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}')"
-assert_eq "$still" "True" "the incumbent route is untouched"
+for route in echo-tcp echo-tcp-intruder; do
+  accepted="$(kubectl -n "$DEMO_NS" get tcproute/"$route" \
+    -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}')"
+  assert_eq "$accepted" "True" "$route attaches to the listener"
+  reason="$(kubectl -n "$DEMO_NS" get tcproute/"$route" \
+    -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].reason}')"
+  assert_eq "$reason" "Accepted" "$route acceptance reason"
+done
+attached="$(kubectl -n "$DEMO_NS" get gateway/l4 \
+  -o jsonpath="{.status.listeners[?(@.name=='echo-tcp')].attachedRoutes}")"
+assert_eq "$attached" "2" "both routes count as attached"
 
 # The point of settling this in the builder: the losing route must not take the
 # reconcile down with it, so unrelated traffic keeps flowing.
