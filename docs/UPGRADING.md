@@ -33,9 +33,10 @@ publish their internal addresses for in-cluster clients; a pending LoadBalancer
 never publishes its ClusterIP as an external address. A configured publish
 LoadBalancer or ClusterIP Service without an assigned address keeps the Gateway
 `Programmed=False` with `AddressNotAssigned`, even if the local listeners are
-ready. NodePort and ExternalName Services, missing publish Services and
-deployments without a publish Service retain listener-based programming status;
-node address publication is not implemented.
+ready. The same pending state applies while a valid configured publish Service
+is absent from the cache. Observed NodePort and ExternalName Services and
+deployments without a valid publish Service setting retain listener-based
+programming status; node address publication is not implemented.
 
 Instance Pods use `app.kubernetes.io/instance: <release>_gateway` together with
 `sozu.io/gateway-instance: <instance>`. User-managed NetworkPolicies and monitors

@@ -520,6 +520,12 @@ async fn probe_sozu_generation(
     outcome
 }
 
+fn parse_publish_service(value: &str) -> Option<(&str, &str)> {
+    value.split_once('/').filter(|(namespace, name)| {
+        !namespace.is_empty() && !name.is_empty() && !name.contains('/')
+    })
+}
+
 /// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
 /// last-applied IR) only on a successful apply, so a failed push is retried from
 /// the same baseline.
@@ -618,17 +624,19 @@ async fn reconcile(
     // Resolve our own LoadBalancer Service once: its address is published into
     // both Ingress `.status` and Gateway `.status.addresses` (what external-dns
     // consumes). Best-effort + loop-safe (writes skipped when already current).
-    let publish_svc = args
+    let publish_reference = args
         .publish_service
         .as_deref()
-        .and_then(|s| s.split_once('/'))
-        .and_then(|(ns, name)| {
-            inputs.services.iter().find(|s| {
-                s.metadata.namespace.as_deref() == Some(ns)
-                    && s.metadata.name.as_deref() == Some(name)
-            })
-        });
-    let gw_addresses = publish_svc.and_then(|s| status::published_gateway_addresses(s));
+        .and_then(parse_publish_service);
+    let publish_svc = publish_reference.and_then(|(ns, name)| {
+        inputs.services.iter().find(|s| {
+            s.metadata.namespace.as_deref() == Some(ns) && s.metadata.name.as_deref() == Some(name)
+        })
+    });
+    let gw_addresses = status::published_gateway_addresses(
+        publish_reference.is_some(),
+        publish_svc.map(|svc| svc.as_ref()),
+    );
 
     // Skippable for least-privilege deployments running without the
     // gateways/status RBAC grants, where every write would 403.
@@ -718,10 +726,7 @@ async fn main() -> Result<()> {
     );
 
     if let Some(ps) = &args.publish_service {
-        let valid = ps
-            .split_once('/')
-            .is_some_and(|(ns, name)| !ns.is_empty() && !name.is_empty() && !name.contains('/'));
-        if !valid {
+        if parse_publish_service(ps).is_none() {
             warn!(publish_service = %ps, "--publish-service must be namespace/name; Ingress status will not be written");
         }
     }
@@ -1188,6 +1193,20 @@ mod tests {
     use super::*;
     // Only as a stand-in resource type for the reflector-readiness tests.
     use k8s_openapi::api::core::v1::ConfigMap;
+
+    #[test]
+    fn publish_service_requires_one_nonempty_namespace_and_name() {
+        for (value, expected) in [
+            ("", None),
+            ("service", None),
+            ("/service", None),
+            ("namespace/", None),
+            ("namespace/service/extra", None),
+            ("namespace/service", Some(("namespace", "service"))),
+        ] {
+            assert_eq!(parse_publish_service(value), expected, "{value}");
+        }
+    }
 
     /// An EndpointSlice labelled for `svc` in `ns` (`None` omits the piece).
     fn slice(ns: Option<&str>, svc: Option<&str>) -> EndpointSlice {
