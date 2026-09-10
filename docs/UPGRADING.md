@@ -132,10 +132,22 @@ changes reweight the existing backend addresses without changing the cluster. Id
 addresses shared by references become one backend.
 
 Weight-zero references remain validated, including ReferenceGrant, but their endpoints are never
-programmed. An entirely drained rule still matches an isolated empty cluster: HTTP returns 503
-rather than Gateway API's required 500, and layer-4 traffic is not forwarded. Invalid references
-or missing ready endpoints redistribute their share to the remaining usable targets; proportional
-HTTP 500 behavior is not implemented. See [the support matrix](features.md) for the full limits.
+programmed. HTTP rules now preserve invalid references' shares as HTTP 500 and resolved
+Services without ready endpoints as HTTP 503. Healthy Services keep their own shares rather than
+absorbing either error. An entirely drained HTTP rule returns 500 without forwarding to any
+reference; the API requires zero traffic to drained targets but does not specify that response.
+Valid drained references remain resolved. Layer-4 behavior is unchanged: unavailable shares are
+redistributed to usable backends, or no traffic is forwarded when none remain.
+
+The 503 responder reserves another loopback TCP port, `127.0.0.1:8083`. Set
+`controller.httpUnavailablePort` (or `--http-unavailable-listen` outside Helm) if it is already in
+use. It must differ from the 500 responder, health, enabled metrics and all exposed TCP binds.
+UDP can reuse the number. Both local responders bind before readiness and share the controller's
+shutdown lifecycle; either unexpected server exit stops the controller. Each has its own runtime,
+at most 256 active connections and 64 KiB of header buffering per connection. See
+[the support matrix](features.md) for request deadlines and the full limits.
+If either responder is unavailable or in Sōzu's retry backoff, a mixed cluster can
+redistribute its share to the remaining available backends until it recovers.
 
 The IR schema is unchanged. No persisted-shadow migration or Sōzu upgrade is required. An older
 controller still reads the shadow and removes composite clusters on its next reconcile, reverting

@@ -1027,6 +1027,10 @@ fn attach_rule(
             problems,
             resolved_refs,
             resolved_refs_reason,
+            Some(weighted::HttpErrorBackends {
+                invalid: cfg.http_error_backend,
+                unavailable: cfg.http_unavailable_backend,
+            }),
         );
         Some(id.unwrap_or_else(|| HTTP_ERROR_CLUSTER.to_string()))
     };
@@ -1729,6 +1733,7 @@ fn attach_l4_routes(
                     &mut problems,
                     &mut resolved_refs,
                     &mut resolved_refs_reason,
+                    None,
                 );
                 if let Some(cluster_id) = cluster_id {
                     // One claim per (parent, socket). A parentRef without a

@@ -225,7 +225,7 @@ fn an_invalid_weighted_ref_is_reported_while_valid_backends_route() {
     let out = build(&BuildConfig::default(), &inputs);
 
     assert_eq!(out.ir.frontends.len(), 1);
-    assert_eq!(out.ir.backends.len(), 2);
+    assert_eq!(out.ir.backends.len(), 3);
     let parent = &out.routes[0].parents[0];
     assert!(!parent.resolved_refs);
     assert!(parent.problems.contains(&Problem::ServiceNotFound {
@@ -236,7 +236,7 @@ fn an_invalid_weighted_ref_is_reported_while_valid_backends_route() {
 #[test]
 fn zero_weight_single_backend_is_drained_not_served() {
     // A drained rule still matches, so a broader route cannot receive its
-    // traffic. The isolated empty cluster currently answers HTTP 503, not 500.
+    // traffic. The local error backend gets requests, never the drained Service.
     let route: HttpRoute = from_json(json!({
         "metadata": { "name": "route", "namespace": "demo" },
         "spec": {
@@ -248,7 +248,11 @@ fn zero_weight_single_backend_is_drained_not_served() {
     let out = build(&BuildConfig::default(), &inputs_with(route));
 
     assert_eq!(out.ir.frontends.len(), 1);
-    assert!(out.ir.backends.is_empty(), "a drained backend gets nothing");
+    assert_eq!(out.ir.backends.len(), 1);
+    assert_eq!(
+        out.ir.backends[0].address,
+        BuildConfig::default().http_error_backend
+    );
     let p = &out.routes[0].parents[0];
     assert!(p.problems.contains(&Problem::NoPositiveBackendWeight));
     assert!(p.resolved_refs, "zero weight is a valid reference");
@@ -3153,6 +3157,151 @@ mod weighted_refs {
         assert!(ir.backends.iter().all(|b| b.weight.unwrap() > 0));
     }
 
+    fn assert_address_share(ir: &ir::Ir, address: std::net::SocketAddr, share: i64, total: i64) {
+        let budget: i64 = ir
+            .backends
+            .iter()
+            .map(|b| i64::from(b.weight.unwrap()))
+            .sum();
+        let selected: i64 = ir
+            .backends
+            .iter()
+            .filter(|b| b.address == address)
+            .map(|b| i64::from(b.weight.unwrap()))
+            .sum();
+        assert!(
+            (selected * total - budget * share).abs() <= total,
+            "{address}: {selected}/{budget}, expected {share}/{total}"
+        );
+    }
+
+    #[test]
+    fn every_invalid_reference_keeps_its_http_error_share() {
+        let cases = [
+            (json!({ "name": "missing", "port": 80 }), "BackendNotFound"),
+            (json!({ "name": "web2", "port": 81 }), "BackendNotFound"),
+            (json!({ "name": "web2" }), "BackendNotFound"),
+            (
+                json!({ "name": "web2", "namespace": "other", "port": 80 }),
+                "RefNotPermitted",
+            ),
+            (
+                json!({ "name": "web2", "group": "example.org", "kind": "Other", "port": 80 }),
+                "InvalidKind",
+            ),
+        ];
+        for tls in [false, true] {
+            for (mut invalid, reason) in cases.clone() {
+                invalid["weight"] = json!(30);
+                let mut inputs = inputs(
+                    json!([
+                        { "name": "web", "port": 80, "weight": 70 }, invalid
+                    ]),
+                    [2, 1, 0],
+                );
+                if tls {
+                    inputs.gateways = arcs(vec![https_gateway()]);
+                    inputs.secrets = arcs(vec![tls_secret()]);
+                }
+                let cfg = BuildConfig {
+                    http_error_backend: "127.0.0.1:19002".parse().unwrap(),
+                    ..Default::default()
+                };
+                let out = build(&cfg, &inputs);
+                assert!(out.routes[0].parents[0].accepted);
+                assert!(!out.routes[0].parents[0].resolved_refs);
+                assert_eq!(out.routes[0].parents[0].resolved_refs_reason, reason);
+                assert_eq!(out.ir.frontends.len(), 1);
+                assert_eq!(out.ir.frontends[0].tls, tls);
+                assert_eq!(out.ir.backends.len(), 3);
+                assert_share(&out.ir, 70, 100);
+                assert_address_share(&out.ir, cfg.http_error_backend, 30, 100);
+                assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_and_unavailable_shares_stay_distinct_during_endpoint_recovery() {
+        let refs = json!([
+            { "name": "web", "port": 80, "weight": 70 },
+            { "name": "web2", "port": 80, "weight": 20 },
+            { "name": "missing", "port": 80, "weight": 4 },
+            { "name": "also-missing", "port": 80, "weight": 6 },
+            { "name": "drained", "port": 80, "weight": 0 }
+        ]);
+        let cfg = BuildConfig::default();
+        let out = build(&cfg, &inputs(refs.clone(), [2, 0, 1]));
+        assert_eq!(out.ir.backends.len(), 4);
+        assert_share(&out.ir, 70, 100);
+        assert_address_share(&out.ir, cfg.http_error_backend, 10, 100);
+        assert_address_share(&out.ir, cfg.http_unavailable_backend, 20, 100);
+        assert_eq!(
+            out.routes[0].parents[0].resolved_refs_reason,
+            "BackendNotFound"
+        );
+        assert!(out.routes[0].parents[0]
+            .problems
+            .contains(&Problem::NoReadyEndpoints {
+                service: "web2".into()
+            }));
+        let recovered = build(&cfg, &inputs(refs, [2, 3, 1]));
+        assert_eq!(out.ir.clusters, recovered.ir.clusters);
+        assert_eq!(out.ir.frontends, recovered.ir.frontends);
+        assert_share(&recovered.ir, 70, 100);
+        assert_address_share(&recovered.ir, cfg.http_error_backend, 10, 100);
+        assert!(recovered
+            .ir
+            .backends
+            .iter()
+            .all(|b| b.address != cfg.http_unavailable_backend));
+        let requests = reconcile(&out.ir, &recovered.ir).unwrap();
+        assert!(requests.iter().any(|r| matches!(&r.request_type,
+            Some(RequestType::RemoveBackend(b)) if b.address == cfg.http_unavailable_backend.into())));
+        assert!(requests.iter().all(|r| !matches!(
+            r.request_type,
+            Some(
+                RequestType::AddCluster(_)
+                    | RequestType::RemoveCluster(_)
+                    | RequestType::AddHttpFrontend(_)
+                    | RequestType::RemoveHttpFrontend(_)
+            )
+        )));
+    }
+
+    #[test]
+    fn zero_invalid_refs_affect_status_but_never_take_a_traffic_share() {
+        let cfg = BuildConfig::default();
+        let out = build(
+            &cfg,
+            &inputs(
+                json!([
+                    { "name": "web", "port": 80, "weight": 1 },
+                    { "name": "missing", "port": 80, "weight": 0 }
+                ]),
+                [1, 0, 0],
+            ),
+        );
+        assert_eq!(out.ir.backends.len(), 1);
+        assert!(!out.ir.backends[0].address.ip().is_loopback());
+        assert_eq!(
+            out.routes[0].parents[0].resolved_refs_reason,
+            "BackendNotFound"
+        );
+        for all_zero in [
+            json!([{ "name": "web", "port": 80, "weight": 0 }]),
+            json!([{ "name": "web", "port": 80, "weight": 0 },
+                   { "name": "missing", "port": 80, "weight": 0 }]),
+        ] {
+            let valid = all_zero.as_array().unwrap().len() == 1;
+            let out = build(&cfg, &inputs(all_zero, [1, 0, 0]));
+            assert!(out.routes[0].parents[0].accepted);
+            assert_eq!(out.routes[0].parents[0].resolved_refs, valid);
+            assert_eq!(out.ir.backends.len(), 1);
+            assert_eq!(out.ir.backends[0].address, cfg.http_error_backend);
+        }
+    }
+
     #[test]
     fn http_service_shares_survive_unequal_endpoint_counts_and_zero_weights() {
         let mut inputs = inputs(refs(), [2, 1, 1]);
@@ -3298,12 +3447,17 @@ mod weighted_refs {
     }
 
     #[test]
-    fn missing_endpoints_redistribute_without_changing_the_declared_graph() {
+    fn missing_endpoints_keep_their_503_share_and_declared_graph() {
         let desired = build(&BuildConfig::default(), &inputs(refs(), [2, 1, 1]));
         let partial = build(&BuildConfig::default(), &inputs(refs(), [0, 1, 1]));
         assert_eq!(partial.ir.clusters, desired.ir.clusters);
-        assert_eq!(partial.ir.backends.len(), 1);
-        assert_eq!(partial.ir.backends[0].weight, Some(1));
+        assert_eq!(partial.ir.backends.len(), 2);
+        assert_address_share(
+            &partial.ir,
+            BuildConfig::default().http_unavailable_backend,
+            70,
+            100,
+        );
         assert!(partial.routes[0].parents[0].resolved_refs);
         assert!(partial.routes[0].parents[0]
             .problems
@@ -3313,8 +3467,10 @@ mod weighted_refs {
         let empty = build(&BuildConfig::default(), &inputs(refs(), [0, 0, 1]));
         assert_eq!(empty.ir.clusters, desired.ir.clusters);
         assert_eq!(empty.ir.frontends.len(), 1);
-        assert!(
-            empty.ir.backends.is_empty(),
+        assert_eq!(empty.ir.backends.len(), 1);
+        assert_eq!(
+            empty.ir.backends[0].address,
+            BuildConfig::default().http_unavailable_backend,
             "the drained target must not become a fallback"
         );
     }
@@ -3386,11 +3542,17 @@ mod weighted_refs {
             .find(|f| f.path == ir::PathMatch::Prefix("/".into()))
             .unwrap();
         assert_ne!(drained.cluster_id, root.cluster_id);
-        assert!(out
+        let rejected: Vec<_> = out
             .ir
             .backends
             .iter()
-            .all(|b| Some(&b.cluster_id) != drained.cluster_id.as_ref()));
+            .filter(|b| Some(&b.cluster_id) == drained.cluster_id.as_ref())
+            .collect();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(
+            rejected[0].address,
+            BuildConfig::default().http_error_backend
+        );
         assert!(out.routes[0].parents[0].resolved_refs);
         assert!(out.routes[0].parents[0]
             .problems
@@ -3420,11 +3582,17 @@ mod weighted_refs {
             .iter()
             .find(|f| f.hostname == "denied.example.com")
             .unwrap();
-        assert!(out
+        let rejected: Vec<_> = out
             .ir
             .backends
             .iter()
-            .all(|b| Some(&b.cluster_id) != denied.cluster_id.as_ref()));
+            .filter(|b| Some(&b.cluster_id) == denied.cluster_id.as_ref())
+            .collect();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(
+            rejected[0].address,
+            BuildConfig::default().http_error_backend
+        );
         let status = out.routes.iter().find(|r| r.namespace == "other").unwrap();
         assert!(!status.parents[0].resolved_refs);
         assert_eq!(status.parents[0].resolved_refs_reason, "RefNotPermitted");

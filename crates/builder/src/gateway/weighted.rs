@@ -14,6 +14,12 @@ struct ServiceGroup {
     addresses: Vec<SocketAddr>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct HttpErrorBackends {
+    pub invalid: SocketAddr,
+    pub unavailable: SocketAddr,
+}
+
 /// Content identity is independent of reference order, route/rule position and
 /// endpoint membership. Duplicate references contribute their combined weight.
 /// Keep zero and invalid references in the identity: an empty/drained cluster
@@ -118,10 +124,10 @@ fn normalize(groups: &[ServiceGroup]) -> Result<BTreeMap<SocketAddr, i32>, Strin
 /// A rule with a single backendRef of positive weight retains the Service cluster and
 /// annotations. Composite clusters always use Random with no sticky session or
 /// per-Service policy: those settings cannot describe a collection of Services.
-/// Invalid refs still fail ResolvedRefs; ready valid refs absorb their share.
-/// A content-isolated empty cluster keeps an all-zero rule non-forwarding and
-/// prevents HTTP from falling through to a broader route (currently HTTP 503,
-/// until the separate data-plane HTTP 500 support is available).
+/// HTTP errors keep their declared shares: invalid refs target the 500 backend,
+/// resolved Services without endpoints target the 503 backend. Drained refs are
+/// validated without contributing traffic. An all-zero HTTP rule returns 500;
+/// layer-4 rules retain an empty cluster when nothing can forward.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_backend_refs(
     inputs: &Inputs,
@@ -135,6 +141,7 @@ pub(super) fn resolve_backend_refs(
     problems: &mut Vec<Problem>,
     resolved_refs: &mut bool,
     resolved_refs_reason: &mut &'static str,
+    http_errors: Option<HttpErrorBackends>,
 ) -> Option<String> {
     if refs.is_empty() {
         problems.push(Problem::NoReadyEndpoints {
@@ -145,6 +152,7 @@ pub(super) fn resolve_backend_refs(
     }
     let single = refs.len() == 1 && refs[0].weight.unwrap_or(1) > 0;
     let mut groups: BTreeMap<(String, String, i32), ServiceGroup> = BTreeMap::new();
+    let mut invalid_weight = 0;
     for br in refs {
         let weight = br.weight.unwrap_or(1);
         if !(0..=1_000_000).contains(&weight) {
@@ -159,6 +167,7 @@ pub(super) fn resolve_backend_refs(
         if !is_service {
             problems.push(Problem::NonServiceBackend);
             fail_ref(resolved_refs, resolved_refs_reason, "InvalidKind");
+            invalid_weight += weight as u64;
             continue;
         }
         let backend_ns = br.namespace.as_deref().unwrap_or(namespace);
@@ -171,6 +180,7 @@ pub(super) fn resolve_backend_refs(
                 reference: format!("Service {backend_ns}/{}", br.name),
             });
             fail_ref(resolved_refs, resolved_refs_reason, "RefNotPermitted");
+            invalid_weight += weight as u64;
             continue;
         }
         let Some(port) = br.port else {
@@ -179,6 +189,7 @@ pub(super) fn resolve_backend_refs(
                 port: "<unspecified>".into(),
             });
             fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
+            invalid_weight += weight as u64;
             continue;
         };
         if single {
@@ -220,8 +231,9 @@ pub(super) fn resolve_backend_refs(
             Err(problem) => {
                 problems.push(problem);
                 fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
+                invalid_weight += weight as u64;
             }
-            Ok((_, _, addresses)) => {
+            Ok((_, _, mut addresses)) => {
                 if weight == 0 {
                     continue;
                 }
@@ -229,6 +241,9 @@ pub(super) fn resolve_backend_refs(
                     problems.push(Problem::NoReadyEndpoints {
                         service: br.name.clone(),
                     });
+                    if let Some(errors) = http_errors {
+                        addresses.push(errors.unavailable);
+                    }
                 }
                 let group = groups
                     .entry((backend_ns.into(), br.name.clone(), port))
@@ -247,10 +262,28 @@ pub(super) fn resolve_backend_refs(
     if refs.iter().all(|br| br.weight == Some(0)) {
         problems.push(Problem::NoPositiveBackendWeight);
     }
+    let mut groups: Vec<_> = groups.into_values().collect();
+    if let Some(errors) = http_errors {
+        // An invalid reference consumes its share even when no pod can be
+        // resolved. Combining these shares also leaves only one local backend.
+        if invalid_weight > 0 {
+            groups.push(ServiceGroup {
+                weight: invalid_weight,
+                addresses: vec![errors.invalid],
+            });
+        } else if refs.iter().all(|br| br.weight == Some(0)) {
+            // The API forbids forwarding to zero-weight targets but does not
+            // prescribe an all-zero response. Keep the rule matched with 500.
+            groups.push(ServiceGroup {
+                weight: 1,
+                addresses: vec![errors.invalid],
+            });
+        }
+    }
     let normalized = if refs.len() > 16 {
         Err("more than 16 backendRefs are not supported".into())
     } else {
-        normalize(&groups.into_values().collect::<Vec<_>>())
+        normalize(&groups)
     };
     let weighted = match normalized {
         Ok(weights) => weights,

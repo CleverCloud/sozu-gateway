@@ -81,6 +81,21 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"reserved","port":18082,"bind":8082,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"dns","port":18082,"bind":8082,"protocol":"UDP","transport":"UDP"}]' > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false --set controller.httpErrorPort=9100 > /dev/null
+    # Unavailable Service shares use a separate fixed 503 backend.
+    helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=18083 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=null > /dev/null
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=8082 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=8083 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=8081 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=9100 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=0 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=1024 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=65536 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=1.5 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=8080 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpUnavailablePort=8443 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"reserved","port":18083,"bind":8083,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
+    helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"dns","port":18083,"bind":8083,"protocol":"UDP","transport":"UDP"}]' > /dev/null
     # The Pod's own ports are not up for grabs by an exposure entry.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1

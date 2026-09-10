@@ -109,6 +109,8 @@ pub struct BuildConfig {
     /// Local HTTP 500 backend provided by the controller. The builder only
     /// records this address; it never starts or contacts the responder.
     pub http_error_backend: SocketAddr,
+    /// Local HTTP 503 backend for the share of a Service without ready endpoints.
+    pub http_unavailable_backend: SocketAddr,
 }
 
 impl BuildConfig {
@@ -186,6 +188,7 @@ impl Default for BuildConfig {
             class_is_default: false,
             controller_name: "sozu.io/gateway-controller".to_string(),
             http_error_backend: SocketAddr::from(([127, 0, 0, 1], 8082)),
+            http_unavailable_backend: SocketAddr::from(([127, 0, 0, 1], 8083)),
             // The chart's own defaults: 80/443 advertised, bound unprivileged.
             exposure: vec![
                 ExposedPort {
@@ -336,7 +339,7 @@ pub enum Problem {
         winner: String,
     },
     /// All references are deliberately drained. Their rule still matches,
-    /// but its isolated cluster contains no backend that could receive traffic.
+    /// but none of their Service endpoints can receive traffic.
     NoPositiveBackendWeight,
     /// A weighted graph cannot be represented within the data plane's integer
     /// weight range. Refuse it rather than falling back to uniform selection.

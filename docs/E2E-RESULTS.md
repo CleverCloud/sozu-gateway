@@ -401,8 +401,8 @@ its limits, use the [2026-09-10 analysis](conformance/gateway-http-tcp-udp_crd-v
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
 - **No header/query-value matching** (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
   The weighted-split failures in the historical runs predate the current compiler's normalized
-  Random clusters. Those reports remain unchanged; exact proportional HTTP 500 responses for
-  invalid weighted references are still unsupported (see [features](features.md)).
+  Random clusters and local HTTP error backends. Those reports remain unchanged; current
+  weighted HTTP error behavior is described in [features](features.md).
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). **`HTTPRouteMultipleGateways` is the purest case**: it puts a
