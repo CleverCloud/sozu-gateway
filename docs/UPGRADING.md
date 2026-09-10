@@ -54,6 +54,29 @@ the new field and cannot reconstruct the regex hostname keys to prune them.
 
 ---
 
+## HTTPRoute backend errors return HTTP 500
+
+Rules with missing, forbidden or unsupported backend references now keep their
+host, path and method matches and return HTTP 500. Their `ResolvedRefs: False`
+reason still identifies the failed reference. Rules without `backendRefs`
+(including an empty list) also return 500, with `ResolvedRefs: True`. Redirects
+are unchanged. A valid Service without ready endpoints still returns 503.
+
+The controller now binds `127.0.0.1:8082` before becoming ready. This is a local
+backend for Sōzu, with no Service or container port. If TCP port 8082 is already
+used, set `controller.httpErrorPort` to a free unprivileged port (or use
+`--http-error-listen` outside Helm). The chart and controller reject collisions
+with HTTP, HTTPS, TCP, health and enabled metrics listeners. UDP may reuse the
+number. A bind failure or unexpected responder exit stops the controller.
+
+The chart keeps the controller alive for `sozu.drain.delaySeconds` during Pod
+withdrawal. If the controller nevertheless stops while Sōzu is serving, rejected
+requests can receive 503 until the local backend and its retry backoff recover.
+Ordinary Service backends remain independent of this responder. Changing the
+port hot retargets the backend; the saved IR format is unchanged.
+
+---
+
 ## HTTP path precedence
 
 Exact paths now take precedence over prefixes, and longer prefixes over shorter

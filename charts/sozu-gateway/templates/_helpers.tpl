@@ -27,6 +27,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ include "sozu-gateway.fullname" . }}
 {{- end -}}
 
+{{/* Old releases reused with --reuse-values do not contain this setting. */}}
+{{- define "sozu-gateway.httpErrorPort" -}}
+{{- if hasKey .Values.controller "httpErrorPort" -}}
+{{- .Values.controller.httpErrorPort -}}
+{{- else -}}8082{{- end -}}
+{{- end -}}
+
 {{/*
 Reject an exposure table that cannot work, with a message that says why.
 
@@ -44,6 +51,14 @@ caught here rather than left to `helm install` to reject obscurely.
      EADDRINUSE in the first tier, which fails every reconcile including HTTP,
      and readiness never turns green. */ -}}
 {{- $binds := dict -}}
+{{- $errorPort := include "sozu-gateway.httpErrorPort" . -}}
+{{- if or (not (regexMatch "^[0-9]+$" (toString $errorPort))) (lt (int $errorPort) 1025) (gt (int $errorPort) 65535) -}}
+  {{- fail "controller.httpErrorPort must be an integer between 1025 and 65535" -}}
+{{- end -}}
+{{- if or (eq (int $errorPort) (int (.Values.controller.healthPort | default 8081))) (and .Values.metrics.enabled (eq (int $errorPort) (int .Values.metrics.port))) -}}
+  {{- fail "controller.httpErrorPort must differ from the health and metrics ports" -}}
+{{- end -}}
+{{- $_ := set $binds (printf "%s/TCP" (toString $errorPort)) "the HTTP error backend" -}}
 {{- if .Values.metrics.enabled -}}
   {{- $_ := set $binds (printf "%s/TCP" (toString .Values.metrics.port)) "the metrics endpoint" -}}
 {{- end -}}

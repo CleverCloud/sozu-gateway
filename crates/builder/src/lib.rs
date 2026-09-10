@@ -106,6 +106,9 @@ pub struct BuildConfig {
     /// 80 or 443" to "your `(port, protocol)` must be one this gateway
     /// exposes", which is strictly more permissive.
     pub exposure: Vec<ExposedPort>,
+    /// Local HTTP 500 backend provided by the controller. The builder only
+    /// records this address; it never starts or contacts the responder.
+    pub http_error_backend: SocketAddr,
 }
 
 impl BuildConfig {
@@ -182,6 +185,7 @@ impl Default for BuildConfig {
             class_name: "sozu".to_string(),
             class_is_default: false,
             controller_name: "sozu.io/gateway-controller".to_string(),
+            http_error_backend: SocketAddr::from(([127, 0, 0, 1], 8082)),
             // The chart's own defaults: 80/443 advertised, bound unprivileged.
             exposure: vec![
                 ExposedPort {

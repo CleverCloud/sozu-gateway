@@ -1092,6 +1092,192 @@ fn cross_namespace_backend_without_grant_is_ref_not_permitted() {
 }
 
 #[test]
+fn invalid_and_omitted_http_backends_keep_their_matches_and_status() {
+    use sozu_command_lib::proto::command::request::RequestType;
+    let cases = [
+        (None, None),
+        (Some(json!([])), None),
+        (
+            Some(json!([{ "name": "missing", "port": 80 }])),
+            Some("BackendNotFound"),
+        ),
+        (
+            Some(json!([{ "name": "web", "port": 81 }])),
+            Some("BackendNotFound"),
+        ),
+        (Some(json!([{ "name": "web" }])), Some("BackendNotFound")),
+        (
+            Some(json!([{ "name": "web", "namespace": "other", "port": 80 }])),
+            Some("RefNotPermitted"),
+        ),
+        (
+            Some(json!([{ "name": "web", "group": "example.org", "kind": "Other", "port": 80 }])),
+            Some("InvalidKind"),
+        ),
+    ];
+    for tls in [false, true] {
+        for (references, reason) in &cases {
+            let mut rule = json!({
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/v2" }, "method": "POST" }]
+            });
+            if let Some(references) = references {
+                rule["backendRefs"] = references.clone();
+            }
+            let route: HttpRoute = from_json(json!({
+                "metadata": { "name": "route", "namespace": "demo" },
+                "spec": {
+                    "parentRefs": [{ "name": "gw" }],
+                    "hostnames": ["app.example.com"],
+                    "rules": [
+                        { "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+                          "backendRefs": [{ "name": "web", "port": 80 }] },
+                        rule
+                    ]
+                }
+            }));
+            let mut inputs = inputs_with(route);
+            if tls {
+                inputs.gateways = arcs(vec![https_gateway()]);
+                inputs.secrets = arcs(vec![tls_secret()]);
+            }
+            let cfg = BuildConfig {
+                http_error_backend: "127.0.0.1:19002".parse().unwrap(),
+                ..Default::default()
+            };
+            let out = build(&cfg, &inputs);
+            let parent = &out.routes[0].parents[0];
+            assert!(parent.accepted);
+            assert_eq!(parent.resolved_refs, reason.is_none());
+            assert_eq!(
+                parent.resolved_refs_reason,
+                reason.unwrap_or("ResolvedRefs")
+            );
+            if reason.is_none() {
+                assert!(parent.problems.is_empty());
+            }
+            assert_eq!(out.ir.frontends.len(), 2);
+            let rejected = out
+                .ir
+                .frontends
+                .iter()
+                .find(|f| f.method.as_deref() == Some("POST"))
+                .unwrap();
+            assert_eq!(rejected.hostname, "app.example.com");
+            assert_eq!(rejected.path, ir::PathMatch::Prefix("/v2".into()));
+            assert_eq!(rejected.tls, tls);
+            assert_eq!(
+                rejected.cluster_id.as_deref(),
+                Some("sozu-gateway/http-error")
+            );
+            let backend = out
+                .ir
+                .backends
+                .iter()
+                .find(|b| b.cluster_id == "sozu-gateway/http-error")
+                .unwrap();
+            assert_eq!(backend.address, cfg.http_error_backend);
+
+            // TREE remembers methodless matches. Its explicit POST rules must
+            // try the rejected prefix before the projected healthy root.
+            let requests = sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir).unwrap();
+            let frontends: Vec<_> = requests
+                .iter()
+                .filter_map(|request| match &request.request_type {
+                    Some(RequestType::AddHttpFrontend(f) | RequestType::AddHttpsFrontend(f)) => {
+                        Some(f)
+                    }
+                    _ => None,
+                })
+                .collect();
+            // The third rule is the original methodless root.
+            assert_eq!(frontends.len(), 3);
+            let post: Vec<_> = frontends
+                .iter()
+                .filter(|f| f.method.as_deref() == Some("POST"))
+                .collect();
+            assert_eq!(post.len(), 2);
+            assert_eq!(
+                post[0].cluster_id.as_deref(),
+                Some("sozu-gateway/http-error")
+            );
+            assert_eq!(post[1].cluster_id.as_deref(), Some("demo.web.80"));
+        }
+    }
+}
+
+#[test]
+fn a_service_without_ready_endpoints_does_not_use_the_error_backend() {
+    let mut inputs = inputs_with(route_to_web(false));
+    inputs.endpointslices.clear();
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(
+        out.ir.frontends[0].cluster_id.as_deref(),
+        Some("demo.web.80")
+    );
+    assert!(out.ir.backends.is_empty());
+    assert!(out.routes[0].parents[0].accepted);
+    assert!(out.routes[0].parents[0].resolved_refs);
+    assert_eq!(out.ir.clusters.len(), 1);
+    assert_eq!(out.ir.clusters[0].id, "demo.web.80");
+}
+
+#[test]
+fn revoking_a_backend_grant_retargets_the_rule_to_the_error_backend() {
+    use sozu_command_lib::proto::command::request::RequestType;
+    let mut route = route_to_web(false);
+    route.spec.rules.as_mut().unwrap()[0]
+        .backend_refs
+        .as_mut()
+        .unwrap()[0]
+        .namespace = Some("other".into());
+    let mut inputs = inputs_with(route);
+    Arc::make_mut(&mut inputs.services[0]).metadata.namespace = Some("other".into());
+    Arc::make_mut(&mut inputs.endpointslices[0])
+        .metadata
+        .namespace = Some("other".into());
+    let grant: Arc<sozu_gw_gateway_api::ReferenceGrant> = Arc::new(from_json(json!({
+        "metadata": { "name": "allow", "namespace": "other" },
+        "spec": {
+            "from": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "demo" }],
+            "to": [{ "group": "", "kind": "Service", "name": "web" }]
+        }
+    })));
+    inputs.reference_grants = vec![grant.clone()];
+    let allowed = build(&BuildConfig::default(), &inputs);
+    assert_eq!(
+        allowed.ir.frontends[0].cluster_id.as_deref(),
+        Some("other.web.80")
+    );
+    inputs.reference_grants.clear();
+    let rejected = build(&BuildConfig::default(), &inputs);
+    assert!(rejected.routes[0].parents[0].accepted);
+    assert_eq!(
+        rejected.routes[0].parents[0].resolved_refs_reason,
+        "RefNotPermitted"
+    );
+    assert_eq!(
+        rejected.ir.frontends[0].cluster_id.as_deref(),
+        Some("sozu-gateway/http-error")
+    );
+    let requests = sozu_gw_translator::reconcile(&allowed.ir, &rejected.ir).unwrap();
+    let removed = requests
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::RemoveHttpFrontend(_))))
+        .unwrap();
+    let added = requests
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
+        .unwrap();
+    assert!(removed < added);
+    inputs.reference_grants.push(grant);
+    let restored = build(&BuildConfig::default(), &inputs);
+    assert_eq!(
+        restored.ir, allowed.ir,
+        "restored references remove the internal backend"
+    );
+}
+
+#[test]
 fn cross_namespace_route_to_same_listener_is_not_allowed() {
     // http_gateway() (ns "demo") has no allowedRoutes -> default `Same`. A route in
     // another namespace must NOT bind: Accepted=False / NotAllowedByListeners.

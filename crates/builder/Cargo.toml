@@ -24,6 +24,7 @@ version = "0.28"
 features = ["v1_36"]
 
 [dev-dependencies]
+sozu-gw-translator = { workspace = true }
 insta = { version = "1", features = ["json", "redactions"] }
 serde_json = { workspace = true }
 # Integration tests construct k8s objects, so the type crates must be dev-deps too.

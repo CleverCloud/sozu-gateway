@@ -700,6 +700,7 @@ pub(crate) fn build_gateway(
                 let mut accepted_override: Option<&'static str> = None;
                 for rule in route.spec.rules.iter().flatten() {
                     attach_rule(
+                        cfg,
                         inputs,
                         index,
                         clusters,
@@ -901,8 +902,35 @@ fn fail_ref(resolved: &mut bool, reason: &mut &'static str, new_reason: &'static
     *resolved = false;
 }
 
+// A slash cannot occur in a Kubernetes namespace or Service name, so this
+// identity cannot alias the namespace.Service.port ids of real backends.
+const HTTP_ERROR_CLUSTER: &str = "sozu-gateway/http-error";
+
+fn add_http_error_backend(
+    cfg: &BuildConfig,
+    clusters: &mut BTreeMap<String, ir::Cluster>,
+    backends: &mut BTreeMap<String, ir::Backend>,
+) {
+    let id = HTTP_ERROR_CLUSTER.to_string();
+    clusters.entry(id.clone()).or_insert_with(|| ir::Cluster {
+        id: id.clone(),
+        load_balancing: ir::LbAlgorithm::RoundRobin,
+        sticky_session: false,
+        https_redirect: false,
+        max_connections_per_ip: None,
+        retry_after: None,
+    });
+    backends.entry(id.clone()).or_insert_with(|| ir::Backend {
+        cluster_id: id.clone(),
+        backend_id: id.clone(),
+        address: cfg.http_error_backend,
+        weight: None,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn attach_rule(
+    cfg: &BuildConfig,
     inputs: &Inputs,
     index: &Index,
     clusters: &mut BTreeMap<String, ir::Cluster>,
@@ -967,10 +995,14 @@ fn attach_rule(
             }
         })
         .collect();
-    let cluster_id = if refs.is_empty() && filters.redirect.is_some() {
-        None
+    let cluster_id = if refs.is_empty() {
+        if filters.redirect.is_some() {
+            None
+        } else {
+            Some(HTTP_ERROR_CLUSTER.to_string())
+        }
     } else {
-        let Some(id) = weighted::resolve_backend_refs(
+        let id = weighted::resolve_backend_refs(
             inputs,
             index,
             clusters,
@@ -982,10 +1014,8 @@ fn attach_rule(
             problems,
             resolved_refs,
             resolved_refs_reason,
-        ) else {
-            return;
-        };
-        Some(id)
+        );
+        Some(id.unwrap_or_else(|| HTTP_ERROR_CLUSTER.to_string()))
     };
 
     // Reduce the rule's matches to (path, method) pairs. No `matches` means
@@ -1028,6 +1058,9 @@ fn attach_rule(
             let (Some(bind), Some(protocol)) = (l.bind, l.protocol) else {
                 continue; // unreachable: a programmed listener resolved both
             };
+            if cluster_id.as_deref() == Some(HTTP_ERROR_CLUSTER) {
+                add_http_error_backend(cfg, clusters, backends);
+            }
             for hostname in hosts {
                 frontends.push(SourcedFrontend {
                     frontend: ir::Frontend {

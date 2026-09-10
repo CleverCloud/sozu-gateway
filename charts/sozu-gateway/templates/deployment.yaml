@@ -145,6 +145,8 @@ spec:
               value: {{ .Values.controller.resyncSecs | quote }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
+            - name: SOZU_GW_HTTP_ERROR_LISTEN
+              value: "127.0.0.1:{{ include "sozu-gateway.httpErrorPort" . }}"
             {{- if .Values.controller.watchTimeoutSecs }}
             - name: SOZU_GW_WATCH_TIMEOUT_SECS
               value: {{ .Values.controller.watchTimeoutSecs | quote }}
@@ -172,6 +174,13 @@ spec:
             {{- end }}
             - name: RUST_LOG
               value: {{ .Values.controller.logLevel | quote }}
+          {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
+          # Keep the local error backend alive while the Pod leaves rotation.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep \"$1\"", "drain", {{ include "sozu-gateway.drainDelay" . | int | quote }}]
+          {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.controller.healthPort | default 8081 }}

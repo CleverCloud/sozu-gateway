@@ -180,6 +180,14 @@ string** that `ReplaceFullPath` keeps. `ReplacePrefixMatch` is a real limit — 
 regex's only capture group is the element boundary, so `$PATH[1]` yields `/`, not the remainder.
 The translator already maps `ir::Rewrite`, so the builder side is the only piece missing.
 
+Invalid or omitted HTTP backend references retain their match and route to a fixed
+HTTP 500 backend on controller loopback (`--http-error-listen`, default
+`127.0.0.1:8082`). The builder only records its configured address in ordinary IR
+clusters/backends; the controller owns the HTTP server and stops on bind failure
+or unexpected server exit. A resolved Service without ready endpoints keeps its
+empty cluster and returns 503. Invalid refs keep `ResolvedRefs: False`; omitted
+refs have nothing to resolve and keep `True`.
+
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
 *required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no
 layer-4 routing, everything else unaffected). `crd_served` reads **only a 404** as absent, so the
@@ -204,7 +212,7 @@ reproduction in [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6, reports in
 the `Selector` implementation, when the suite **aborted in setup** because
 `NamespacesMustBeReady` demands every base Gateway be `Programmed: True` and one of them uses
 `from: Selector`; those rows are conditioned and must never be quoted bare. The profile **cannot
-fully pass** on Sōzu (no header/query matching, no HTTP 500), so don't chase
+fully pass** on Sōzu (no header/query matching), so don't chase
 the "Conformant" badge — and don't read the recorded failures as regressions.
 `GatewayClass.status.supportedFeatures` is published **empty** on purpose: an entry goes in only
 when a recorded run shows its tests passing. [docs/features.md](docs/features.md) is the
