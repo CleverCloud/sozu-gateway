@@ -42,7 +42,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
 | API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
-| API gateway | Weighted split across multiple Services | ✅ | Gateway `backendRefs` compile to a Random cluster with Service shares normalized across ready endpoints; see limitations below |
+| API gateway | Weighted split across multiple Services | ✅ | Gateway `backendRefs` compile to a Random cluster with Service shares normalized across ready endpoints; proportions apply to new backend selections, not every request on a persistent connection; see limitations below |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
 | Gateway API | `Gateway.spec.infrastructure.parametersRef` | ❌ | no parameter kinds are supported; an explicit reference rejects the Gateway with `Accepted: False` / `InvalidParameters`, without programming its routes or certificates |
@@ -56,7 +56,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
 | Gateway API | One Service `backendRef` per rule | ✅ | positive weights retain the existing Service cluster; an all-zero HTTP rule returns 500 without forwarding to its references |
 | Gateway API | Weighted multi-`backendRef` split | ✅ | HTTPRoute, TCPRoute and UDPRoute; zero-weight targets never receive traffic |
-| Gateway API | Invalid or omitted HTTP `backendRefs` | ✅ | a missing Service/port, disallowed cross-namespace ref or unsupported kind keeps its declared share as HTTP 500 while preserving the match. Invalid refs report `ResolvedRefs: False`; omitted/empty refs report `True`. A resolved Service without ready endpoints retains HTTP 503. Redirects remain independent of backends; see weighted limitations below |
+| Gateway API | Invalid or omitted HTTP `backendRefs` | ✅ | a missing Service/port, disallowed cross-namespace ref or unsupported kind keeps its declared share as HTTP 500 for new backend selections while preserving the match. Invalid refs report `ResolvedRefs: False`; omitted/empty refs report `True`. A resolved Service without ready endpoints retains HTTP 503. Redirects remain independent of backends; persistent-connection limits apply below |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
 | Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
 | Gateway API | Per-`backendRef` filters | ❌ | filters wire onto the frontend, not one backend; reported (`FilterUnsupported`), the rule still routes without them |
@@ -116,10 +116,19 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   annotations for load balancing, connection limits or retry settings. A rule with one backendRef of positive
   weight keeps its existing Service cluster and annotations. UDP chooses a backend for each new flow;
   datagrams of an established flow keep that choice.
+  HTTP also reuses connected backends before running the load balancer again
+  ([Sōzu 2.2.1](https://github.com/sozu-proxy/sozu/blob/2.2.1/lib/src/protocol/kawa_h1/mod.rs#L1693-L1711)).
+  Requests on one persistent connection can stay on one Service. The local error responders
+  close their backend connections; subsequent requests can select a healthy Service and then
+  keep reusing it. HTTP 500/503 proportions therefore describe independent backend selections,
+  not every request within a persistent connection. The official conformance client's
+  [disabled keep-alives](https://github.com/kubernetes-sigs/gateway-api/blob/v1.6.2/conformance/utils/roundtripper/roundtripper.go#L133-L143)
+  do not exercise this limitation.
   For HTTP, invalid references set `ResolvedRefs=False` and retain their share as 500 responses.
   Resolved Services without ready endpoints report `NoReadyEndpoints` and retain their share as
-  503 responses. The proportions follow the [Gateway API error rules](https://github.com/kubernetes-sigs/gateway-api/blob/v1.6.2/apis/v1/httproute_types.go#L278-L291),
-  including when endpoint membership or ReferenceGrants change. An all-zero HTTP rule returns
+  503 responses. Those configured shares follow the [Gateway API error rules](https://github.com/kubernetes-sigs/gateway-api/blob/v1.6.2/apis/v1/httproute_types.go#L278-L291),
+  subject to the connection-reuse and availability limits above, including when endpoint membership
+  or ReferenceGrants change. An all-zero HTTP rule returns
   500 as an implementation choice: zero-weight references receive no traffic, as the API requires.
   They still report `NoPositiveBackendWeight` without declaring valid references unresolved.
   Namespace grants, Service existence and ports are checked even for zero-weight references.
