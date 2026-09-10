@@ -4,6 +4,25 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Gateway certificate name inference
+
+HTTPS listeners sharing a certificate now retain the DNS names inferred by a
+listener without `hostname`, alongside the explicit names of other listeners.
+Invalid or empty inferred names reject only the listener requesting inference.
+
+Roll the gateway Pods when adopting this change so Sōzu loads the corrected
+name set. Restarting only the controller cannot repair the names of an already
+loaded certificate: Sōzu 2.2.1 acknowledges replacement of the same fingerprint
+without updating its SNI names.
+
+This limitation also applies when adding or removing a hostname-less listener,
+or changing explicit listener hostnames, while retaining the same certificate.
+Roll the gateway Pods after such changes until the native Sōzu update tracked
+in [#81](https://github.com/CleverCloud/sozu-gateway/issues/81) is available.
+Rotation to a certificate with a different fingerprint remains supported.
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's

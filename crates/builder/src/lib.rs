@@ -670,10 +670,30 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
 /// PEM labels we accept for `tls.key` (PKCS#8, PKCS#1 and SEC1).
 const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"];
 
+/// Inferred names reach Sōzu's SNI trie directly, including its regex grammar.
+/// Validate before merging so an invalid inferred name cannot invalidate a
+/// certificate also used by a listener with an explicit hostname.
+fn validate_inferred_certificate_names(names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
+        return Err("tls.crt has no DNS SAN or common name to infer for the listener".into());
+    }
+    for name in names {
+        // Sōzu's TLS resolver caps names at MAX_HOSTNAME_LENGTH (4096 bytes).
+        // Its public SNI validator excludes malformed labels and regex syntax;
+        // the bare wildcard is also supported by certificate name inference.
+        if name.len() > 4096
+            || (name != "*" && sozu_command_lib::config::validate_sni_pattern(name).is_err())
+        {
+            return Err("tls.crt contains an unsupported inferred SNI name".into());
+        }
+    }
+    Ok(())
+}
+
 /// Extract **and validate** leaf + chain + key PEM from a TLS Secret
-/// (`tls.crt` / `tls.key`). Returns `(leaf, chain, key, leaf_fingerprint)`;
-/// the fingerprint is the SHA-256 of the leaf's DER — Sōzu's identity for the
-/// certificate.
+/// (`tls.crt` / `tls.key`). An empty name override uses Sōzu's CN/SAN inference
+/// before certificates are merged, so an explicit override on another listener
+/// cannot discard the inferred names of a listener without a hostname.
 ///
 /// `split_certificate_chain` is purely textual (it scans for the BEGIN/END
 /// markers) and never decodes the base64 body, so everything is parsed here,
@@ -683,7 +703,9 @@ const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE
 /// certificates tier before frontends, so that blocks every frontend add.
 pub(crate) fn extract_cert(
     secret: &Secret,
-) -> Result<(String, Vec<String>, String, Vec<u8>), String> {
+    listener: SocketAddr,
+    mut names: Vec<String>,
+) -> Result<FingerprintedCert, String> {
     let data = secret
         .data
         .as_ref()
@@ -711,8 +733,12 @@ pub(crate) fn extract_cert(
     // fingerprint is the SHA-256 of the DER, the translator's identity.
     let leaf_pem = sozu_command_lib::certificate::parse_pem(leaf.as_bytes())
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
-    sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
+    let x509 = sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
+    if names.is_empty() {
+        names = sozu_command_lib::certificate::get_cn_and_san_attributes(&x509);
+        validate_inferred_certificate_names(&names)?;
+    }
     let fingerprint =
         sozu_command_lib::certificate::calculate_fingerprint_from_der(&leaf_pem.contents);
     // The intermediates ride in the same AddCertificate, so a corrupt one
@@ -734,7 +760,16 @@ pub(crate) fn extract_cert(
         ));
     }
 
-    Ok((leaf, chain, key, fingerprint))
+    Ok(FingerprintedCert {
+        fingerprint,
+        cert: ir::Certificate {
+            listener,
+            certificate: leaf,
+            chain,
+            key,
+            names,
+        },
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -1113,7 +1148,8 @@ pub(crate) struct FingerprintedCert {
 /// the fingerprint (not the PEM text) matters: two Secrets holding the same
 /// DER re-encoded with different line wrapping (cert-manager vs hand-made)
 /// are still one certificate to Sōzu. The first occurrence fixes the entry's
-/// position and PEM bytes (the DER is identical anyway).
+/// position and PEM bytes (the DER is identical anyway). Empty overrides are
+/// resolved from CN/SAN by [`extract_cert`] before reaching this union.
 fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
     let mut merged: Vec<FingerprintedCert> = Vec::new();
     for c in certs {
@@ -1206,23 +1242,17 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 None => problems.push(Problem::SecretNotFound {
                     secret: secret_name.clone(),
                 }),
-                Some(secret) => match extract_cert(secret) {
-                    Ok((leaf, chain, key, fingerprint)) => {
+                Some(secret) => match extract_cert(
+                    secret,
+                    cfg.bind_for(ExposedProtocol::Https)
+                        .expect("HTTPS is always exposed"),
+                    hosts.clone(),
+                ) {
+                    Ok(cert) => {
                         for h in &hosts {
                             tls_ready_hosts.insert(h.clone());
                         }
-                        certificates.push(FingerprintedCert {
-                            fingerprint,
-                            cert: ir::Certificate {
-                                listener: cfg
-                                    .bind_for(ExposedProtocol::Https)
-                                    .expect("HTTPS is always exposed"),
-                                certificate: leaf,
-                                chain,
-                                key,
-                                names: hosts,
-                            },
-                        });
+                        certificates.push(cert);
                     }
                     Err(reason) => problems.push(Problem::InvalidCertificate {
                         secret: secret_name.clone(),
@@ -1435,5 +1465,46 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         gateways: gw.gateways,
         routes: gw.routes,
         referenced_services: referenced,
+    }
+}
+
+#[cfg(test)]
+mod certificate_name_tests {
+    use super::validate_inferred_certificate_names;
+
+    #[test]
+    fn inferred_names_reject_trie_syntax_and_unusable_identities() {
+        for name in [
+            "",
+            ".example.org",
+            "example..org",
+            "example.org/",
+            "/example.*/",
+            "*.",
+            "a.*.org",
+            "éxample.org",
+        ] {
+            assert!(
+                validate_inferred_certificate_names(&["valid.example.org".into(), name.into()])
+                    .is_err(),
+                "invalid inferred name {name:?} must not poison a shared certificate"
+            );
+        }
+        assert!(validate_inferred_certificate_names(&[]).is_err());
+        assert!(validate_inferred_certificate_names(&["a".repeat(4097)]).is_err());
+    }
+
+    #[test]
+    fn inferred_names_keep_certificate_wildcards_and_the_resolver_length_bound() {
+        let names = [
+            "*",
+            "*.org",
+            "*.wildcard.org",
+            "cn-only.example.org",
+            "xn--xample-9ua.org",
+        ]
+        .map(String::from);
+        assert!(validate_inferred_certificate_names(&names).is_ok());
+        assert!(validate_inferred_certificate_names(&["a".repeat(4096)]).is_ok());
     }
 }

@@ -1,0 +1,393 @@
+//! Shared TLS certificate coverage through the compiler and command diff.
+
+use std::sync::Arc;
+
+use k8s_openapi::ByteString;
+use serde_json::json;
+use sozu_command_lib::proto::command::request::RequestType;
+use sozu_gw_builder::{build, BuildConfig, ExposedPort, ExposedProtocol, Inputs};
+use sozu_gw_ir as ir;
+use sozu_gw_translator::reconcile;
+
+// These certificates use the existing key_a.pem test key. The Gateway fixtures
+// have the conformance suite's SANs (*, *.org, *.wildcard.org), with a different
+// CN to catch accidental CN expansion when DNS SANs are present. The rotated
+// certificate has a different serial but the same names.
+const CERT: &str = include_str!("fixtures/cert_gateway.pem");
+const ROTATED_CERT: &str = include_str!("fixtures/cert_gateway_rotated.pem");
+const CN_CERT: &str = include_str!("fixtures/cert_cn_only.pem");
+const INVALID_SAN_CERT: &str = include_str!("fixtures/cert_invalid_san.pem");
+const NO_NAMES_CERT: &str = include_str!("fixtures/cert_no_names.pem");
+const KEY: &str = include_str!("fixtures/key_a.pem");
+const NAMESPACE: &str = "gateway-conformance-infra";
+const GATEWAY: &str = "same-namespace-with-https-listener";
+const SECRET: &str = "tls-validity-checks-certificate";
+
+fn object<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> T {
+    serde_json::from_value(value).expect("valid fixture")
+}
+
+fn listener(name: &str, hostname: Option<&str>, port: u16) -> serde_json::Value {
+    json!({
+        "name": name, "hostname": hostname, "port": port, "protocol": "HTTPS",
+        "allowedRoutes": { "namespaces": { "from": "Same" } },
+        "tls": { "certificateRefs": [{ "name": SECRET }] }
+    })
+}
+
+fn inputs() -> Inputs {
+    // Gateway API v1.6.2 HTTPRouteHTTPSListener: all four base listeners share
+    // one certificate. One route names example.org; the other inherits the
+    // second listener's hostname. unknown-example.org must complete TLS but
+    // has no frontend, so the data plane can return HTTP 404.
+    let listeners = vec![
+        listener("https", None, 443),
+        listener("https-with-hostname", Some("second-example.org"), 443),
+        listener("https-with-wildcard-hostname", Some("*.wildcard.org"), 443),
+        listener(
+            "https-with-hostname-matching-wildcard",
+            Some("fourth-example.wildcard.org"),
+            443,
+        ),
+    ];
+    let mut inputs = Inputs {
+        gateway_classes: vec![Arc::new(object(json!({
+            "metadata": { "name": "sozu" },
+            "spec": { "controllerName": "sozu.io/gateway-controller" }
+        })))],
+        gateways: vec![Arc::new(object(json!({
+            "metadata": { "name": GATEWAY, "namespace": NAMESPACE },
+            "spec": { "gatewayClassName": "sozu", "listeners": listeners }
+        })))],
+        http_routes: vec![
+            Arc::new(object(json!({
+                "metadata": { "name": "httproute-https-test", "namespace": NAMESPACE },
+                "spec": {
+                    "parentRefs": [{ "name": GATEWAY }], "hostnames": ["example.org"],
+                    "rules": [{ "backendRefs": [{ "name": "infra-backend-v1", "port": 8080 }] }]
+                }
+            }))),
+            Arc::new(object(json!({
+                "metadata": { "name": "httproute-https-test-no-hostname", "namespace": NAMESPACE },
+                "spec": {
+                    "parentRefs": [{ "name": GATEWAY, "sectionName": "https-with-hostname" }],
+                    "rules": [{ "backendRefs": [{ "name": "infra-backend-v2", "port": 8080 }] }]
+                }
+            }))),
+        ],
+        secrets: vec![Arc::new(object(json!({
+            "metadata": { "name": SECRET, "namespace": NAMESPACE },
+            "type": "kubernetes.io/tls",
+            "data": {
+                "tls.crt": ByteString(CERT.as_bytes().to_vec()),
+                "tls.key": ByteString(KEY.as_bytes().to_vec())
+            }
+        })))],
+        ..Default::default()
+    };
+    for (name, address) in [
+        ("infra-backend-v1", "10.0.0.1"),
+        ("infra-backend-v2", "10.0.0.2"),
+    ] {
+        inputs.services.push(Arc::new(object(json!({
+            "metadata": { "name": name, "namespace": NAMESPACE },
+            "spec": { "ports": [{ "name": "http", "port": 8080 }] }
+        }))));
+        inputs.endpointslices.push(Arc::new(object(json!({
+            "metadata": { "name": name, "namespace": NAMESPACE,
+                "labels": { "kubernetes.io/service-name": name } },
+            "addressType": "IPv4", "ports": [{ "name": "http", "port": 8080 }],
+            "endpoints": [{ "addresses": [address], "conditions": { "ready": true } }]
+        }))));
+    }
+    inputs
+}
+
+fn expected_names() -> Vec<String> {
+    [
+        "*",
+        "*.org",
+        "*.wildcard.org",
+        "fourth-example.wildcard.org",
+        "second-example.org",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+fn replace_secret_cert(inputs: &mut Inputs, pem: &str) {
+    Arc::make_mut(&mut inputs.secrets[0])
+        .data
+        .as_mut()
+        .unwrap()
+        .insert("tls.crt".into(), ByteString(pem.as_bytes().to_vec()));
+}
+
+#[test]
+fn https_conformance_listeners_preserve_inferred_and_explicit_names() {
+    let out = build(&BuildConfig::default(), &inputs());
+    assert!(out.gateways[0].programmed);
+    assert!(out.routes.iter().all(|route| route
+        .parents
+        .iter()
+        .all(|parent| parent.accepted && parent.resolved_refs)));
+    assert_eq!(out.ir.certificates.len(), 1);
+    assert_eq!(out.ir.certificates[0].names, expected_names());
+    assert_eq!(out.ir.frontends.len(), 2);
+    for (hostname, backend) in [
+        ("example.org", "infra-backend-v1"),
+        ("second-example.org", "infra-backend-v2"),
+    ] {
+        let frontend = out
+            .ir
+            .frontends
+            .iter()
+            .find(|f| f.hostname == hostname)
+            .unwrap();
+        assert!(frontend.tls);
+        assert_eq!(
+            frontend.cluster_id,
+            Some(format!("{NAMESPACE}.{backend}.8080"))
+        );
+    }
+    assert!(out
+        .ir
+        .frontends
+        .iter()
+        .all(|f| f.hostname != "unknown-example.org"));
+
+    let requests = reconcile(&ir::Ir::default(), &out.ir).unwrap();
+    let certs: Vec<_> = requests
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddCertificate(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(certs.len(), 1);
+    assert_eq!(
+        certs[0].certificate.get_overriding_names().unwrap(),
+        expected_names()
+    );
+    assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
+}
+
+#[test]
+fn removing_the_hostname_less_listener_restricts_the_desired_names() {
+    let mut inputs = inputs();
+    let before = build(&BuildConfig::default(), &inputs).ir;
+    assert_eq!(before.certificates[0].names, expected_names());
+    Arc::make_mut(&mut inputs.gateways[0])
+        .spec
+        .listeners
+        .remove(0);
+    let after = build(&BuildConfig::default(), &inputs).ir;
+    assert_eq!(
+        after.certificates[0].names,
+        vec![
+            "*.wildcard.org",
+            "fourth-example.wildcard.org",
+            "second-example.org"
+        ]
+    );
+    // This verifies the compiler's desired state. Applying new names to an
+    // already loaded fingerprint still requires the Sōzu change tracked in #81.
+    assert_eq!(
+        after.certificates[0].certificate,
+        before.certificates[0].certificate
+    );
+}
+
+#[test]
+fn shared_cn_only_certificate_keeps_the_cn_fallback() {
+    let mut inputs = inputs();
+    replace_secret_cert(&mut inputs, CN_CERT);
+    Arc::make_mut(&mut inputs.gateways[0])
+        .spec
+        .listeners
+        .truncate(2);
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(
+        out.ir.certificates[0].names,
+        vec!["cn-only.example.org", "second-example.org"]
+    );
+}
+
+#[test]
+fn inferred_names_are_scoped_to_their_listener_bind() {
+    let mut inputs = inputs();
+    let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+    listeners.truncate(2);
+    listeners[1].port = 9443;
+    let mut cfg = BuildConfig::default();
+    cfg.exposure.push(ExposedPort {
+        name: "https-alt".into(),
+        port: 9443,
+        bind: 9444,
+        protocol: ExposedProtocol::Https,
+        transport: Some("TCP".into()),
+        owner: None,
+    });
+    let out = build(&cfg, &inputs);
+    assert_eq!(out.ir.certificates.len(), 2);
+    for cert in &out.ir.certificates {
+        match cert.listener.port() {
+            443 => assert_eq!(cert.names, vec!["*", "*.org", "*.wildcard.org"]),
+            9444 => assert_eq!(cert.names, vec!["second-example.org"]),
+            port => panic!("unexpected certificate bind {port}"),
+        }
+    }
+}
+
+#[test]
+fn equivalent_der_and_listener_order_keep_the_same_name_coverage() {
+    let mut inputs = inputs();
+    let before = build(&BuildConfig::default(), &inputs).ir;
+    let body: String = CERT
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let wrapped = body
+        .as_bytes()
+        .chunks(48)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pem = format!("-----BEGIN CERTIFICATE-----\n{wrapped}\n-----END CERTIFICATE-----\n");
+    assert_ne!(pem, CERT);
+    let mut alternate = (*inputs.secrets[0]).clone();
+    alternate.metadata.name = Some("rewrapped".into());
+    alternate
+        .data
+        .as_mut()
+        .unwrap()
+        .insert("tls.crt".into(), ByteString(pem.into_bytes()));
+    inputs.secrets.push(Arc::new(alternate));
+    let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+    listeners[1]
+        .tls
+        .as_mut()
+        .unwrap()
+        .certificate_refs
+        .as_mut()
+        .unwrap()[0]
+        .name = "rewrapped".into();
+    listeners.reverse();
+    let after = build(&BuildConfig::default(), &inputs).ir;
+    assert_eq!(after.certificates.len(), 1);
+    assert_eq!(after.certificates[0].names, expected_names());
+    assert!(reconcile(&before, &after).unwrap().is_empty());
+}
+
+#[test]
+fn shared_certificate_rotation_keeps_names_in_a_single_replace() {
+    let mut inputs = inputs();
+    let before = build(&BuildConfig::default(), &inputs).ir;
+    replace_secret_cert(&mut inputs, ROTATED_CERT);
+    let after = build(&BuildConfig::default(), &inputs).ir;
+    let requests = reconcile(&before, &after).unwrap();
+    assert_eq!(requests.len(), 1);
+    let Some(RequestType::ReplaceCertificate(replacement)) = &requests[0].request_type else {
+        panic!("certificate rotation must be one replacement");
+    };
+    assert_eq!(replacement.new_certificate.names, expected_names());
+    assert_ne!(
+        before.certificates[0].certificate,
+        after.certificates[0].certificate
+    );
+    assert!(reconcile(&after, &after).unwrap().is_empty());
+}
+
+// A shared certificate may have usable explicit overrides even when its SANs
+// cannot enter Sōzu's trie. Adding an invalid inference must leave that existing
+// certificate installed, regardless of listener order.
+fn assert_rejected_inference_preserves_named_listener(pem: &str, reason: &str) {
+    for inferred_first in [false, true] {
+        let mut inputs = inputs();
+        replace_secret_cert(&mut inputs, pem);
+        let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+        let inferred = listeners.remove(0);
+        listeners.truncate(1);
+        let before = build(&BuildConfig::default(), &inputs);
+        assert!(before.gateways[0].listeners[0].programmed);
+        assert!(before.gateways[0].problems.is_empty());
+        assert_eq!(before.ir.certificates.len(), 1);
+        assert_eq!(before.ir.certificates[0].names, vec!["second-example.org"]);
+        assert_eq!(before.ir.frontends.len(), 1);
+
+        let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+        listeners.insert(if inferred_first { 0 } else { 1 }, inferred);
+        let after = build(&BuildConfig::default(), &inputs);
+        let inferred_status = after.gateways[0]
+            .listeners
+            .iter()
+            .find(|listener| listener.name == "https")
+            .unwrap();
+        assert!(!inferred_status.resolved_refs);
+        assert_eq!(
+            inferred_status.resolved_refs_reason,
+            "InvalidCertificateRef"
+        );
+        assert!(!inferred_status.programmed);
+        let named_status = after.gateways[0]
+            .listeners
+            .iter()
+            .find(|listener| listener.name == "https-with-hostname")
+            .unwrap();
+        assert!(named_status.resolved_refs && named_status.programmed);
+        assert!(after.gateways[0].problems.iter().any(|problem| matches!(
+            problem,
+            sozu_gw_builder::Problem::InvalidCertificate { reason: detail, .. }
+                if detail.contains(reason)
+        )));
+        assert_eq!(after.ir.certificates, before.ir.certificates);
+        assert_eq!(after.ir.frontends, before.ir.frontends);
+        assert!(
+            reconcile(&before.ir, &after.ir)
+                .unwrap()
+                .iter()
+                .all(|request| !matches!(
+                    request.request_type,
+                    Some(
+                        RequestType::RemoveCertificate(_)
+                            | RequestType::AddCertificate(_)
+                            | RequestType::ReplaceCertificate(_)
+                    )
+                )),
+            "a rejected listener must not remove or reload the working certificate"
+        );
+    }
+}
+
+#[test]
+fn invalid_inferred_san_preserves_the_named_listeners_certificate() {
+    // The valid SAN matches the named listener; the extra malformed SAN must
+    // not enter the merged names when another listener requests inference.
+    assert_rejected_inference_preserves_named_listener(
+        INVALID_SAN_CERT,
+        "unsupported inferred SNI",
+    );
+}
+
+#[test]
+fn missing_inferred_names_fail_only_the_hostname_less_listener() {
+    assert_rejected_inference_preserves_named_listener(NO_NAMES_CERT, "no DNS SAN or common name");
+}
+
+#[test]
+fn a_hostname_less_listener_needs_at_least_one_inferred_name() {
+    let mut inputs = inputs();
+    replace_secret_cert(&mut inputs, NO_NAMES_CERT);
+    Arc::make_mut(&mut inputs.gateways[0])
+        .spec
+        .listeners
+        .truncate(1);
+    let out = build(&BuildConfig::default(), &inputs);
+    let listener = &out.gateways[0].listeners[0];
+    assert!(!listener.resolved_refs);
+    assert_eq!(listener.resolved_refs_reason, "InvalidCertificateRef");
+    assert!(!listener.programmed);
+    assert!(out.ir.certificates.is_empty());
+    assert!(out.ir.frontends.is_empty());
+}
