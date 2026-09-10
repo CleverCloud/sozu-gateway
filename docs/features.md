@@ -121,6 +121,16 @@ One annotation is read from the **Ingress** instead (it depends on that Ingress'
 | ---------- | ------ | ------- | ------ |
 | `sozu.io/ssl-redirect` | `"true"` / `"false"` | `"true"` | Redirect HTTP→HTTPS (`301`) for hosts that have a loaded cert. Auto-on; set `"false"` to keep serving plain HTTP. (Gateway API uses an explicit `RequestRedirect` filter instead.) |
 
+## HTTP and HTTPS exposure
+
+The chart accepts multiple HTTP and HTTPS entries in `exposure`. Each Gateway
+listener selects its advertised `(protocol, port)` and gets the corresponding
+bind; HTTPS certificate stores remain separate per bind. The first entry of each
+protocol serves Ingress routes. Keep these entries first when adding ports.
+
+Sōzu creates these listeners at boot. Updating the table rolls the gateway Pods
+and interrupts connections that do not finish draining before termination.
+
 ## L4 (TCP/UDP)
 
 UDP flow identity includes the client IP and source port; clients sharing an IP

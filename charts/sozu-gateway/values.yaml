@@ -146,6 +146,10 @@ rbac:
 #           Gateways race for it. HTTP/HTTPS multiplex on hostname and stay
 #           shared.
 #
+# Multiple HTTP/HTTPS entries are supported. Each is declared in Sōzu at boot;
+# changing the table rolls the Pods. Gateway API selects (protocol, port), while
+# Ingress uses the first entry of each protocol. Keep those first entries stable.
+#
 # `bind` values must be unique — two entries on one socket cannot both be added,
 # and the failure takes the whole reconcile with it.
 #

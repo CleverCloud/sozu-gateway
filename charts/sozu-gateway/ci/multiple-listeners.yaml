@@ -1,0 +1,16 @@
+exposure:
+  - {name: web, port: 80, bind: 8080, protocol: HTTP, transport: TCP}
+  - {name: tls, port: 443, bind: 8443, protocol: HTTPS, transport: TCP}
+  - {name: web-extra, port: 5300, bind: 5300, protocol: HTTP, transport: TCP}
+  - {name: tls-extra, port: 9443, bind: 9443, protocol: HTTPS, transport: TCP}
+sozu:
+  timeouts:
+    front: 45
+  hardening:
+    sozuIdHeader: x-proxy-id
+    strictSniBinding: false
+    sendXRealIp: true
+    elideXRealIp: true
+    hsts:
+      enabled: true
+      maxAge: 86400
