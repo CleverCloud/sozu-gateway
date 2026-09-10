@@ -1,0 +1,37 @@
+{
+  "time": "2026-09-10T16:13:07.427683+00:00",
+  "official_gateway_uids": [
+    "18920c44-17e2-42f8-8a5f-f816eff27d65",
+    "2bb5c98d-12d2-448e-be2c-8b242e59ad1a",
+    "b1942309-b274-41af-ba4b-745a1e0c2660",
+    "dd05ab1e-823e-4486-bade-3b2bfc123193"
+  ],
+  "official_gateway_addresses": {
+    "same-namespace": [
+      {
+        "type": "IPAddress",
+        "value": "172.30.153.98"
+      }
+    ],
+    "all-namespaces": [
+      {
+        "type": "IPAddress",
+        "value": "172.29.162.172"
+      }
+    ],
+    "backend-namespaces": [
+      {
+        "type": "IPAddress",
+        "value": "172.30.54.132"
+      }
+    ],
+    "same-namespace-with-https-listener": [
+      {
+        "type": "IPAddress",
+        "value": "172.26.21.98"
+      }
+    ]
+  },
+  "fixture_namespaces": [],
+  "official_generated_resources": []
+}

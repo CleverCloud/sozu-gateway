@@ -1,0 +1,690 @@
+{
+  "observed_from": "2026-09-10T16:24:34.280975+00:00",
+  "observed_until": "2026-09-10T16:24:35.082320+00:00",
+  "context": "sozu-gateway-upgrade@kubernetes_01M257SQRH3TT7QCXPQB7RM1FH",
+  "result": "PASS",
+  "command": [
+    "kubectl",
+    "--context",
+    "sozu-gateway-upgrade@kubernetes_01M257SQRH3TT7QCXPQB7RM1FH",
+    "--request-timeout=20s",
+    "get",
+    "namespaces,nodes,pods,gatewayclasses",
+    "-A",
+    "-o",
+    "json"
+  ],
+  "selection": "All namespaces, nodes and GatewayClasses; Pods in original application and gateway namespaces. Metadata and readiness fields retained.",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "default",
+        "uid": "22e0b5eb-0792-4dc1-9dfa-cd81d9c644be",
+        "resourceVersion": "8"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "kube-node-lease",
+        "uid": "51b159e0-fb8c-4838-812a-727059083fba",
+        "resourceVersion": "26"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "kube-public",
+        "uid": "39088f32-5427-4295-8e67-3b99f8048ac1",
+        "resourceVersion": "7"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "kube-system",
+        "uid": "ad7a06fe-c83b-4048-98d5-3c5b52538bbb",
+        "resourceVersion": "3"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "sozu-demo",
+        "uid": "474ed361-3370-45f3-89be-630a4d5edfdc",
+        "resourceVersion": "1934"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "sozu-system",
+        "uid": "0487c80e-2058-4d1a-adb9-60838caa6982",
+        "resourceVersion": "2079"
+      },
+      "status": {
+        "phase": "Active"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "manual-nodegroup-node0",
+        "uid": "e56ab061-aaf8-4438-9d60-d7392a1001e7",
+        "resourceVersion": "130144"
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastHeartbeatTime": "2026-09-10T08:48:30Z",
+            "lastTransitionTime": "2026-09-10T08:48:30Z",
+            "message": "Cilium is running on this node",
+            "reason": "CiliumIsUp",
+            "status": "False",
+            "type": "NetworkUnavailable"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:23:07Z",
+            "lastTransitionTime": "2026-09-10T08:48:02Z",
+            "message": "kubelet has sufficient memory available",
+            "reason": "KubeletHasSufficientMemory",
+            "status": "False",
+            "type": "MemoryPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:23:07Z",
+            "lastTransitionTime": "2026-09-10T13:51:56Z",
+            "message": "kubelet has no disk pressure",
+            "reason": "KubeletHasNoDiskPressure",
+            "status": "False",
+            "type": "DiskPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:23:07Z",
+            "lastTransitionTime": "2026-09-10T08:48:02Z",
+            "message": "kubelet has sufficient PID available",
+            "reason": "KubeletHasSufficientPID",
+            "status": "False",
+            "type": "PIDPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:23:07Z",
+            "lastTransitionTime": "2026-09-10T08:48:25Z",
+            "message": "kubelet is posting ready status",
+            "reason": "KubeletReady",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "manual-nodegroup-node1",
+        "uid": "bc980afb-06f4-45f8-b522-627079200aa7",
+        "resourceVersion": "130411"
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastHeartbeatTime": "2026-09-10T08:48:30Z",
+            "lastTransitionTime": "2026-09-10T08:48:30Z",
+            "message": "Cilium is running on this node",
+            "reason": "CiliumIsUp",
+            "status": "False",
+            "type": "NetworkUnavailable"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:24:31Z",
+            "lastTransitionTime": "2026-09-10T08:48:01Z",
+            "message": "kubelet has sufficient memory available",
+            "reason": "KubeletHasSufficientMemory",
+            "status": "False",
+            "type": "MemoryPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:24:31Z",
+            "lastTransitionTime": "2026-09-10T08:48:01Z",
+            "message": "kubelet has no disk pressure",
+            "reason": "KubeletHasNoDiskPressure",
+            "status": "False",
+            "type": "DiskPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:24:31Z",
+            "lastTransitionTime": "2026-09-10T08:48:01Z",
+            "message": "kubelet has sufficient PID available",
+            "reason": "KubeletHasSufficientPID",
+            "status": "False",
+            "type": "PIDPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:24:31Z",
+            "lastTransitionTime": "2026-09-10T08:48:24Z",
+            "message": "kubelet is posting ready status",
+            "reason": "KubeletReady",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "manual-nodegroup-node2",
+        "uid": "75bc9316-60d6-4602-9a22-f43481280af1",
+        "resourceVersion": "129514"
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastHeartbeatTime": "2026-09-10T08:48:30Z",
+            "lastTransitionTime": "2026-09-10T08:48:30Z",
+            "message": "Cilium is running on this node",
+            "reason": "CiliumIsUp",
+            "status": "False",
+            "type": "NetworkUnavailable"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:19:51Z",
+            "lastTransitionTime": "2026-09-10T08:48:02Z",
+            "message": "kubelet has sufficient memory available",
+            "reason": "KubeletHasSufficientMemory",
+            "status": "False",
+            "type": "MemoryPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:19:51Z",
+            "lastTransitionTime": "2026-09-10T08:48:02Z",
+            "message": "kubelet has no disk pressure",
+            "reason": "KubeletHasNoDiskPressure",
+            "status": "False",
+            "type": "DiskPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:19:51Z",
+            "lastTransitionTime": "2026-09-10T08:48:02Z",
+            "message": "kubelet has sufficient PID available",
+            "reason": "KubeletHasSufficientPID",
+            "status": "False",
+            "type": "PIDPressure"
+          },
+          {
+            "lastHeartbeatTime": "2026-09-10T16:19:51Z",
+            "lastTransitionTime": "2026-09-10T08:48:25Z",
+            "message": "kubelet is posting ready status",
+            "reason": "KubeletReady",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "echo-headers-6b86fd957b-twgbv",
+        "namespace": "sozu-demo",
+        "uid": "fe340160-23b7-42b1-b387-569e7cf99e5d",
+        "resourceVersion": "2814"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:09Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:08Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:09Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:09Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:08Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "whoami",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/traefik/whoami@sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "echo-tcp-566fc99f75-brnn4",
+        "namespace": "sozu-demo",
+        "uid": "445c83c3-26c6-4fce-9a86-374fa69c7c90",
+        "resourceVersion": "3131"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:42Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:41Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:43Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:43Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:40Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "socat",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/alpine/socat@sha256:a6be4c0262b339c53ddad723cdd178a1a13271e1137c65e27f90a08c16de02b8"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "echo-udp-5c44764bf7-hf4fh",
+        "namespace": "sozu-demo",
+        "uid": "7be802f8-aea4-44ae-a5c7-f155dccb0c7f",
+        "resourceVersion": "3138"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:42Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:41Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:44Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:44Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:54:41Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "socat",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/alpine/socat@sha256:a6be4c0262b339c53ddad723cdd178a1a13271e1137c65e27f90a08c16de02b8"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "whoami-6d99c9ffd9-2vssf",
+        "namespace": "sozu-demo",
+        "uid": "a1a44798-37f6-4d60-877a-347412fd1454",
+        "resourceVersion": "2300"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:29Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:28Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:31Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:31Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:28Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "whoami",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/traefik/whoami@sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "whoami-6d99c9ffd9-d99xk",
+        "namespace": "sozu-demo",
+        "uid": "5d8ec11f-f3a0-4e7e-9aa2-45a9ce4db13b",
+        "resourceVersion": "2305"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:29Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:28Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:31Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:31Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T08:52:28Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "whoami",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/traefik/whoami@sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "sozu-gateway-67dcbbd7b9-rl4rb",
+        "namespace": "sozu-system",
+        "uid": "9ac632ad-7287-425a-9996-9419221baa41",
+        "resourceVersion": "102801"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:39Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:38Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:42Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:42Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:38Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "controller",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "ttl.sh/sozu-conformance-controller-041fe09c-e46b-4501-928d-00460631c57c@sha256:060e0832b9e184689a200d8c2ab8baaf9ce39fa6592a87ee787904054327c98e"
+          },
+          {
+            "name": "sozu",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/clevercloud/sozu@sha256:7ba9ef2f63aa53766ed5d66f7f756bedf1bf39232a2024368b8081f9c933a096"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "sozu-gateway-67dcbbd7b9-tmz97",
+        "namespace": "sozu-system",
+        "uid": "d76a9efd-9817-4348-9c37-02c271de0932",
+        "resourceVersion": "103093"
+      },
+      "status": {
+        "phase": "Running",
+        "conditions": [
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:45Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodReadyToStartContainers"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:44Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Initialized"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:25:48Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:25:48Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "ContainersReady"
+          },
+          {
+            "lastProbeTime": null,
+            "lastTransitionTime": "2026-09-10T14:24:44Z",
+            "observedGeneration": 1,
+            "status": "True",
+            "type": "PodScheduled"
+          }
+        ],
+        "containers": [
+          {
+            "name": "controller",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "ttl.sh/sozu-conformance-controller-041fe09c-e46b-4501-928d-00460631c57c@sha256:060e0832b9e184689a200d8c2ab8baaf9ce39fa6592a87ee787904054327c98e"
+          },
+          {
+            "name": "sozu",
+            "ready": true,
+            "restartCount": 0,
+            "imageID": "docker.io/clevercloud/sozu@sha256:7ba9ef2f63aa53766ed5d66f7f756bedf1bf39232a2024368b8081f9c933a096"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "gateway.networking.k8s.io/v1",
+      "kind": "GatewayClass",
+      "metadata": {
+        "name": "sozu",
+        "uid": "c2507c0b-7647-43f4-a4f4-1b78a10ea4c0",
+        "resourceVersion": "2783"
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-10T08:54:07Z",
+            "message": "Accepted by sozu-gateway",
+            "observedGeneration": 1,
+            "reason": "Accepted",
+            "status": "True",
+            "type": "Accepted"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -44,8 +44,10 @@ inside the cluster with `--conformance-profiles=GATEWAY-HTTP` and
 [Metadata](artifacts/2026-09-10-provisioning/official-metadata.json) records the
 complete command and result; the [log](artifacts/2026-09-10-provisioning/official-suite.log)
 and [unmodified report](gateway-provisioning_crd-v1.6.2_2026-09-10.yaml)
-retain the official verdict. All four fixture Gateway instances and fixture
-namespaces were collected after the run.
+retain the official verdict. The [post-suite inventory](artifacts/2026-09-10-provisioning/official-cleanup-inventory.json)
+records all four fixture Gateway UIDs and confirms that their generated resources
+and fixture namespaces were gone at 16:13:07 UTC, before uninstalling the test
+release.
 
 ## Lifecycle and ownership
 
@@ -67,7 +69,9 @@ lossless-startup or load benchmark. The 120 stage requests are separate from the
 36 continuous samples. [Lifecycle summary](artifacts/2026-09-10-provisioning/lifecycle-summary.json)
 and [HTTP identities](artifacts/2026-09-10-provisioning/lifecycle-http-identities.json)
 record the measurements. The lifecycle, focused suite and recovery probe use
-separate Gateways and namespaces on the same installation.
+separate Gateways and namespaces on the same installation. The lifecycle and
+official suite overlapped in time: the surviving Gateway sample also overlaps
+creation of the official fixtures.
 
 ## Infrastructure recovery
 
@@ -106,5 +110,7 @@ after five seconds, so one persistent error can increase API request volume.
 
 The test release, GatewayClass, build and runner namespaces, and runner RBAC
 were removed after validation. [Cleanup verification](artifacts/2026-09-10-provisioning/cleanup-summary.json)
-confirms the original six namespaces, original GatewayClass and three Ready
-nodes remain; the original application and gateway workloads are Ready.
+records the deletion requests and their completion. A subsequent
+[API inventory](artifacts/2026-09-10-provisioning/cleanup-final-inventory.json)
+confirms the original six namespaces, original GatewayClass, three Ready nodes
+and seven Ready application/gateway Pods, with capture times and object UIDs.
