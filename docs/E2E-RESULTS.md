@@ -361,8 +361,10 @@ Empty `set`/`add` values are explicitly refused. The historical reports above re
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
   `backendRef` yields 503, but the spec/tests want exactly 500 → the `HTTPRouteInvalid*BackendRef` /
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
-- **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
-  (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+- **No header/query-value matching** (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+  The weighted-split failures in the historical runs predate the current compiler's normalized
+  Random clusters. Those reports remain unchanged; exact proportional HTTP 500 responses for
+  invalid weighted references are still unsupported (see [features](features.md)).
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). **`HTTPRouteMultipleGateways` is the purest case**: it puts a

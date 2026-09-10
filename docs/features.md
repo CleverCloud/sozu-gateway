@@ -42,7 +42,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
 | API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
-| API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
+| API gateway | Weighted split across multiple Services | ✅ | Gateway `backendRefs` compile to a Random cluster with Service shares normalized across ready endpoints; see limitations below |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
 | Gateway API | `Gateway.spec.infrastructure.parametersRef` | ❌ | no parameter kinds are supported; an explicit reference rejects the Gateway with `Accepted: False` / `InvalidParameters`, without programming its routes or certificates |
@@ -52,18 +52,18 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
 | Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
-| Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) is rejected (`ZeroWeightBackendUnsupported`): Sōzu cannot express the spec's all-zero-weight 500 |
-| Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
+| Gateway API | One Service `backendRef` per rule | ✅ | positive weights retain the existing Service cluster; weight zero creates a non-forwarding rule (HTTP 503 rather than the required 500) |
+| Gateway API | Weighted multi-`backendRef` split | ✅ | HTTPRoute, TCPRoute and UDPRoute; zero-weight targets never receive traffic |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
 | Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
 | Gateway API | Per-`backendRef` filters | ❌ | filters wire onto the frontend, not one backend; reported (`FilterUnsupported`), the rule still routes without them |
 | Gateway API | `rule.timeouts` | ❌ | no Sōzu equivalent; reported (`TimeoutsUnsupported`), the rule still routes without the timeout |
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
 | Gateway API | `Gateway` TCP/UDP listeners | ✅ | the declared port must be a `TCP`/`UDP` entry of the chart's `exposure` table (only Helm can open a Service port); `owner` may reserve it for one namespace |
-| Gateway API | `TCPRoute` / `UDPRoute` | ✅ | one Service `backendRef`; a socket forwards to the oldest route with a resolved backend reference, by `creationTimestamp` then `namespace/name` (`L4RouteConflict` on other claimants); all admitted routes remain `Accepted: True` and count toward the listener's `attachedRoutes` |
+| Gateway API | `TCPRoute` / `UDPRoute` | ✅ | weighted Service `backendRefs`; a socket forwards to the oldest route with a resolved backend reference, by `creationTimestamp` then `namespace/name` (`L4RouteConflict` on other claimants); all admitted routes remain `Accepted: True` and count toward the listener's `attachedRoutes` |
 | Gateway API | `GRPCRoute` / `TLSRoute` | ❌ | |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
-| Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
+| Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one route, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
@@ -88,14 +88,30 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   the two share Sōzu's fields but not that behaviour.)
   The per-source-IP connection limit is wired through Service annotations (see below). HTTP Basic
   auth exists in Sōzu's data plane but has no core Gateway API filter, so it remains unwired.
-- **Hard limits.** Matching on header values or query parameters, weighted traffic split across
-  several Services, and request mirroring are not expressible in Sōzu today, so they are out of
-  scope rather than merely deferred.
+- **Weighted backendRefs.** Each Service receives its declared share, divided equally across its
+  ready endpoints. Integer rounding is bounded to one budget unit per Service and endpoint;
+  the total stays within `i32::MAX`. Equivalent addresses are combined, and zero-weight targets
+  are omitted even when every positive backend becomes unavailable. A positive share too small
+  to represent for every ready endpoint is refused with `WeightedBackendsInvalid`.
+  Composite clusters force Random and disable sticky sessions; they do not inherit Service
+  annotations for load balancing, connection limits or retry settings. A rule with one backendRef of positive
+  weight keeps its existing Service cluster and annotations. UDP chooses a backend for each new flow;
+  datagrams of an established flow keep that choice.
+  Invalid references set `ResolvedRefs=False`; Services without ready endpoints report
+  `NoReadyEndpoints`. Their share is redistributed to ready valid references, so proportional
+  HTTP 500 responses for invalid backends are **not implemented**. If no usable positive target
+  remains in a composite or all-zero rule, it still matches an isolated empty cluster: HTTP returns 503 rather than the
+  required 500, and TCP/UDP forward nothing. All-zero references report `NoPositiveBackendWeight`
+  without incorrectly declaring valid references unresolved. Namespace grants are still checked
+  for zero-weight references.
+- **Hard limits.** Matching on header values or query parameters and request mirroring are not
+  expressible in Sōzu today, so they are out of scope rather than merely deferred.
 
 ## Annotations
 
-Cluster-level routing is tuned with annotations on the backing **Service** (a cluster is 1:1 with a
-Service, so both an Ingress and a Gateway route to that Service share one configuration):
+Single-Service routing is tuned with annotations on the backing **Service**, so both an Ingress
+and a Gateway rule with one backendRef of positive weight share one configuration. Composite weighted
+clusters use the fixed policy described above:
 
 | Annotation | Values | Default | Effect |
 | ---------- | ------ | ------- | ------ |
@@ -163,8 +179,9 @@ A full example is in [`examples/api-gateway/l4-routes.yaml`](../examples/api-gat
 - The exposure entry's optional `owner` names the only namespace whose Gateways
   may declare that port. Down here there is no hostname to arbitrate with, so
   the alternative would be a race.
-- Weighted splits and `weight: 0` drains are refused exactly as they are for
-  HTTPRoute — Sōzu cannot express either.
+- Weighted splits use the same Service-share normalization as HTTPRoute. Zero-weight targets
+  are omitted; an entirely drained listener has no forwarding backend. The one-winner rule
+  for a contested listener remains unchanged.
 - **Ports must be > 1024, and 443 is impossible.** Both containers run as uid
   1000 with every capability dropped, and the Service already publishes 443/TCP
   for `https` — a Service cannot expose one `(port, protocol)` twice. The chart

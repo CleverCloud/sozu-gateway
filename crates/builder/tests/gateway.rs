@@ -94,7 +94,7 @@ fn https_gateway() -> Gateway {
 }
 
 /// HTTPRoute to `web:80` with one prefix match. `extra_backend` adds a second
-/// backendRef (to exercise the unsupported weighted-split path).
+/// backendRef (to exercise a partially invalid weighted split).
 fn route_to_web(extra_backend: bool) -> HttpRoute {
     let mut backend_refs = vec![json!({ "name": "web", "port": 80 })];
     if extra_backend {
@@ -213,7 +213,7 @@ fn other_controller_is_ignored() {
 }
 
 #[test]
-fn weighted_backends_are_unsupported() {
+fn an_invalid_weighted_ref_is_reported_while_valid_backends_route() {
     let inputs = Inputs {
         gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
         gateways: arcs(vec![http_gateway()]),
@@ -224,23 +224,19 @@ fn weighted_backends_are_unsupported() {
     };
     let out = build(&BuildConfig::default(), &inputs);
 
-    assert!(
-        out.ir.frontends.is_empty(),
-        "rule rejected, no route created"
-    );
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.backends.len(), 2);
     let parent = &out.routes[0].parents[0];
     assert!(!parent.resolved_refs);
-    assert!(parent
-        .problems
-        .contains(&Problem::WeightedBackendsUnsupported));
+    assert!(parent.problems.contains(&Problem::ServiceNotFound {
+        service: "web2".into()
+    }));
 }
 
 #[test]
 fn zero_weight_single_backend_is_drained_not_served() {
-    // weight: 0 on the (single) backendRef is the standard drain pattern: the
-    // backend must receive NO traffic (the spec even calls for a 500 when all
-    // weights are zero). Sōzu cannot weight or synthesize the 500, so the
-    // rule is reported and skipped — never served at 100%.
+    // A drained rule still matches, so a broader route cannot receive its
+    // traffic. The isolated empty cluster currently answers HTTP 503, not 500.
     let route: HttpRoute = from_json(json!({
         "metadata": { "name": "route", "namespace": "demo" },
         "spec": {
@@ -251,18 +247,11 @@ fn zero_weight_single_backend_is_drained_not_served() {
     }));
     let out = build(&BuildConfig::default(), &inputs_with(route));
 
-    assert!(
-        out.ir.frontends.is_empty(),
-        "a drained backend gets nothing"
-    );
+    assert_eq!(out.ir.frontends.len(), 1);
+    assert!(out.ir.backends.is_empty(), "a drained backend gets nothing");
     let p = &out.routes[0].parents[0];
-    assert!(p.problems.contains(&Problem::ZeroWeightBackendUnsupported {
-        service: "web".to_string(),
-    }));
-    // A skipped rule must show in the status, like every other skip path:
-    // ResolvedRefs downgrades the same way the weighted-split rejection does.
-    assert!(!p.resolved_refs, "the skipped rule must not read healthy");
-    assert_eq!(p.resolved_refs_reason, "BackendNotFound");
+    assert!(p.problems.contains(&Problem::NoPositiveBackendWeight));
+    assert!(p.resolved_refs, "zero weight is a valid reference");
 }
 
 #[test]
@@ -279,6 +268,12 @@ fn positive_weight_single_backend_still_routes() {
     let out = build(&BuildConfig::default(), &inputs_with(route));
 
     assert_eq!(out.ir.frontends.len(), 1);
+    assert_eq!(out.ir.clusters[0].id, "demo.web.80");
+    assert_eq!(
+        out.ir.clusters[0].load_balancing,
+        ir::LbAlgorithm::RoundRobin
+    );
+    assert!(out.ir.backends.iter().all(|b| b.weight.is_none()));
     assert!(out.routes[0].parents[0].problems.is_empty());
 }
 
@@ -2198,11 +2193,10 @@ fn overlapping_l4_parent_refs_count_each_route_once_per_listener() {
     }
 }
 
-/// The rejections HTTPRoute already applies hold unchanged at layer 4. The
-/// weight-0 drain is the one that is easy to forget: there is no traffic
-/// shaping down here to remind you it exists.
+/// Drained L4 listeners have no forwarding backend; a weighted split keeps
+/// both positive targets behind one listener.
 #[test]
-fn weighted_and_drained_backends_are_refused() {
+fn weighted_and_drained_l4_backends_are_programmed() {
     let zero = build(
         &l4_config(),
         &l4_inputs(
@@ -2214,16 +2208,12 @@ fn weighted_and_drained_backends_are_refused() {
             vec![],
         ),
     );
-    assert!(
-        zero.ir.l4_frontends.is_empty(),
-        "a drained backend routes nothing"
-    );
-    assert!(!zero.routes[0].parents[0].resolved_refs);
+    assert_eq!(zero.ir.l4_frontends.len(), 1);
+    assert!(zero.ir.backends.is_empty());
+    assert!(zero.routes[0].parents[0].resolved_refs);
     assert!(zero.routes[0].parents[0]
         .problems
-        .iter()
-        .any(|p| matches!(p, Problem::ZeroWeightBackendUnsupported { .. })));
-
+        .contains(&Problem::NoPositiveBackendWeight));
     let split = build(
         &l4_config(),
         &l4_inputs(
@@ -2238,13 +2228,10 @@ fn weighted_and_drained_backends_are_refused() {
             vec![],
         ),
     );
-    assert!(
-        split.ir.l4_frontends.is_empty(),
-        "Sōzu cannot weight a split"
-    );
-    assert!(split.routes[0].parents[0]
-        .problems
-        .contains(&Problem::WeightedBackendsUnsupported));
+    assert_eq!(split.ir.l4_frontends.len(), 1);
+    assert_eq!(split.ir.backends.len(), 2);
+    assert!(split.routes[0].parents[0].resolved_refs);
+    assert!(split.routes[0].parents[0].problems.is_empty());
 }
 
 /// A listener serves exactly one route kind. A TCPRoute pointed at an
@@ -2912,4 +2899,449 @@ fn gateway_and_ingress_wildcards_do_not_collapse_into_one_route() {
         .iter()
         .all(|f| f.hostname == "*.example.com"));
     assert!(out.routes[0].parents[0].accepted);
+}
+
+mod weighted_refs {
+    use super::*;
+    use sozu_command_lib::proto::command::request::RequestType;
+    use sozu_gw_translator::reconcile;
+
+    fn refs() -> serde_json::Value {
+        json!([
+            { "name": "web", "port": 80, "weight": 70 },
+            { "name": "web2", "port": 80, "weight": 30 },
+            { "name": "drained", "port": 80, "weight": 0 }
+        ])
+    }
+
+    fn inputs(refs: serde_json::Value, counts: [usize; 3]) -> Inputs {
+        let route: HttpRoute = from_json(json!({
+            "metadata": { "name": "weighted", "namespace": "demo" },
+            "spec": { "parentRefs": [{ "name": "gw" }], "hostnames": ["app.example.com"],
+                "rules": [{ "backendRefs": refs }] }
+        }));
+        let mut inputs = Inputs {
+            gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+            gateways: arcs(vec![http_gateway()]),
+            http_routes: arcs(vec![route]),
+            ..Default::default()
+        };
+        for (group, (name, count)) in ["web", "web2", "drained"]
+            .into_iter()
+            .zip(counts)
+            .enumerate()
+        {
+            let endpoints: Vec<_> = (0..count)
+                .map(|i| {
+                    json!({
+                        "addresses": [format!("10.{group}.{}.{}", i / 254, i % 254 + 1)],
+                        "conditions": { "ready": true }
+                    })
+                })
+                .collect();
+            inputs.services.push(Arc::new(l4_service(name, 80)));
+            inputs.endpointslices.push(Arc::new(from_json(json!({
+                "metadata": { "name": name, "namespace": "demo",
+                    "labels": { "kubernetes.io/service-name": name } },
+                "addressType": "IPv4", "ports": [{ "name": "svc", "port": 80 }],
+                "endpoints": endpoints
+            }))));
+        }
+        inputs
+    }
+
+    fn assert_share(ir: &ir::Ir, first: u64, total: u64) {
+        let sum: i64 = ir
+            .backends
+            .iter()
+            .map(|b| i64::from(b.weight.unwrap()))
+            .sum();
+        let selected: i64 = ir
+            .backends
+            .iter()
+            .filter(|b| b.address.ip().to_string().starts_with("10.0."))
+            .map(|b| i64::from(b.weight.unwrap()))
+            .sum();
+        assert!((selected * total as i64 - sum * first as i64).abs() <= total as i64);
+        assert!(sum <= i64::from(i32::MAX));
+        assert!(ir.backends.iter().all(|b| b.weight.unwrap() > 0));
+    }
+
+    #[test]
+    fn http_service_shares_survive_unequal_endpoint_counts_and_zero_weights() {
+        let mut inputs = inputs(refs(), [2, 1, 1]);
+        Arc::make_mut(&mut inputs.services[0]).metadata.annotations = Some(BTreeMap::from([
+            ("sozu.io/load-balancing".into(), "least-loaded".into()),
+            ("sozu.io/sticky-sessions".into(), "true".into()),
+        ]));
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.clusters.len(), 1);
+        assert_eq!(out.ir.clusters[0].load_balancing, ir::LbAlgorithm::Random);
+        assert!(!out.ir.clusters[0].sticky_session);
+        assert_eq!(out.ir.backends.len(), 3);
+        assert_share(&out.ir, 70, 100);
+        assert!(out.routes[0].parents[0].resolved_refs);
+        assert!(out.routes[0].parents[0].problems.is_empty());
+        assert!(out
+            .ir
+            .backends
+            .iter()
+            .all(|b| !b.address.ip().to_string().starts_with("10.2.")));
+        assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_weights_keep_equal_service_shares_with_two_thousand_pods() {
+        let out = build(
+            &BuildConfig::default(),
+            &inputs(
+                json!([
+                    { "name": "web", "port": 80 },
+                    { "name": "web2", "port": 80, "weight": 1 }
+                ]),
+                [2000, 1, 0],
+            ),
+        );
+        assert_eq!(out.ir.backends.len(), 2001);
+        assert_share(&out.ir, 1, 2);
+    }
+
+    #[test]
+    fn endpoint_churn_keeps_cluster_and_surviving_backend_identities() {
+        let before = build(&BuildConfig::default(), &inputs(refs(), [2, 1, 1])).ir;
+        let after = build(&BuildConfig::default(), &inputs(refs(), [3, 1, 1])).ir;
+        assert_eq!(before.clusters, after.clusters);
+        assert_share(&after, 70, 100);
+        let requests = reconcile(&before, &after).unwrap();
+        assert!(requests
+            .iter()
+            .any(|r| matches!(r.request_type, Some(RequestType::AddBackend(_)))));
+        assert!(requests.iter().all(|r| !matches!(
+            r.request_type,
+            Some(
+                RequestType::AddCluster(_)
+                    | RequestType::RemoveCluster(_)
+                    | RequestType::RemoveBackend(_)
+                    | RequestType::AddHttpFrontend(_)
+                    | RequestType::RemoveHttpFrontend(_)
+            )
+        )));
+        for old in &before.backends {
+            assert!(after
+                .backends
+                .iter()
+                .any(|new| new.address == old.address && new.backend_id == old.backend_id));
+        }
+        let removed = reconcile(&after, &before).unwrap();
+        let deleted: Vec<_> = removed
+            .iter()
+            .filter_map(|r| match &r.request_type {
+                Some(RequestType::RemoveBackend(b)) => Some(b.backend_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deleted.len(), 1, "only the withdrawn address is removed");
+        assert!(!before
+            .backends
+            .iter()
+            .any(|b| deleted.contains(&b.backend_id.as_str())));
+        let restored: ir::Ir =
+            serde_json::from_str(&serde_json::to_string(&after).unwrap()).unwrap();
+        assert!(reconcile(&restored, &after).unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_refs_and_order_do_not_change_the_content_identity() {
+        let before = build(&BuildConfig::default(), &inputs(refs(), [2, 1, 1])).ir;
+        let mut inputs = inputs(
+            json!([
+                { "name": "drained", "namespace": "demo", "kind": "Service", "port": 80, "weight": 0 },
+                { "name": "web2", "port": 80, "weight": 30 },
+                { "name": "web", "port": 80, "weight": 35 },
+                { "name": "web", "port": 80, "weight": 35 }
+            ]),
+            [2, 1, 1],
+        );
+        Arc::make_mut(&mut inputs.http_routes[0]).metadata.name = Some("renamed".into());
+        let after = build(&BuildConfig::default(), &inputs).ir;
+        assert_eq!(before, after);
+        assert!(reconcile(&before, &after).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_addresses_across_services_and_ports_have_one_backend() {
+        let mut inputs = inputs(
+            json!([
+                { "name": "web", "port": 80, "weight": 70 },
+                { "name": "web2", "port": 81, "weight": 30 }
+            ]),
+            [2, 1, 0],
+        );
+        Arc::make_mut(&mut inputs.services[1])
+            .spec
+            .as_mut()
+            .unwrap()
+            .ports
+            .as_mut()
+            .unwrap()[0]
+            .port = 81;
+        Arc::make_mut(&mut inputs.endpointslices[1])
+            .endpoints
+            .as_mut()
+            .unwrap()[0]
+            .addresses = vec!["10.0.0.1".into()];
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.backends.len(), 2);
+        let total: i64 = out
+            .ir
+            .backends
+            .iter()
+            .map(|b| i64::from(b.weight.unwrap()))
+            .sum();
+        let shared = out
+            .ir
+            .backends
+            .iter()
+            .find(|b| b.address.to_string() == "10.0.0.1:80")
+            .unwrap();
+        assert!((i64::from(shared.weight.unwrap()) * 100 - total * 65).abs() <= 100);
+        assert_eq!(
+            shared.backend_id,
+            format!("{}#{}", shared.cluster_id, shared.address)
+        );
+    }
+
+    #[test]
+    fn missing_endpoints_redistribute_without_changing_the_declared_graph() {
+        let desired = build(&BuildConfig::default(), &inputs(refs(), [2, 1, 1]));
+        let partial = build(&BuildConfig::default(), &inputs(refs(), [0, 1, 1]));
+        assert_eq!(partial.ir.clusters, desired.ir.clusters);
+        assert_eq!(partial.ir.backends.len(), 1);
+        assert_eq!(partial.ir.backends[0].weight, Some(1));
+        assert!(partial.routes[0].parents[0].resolved_refs);
+        assert!(partial.routes[0].parents[0]
+            .problems
+            .contains(&Problem::NoReadyEndpoints {
+                service: "web".into()
+            }));
+        let empty = build(&BuildConfig::default(), &inputs(refs(), [0, 0, 1]));
+        assert_eq!(empty.ir.clusters, desired.ir.clusters);
+        assert_eq!(empty.ir.frontends.len(), 1);
+        assert!(
+            empty.ir.backends.is_empty(),
+            "the drained target must not become a fallback"
+        );
+    }
+
+    #[test]
+    fn drained_cross_namespace_refs_still_require_a_grant() {
+        let mut inputs = inputs(
+            json!([
+                { "name": "web", "port": 80, "weight": 1 },
+                { "name": "drained", "namespace": "other", "port": 80, "weight": 0 }
+            ]),
+            [1, 0, 1],
+        );
+        Arc::make_mut(&mut inputs.services[2]).metadata.namespace = Some("other".into());
+        Arc::make_mut(&mut inputs.endpointslices[2])
+            .metadata
+            .namespace = Some("other".into());
+        let denied = build(&BuildConfig::default(), &inputs);
+        assert!(!denied.routes[0].parents[0].resolved_refs);
+        assert_eq!(
+            denied.routes[0].parents[0].resolved_refs_reason,
+            "RefNotPermitted"
+        );
+        assert_eq!(denied.ir.backends.len(), 1);
+        inputs.reference_grants = arcs(vec![from_json(json!({
+            "metadata": { "name": "allow", "namespace": "other" },
+            "spec": {
+                "from": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "demo" }],
+                "to": [{ "group": "", "kind": "Service", "name": "drained" }]
+            }
+        }))]);
+        let allowed = build(&BuildConfig::default(), &inputs);
+        assert!(allowed.routes[0].parents[0].resolved_refs);
+        assert_eq!(allowed.ir.backends.len(), 1);
+        assert_eq!(
+            allowed.ir, denied.ir,
+            "a grant cannot send traffic to a drained target"
+        );
+    }
+
+    #[test]
+    fn all_zero_rules_have_a_distinct_non_forwarding_cluster() {
+        let mut inputs = inputs(
+            json!([{ "name": "web", "port": 80, "weight": 0 }]),
+            [1, 0, 0],
+        );
+        let rules = Arc::make_mut(&mut inputs.http_routes[0])
+            .spec
+            .rules
+            .as_mut()
+            .unwrap();
+        rules[0].matches = Some(vec![from_json(
+            json!({ "path": { "type": "PathPrefix", "value": "/drained" } }),
+        )]);
+        rules.push(from_json(
+            json!({ "backendRefs": [{ "name": "web", "port": 80 }] }),
+        ));
+        let out = build(&BuildConfig::default(), &inputs);
+        let drained = out
+            .ir
+            .frontends
+            .iter()
+            .find(|f| f.path == ir::PathMatch::Prefix("/drained".into()))
+            .unwrap();
+        let root = out
+            .ir
+            .frontends
+            .iter()
+            .find(|f| f.path == ir::PathMatch::Prefix("/".into()))
+            .unwrap();
+        assert_ne!(drained.cluster_id, root.cluster_id);
+        assert!(out
+            .ir
+            .backends
+            .iter()
+            .all(|b| Some(&b.cluster_id) != drained.cluster_id.as_ref()));
+        assert!(out.routes[0].parents[0].resolved_refs);
+        assert!(out.routes[0].parents[0]
+            .problems
+            .contains(&Problem::NoPositiveBackendWeight));
+    }
+
+    #[test]
+    fn identical_destinations_do_not_cross_reference_grant_scopes() {
+        let refs = json!([
+            { "name": "web", "namespace": "demo", "port": 80, "weight": 1 },
+            { "name": "web2", "namespace": "demo", "port": 80, "weight": 1 }
+        ]);
+        let mut inputs = inputs(refs, [1, 1, 0]);
+        let mut denied_route = (*inputs.http_routes[0]).clone();
+        denied_route.metadata.namespace = Some("other".into());
+        denied_route.spec.hostnames = Some(vec!["denied.example.com".into()]);
+        inputs.http_routes.push(Arc::new(denied_route));
+        let mut other_gateway = http_gateway();
+        other_gateway.metadata.namespace = Some("other".into());
+        inputs.gateways.push(Arc::new(other_gateway));
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 2);
+        assert_eq!(out.ir.clusters.len(), 2);
+        let denied = out
+            .ir
+            .frontends
+            .iter()
+            .find(|f| f.hostname == "denied.example.com")
+            .unwrap();
+        assert!(out
+            .ir
+            .backends
+            .iter()
+            .all(|b| Some(&b.cluster_id) != denied.cluster_id.as_ref()));
+        let status = out.routes.iter().find(|r| r.namespace == "other").unwrap();
+        assert!(!status.parents[0].resolved_refs);
+        assert_eq!(status.parents[0].resolved_refs_reason, "RefNotPermitted");
+        inputs.reference_grants = arcs(vec![from_json(json!({
+            "metadata": { "name": "allow", "namespace": "demo" },
+            "spec": {
+                "from": [{ "group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "other" }],
+                "to": [{ "group": "", "kind": "Service" }]
+            }
+        }))]);
+        let allowed = build(&BuildConfig::default(), &inputs);
+        assert_eq!(allowed.ir.clusters, out.ir.clusters);
+        assert_eq!(allowed.ir.backends.len(), 4);
+        let revoked = reconcile(&allowed.ir, &out.ir).unwrap();
+        let removed: Vec<_> = revoked
+            .iter()
+            .filter_map(|r| match &r.request_type {
+                Some(RequestType::RemoveBackend(b)) => Some(&b.cluster_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed.len(), 2);
+        assert!(removed
+            .iter()
+            .all(|id| Some(*id) == denied.cluster_id.as_ref()));
+    }
+
+    #[test]
+    fn weighted_l4_routes_still_have_one_deterministic_winner() {
+        let split = json!([
+            { "name": "postgres", "port": 5432, "weight": 70 },
+            { "name": "postgres-b", "port": 5432, "weight": 30 }
+        ]);
+        let older = tcp_route("older", Some("2026-01-01T00:00:00Z"), split);
+        let younger = tcp_route(
+            "younger",
+            Some("2026-02-01T00:00:00Z"),
+            json!([{ "name": "postgres-b", "port": 5432 }]),
+        );
+        let expected = build(&l4_config(), &l4_inputs(vec![older.clone()], vec![]));
+        for routes in [vec![older.clone(), younger.clone()], vec![younger, older]] {
+            let out = build(&l4_config(), &l4_inputs(routes, vec![]));
+            assert_eq!(out.ir.l4_frontends, expected.ir.l4_frontends);
+            let winner_id = &out.ir.l4_frontends[0].cluster_id;
+            let selected: Vec<_> = out
+                .ir
+                .backends
+                .iter()
+                .filter(|b| &b.cluster_id == winner_id)
+                .cloned()
+                .collect();
+            assert_eq!(selected, expected.ir.backends);
+            let loser = out.routes.iter().find(|r| r.name == "younger").unwrap();
+            assert!(!loser.parents[0].accepted);
+            assert_eq!(loser.parents[0].accepted_reason, "RouteConflict");
+            assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn tcp_and_udp_use_the_same_positive_weight_split() {
+        for protocol in ["TCP", "UDP"] {
+            let refs = json!([
+                { "name": "postgres", "port": 5432, "weight": 70 },
+                { "name": "postgres-b", "port": 5432, "weight": 30 },
+                { "name": "coredns", "port": 53, "weight": 0 }
+            ]);
+            let mut inputs = if protocol == "TCP" {
+                l4_inputs(vec![tcp_route("split", None, refs)], vec![])
+            } else {
+                let mut route = udp_route("split");
+                route.spec.rules[0].backend_refs = from_json(refs);
+                l4_inputs(vec![], vec![route])
+            };
+            for service in &mut inputs.services {
+                Arc::make_mut(service)
+                    .spec
+                    .as_mut()
+                    .unwrap()
+                    .ports
+                    .as_mut()
+                    .unwrap()[0]
+                    .protocol = Some(protocol.into());
+            }
+            let out = build(&l4_config(), &inputs);
+            assert_eq!(out.ir.l4_frontends.len(), 1);
+            assert_eq!(out.ir.backends.len(), 2);
+            assert_eq!(out.ir.clusters[0].load_balancing, ir::LbAlgorithm::Random);
+            assert!(out.routes[0].parents[0].resolved_refs);
+            let total: i64 = out
+                .ir
+                .backends
+                .iter()
+                .map(|b| i64::from(b.weight.unwrap()))
+                .sum();
+            let a = out
+                .ir
+                .backends
+                .iter()
+                .find(|b| b.address.ip().to_string().ends_with(".10"))
+                .unwrap();
+            assert!((i64::from(a.weight.unwrap()) * 100 - total * 70).abs() <= 100);
+            assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
+        }
+    }
 }

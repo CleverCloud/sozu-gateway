@@ -331,14 +331,13 @@ pub enum Problem {
         protocol: &'static str,
         winner: String,
     },
-    WeightedBackendsUnsupported,
-    /// A single `backendRef` with `weight: 0` (the standard drain pattern)
-    /// must receive no traffic; with every weight zero the spec even calls
-    /// for a 500 on matching requests. Sōzu can neither weight backends nor
-    /// synthesize that 500, so the rule is reported and skipped (fail
-    /// closed) instead of serving the drained backend 100% of the traffic.
-    ZeroWeightBackendUnsupported {
-        service: String,
+    /// All references are deliberately drained. Their rule still matches,
+    /// but its isolated cluster contains no backend that could receive traffic.
+    NoPositiveBackendWeight,
+    /// A weighted graph cannot be represented within the data plane's integer
+    /// weight range. Refuse it rather than falling back to uniform selection.
+    WeightedBackendsInvalid {
+        reason: String,
     },
     /// `rule.timeouts` has no Sōzu equivalent; the rule still routes,
     /// without the timeout, and the gap is reported.
@@ -394,8 +393,8 @@ impl Problem {
             Problem::PortNotExposed { .. } => "PortNotExposed",
             Problem::ListenerPortNotOwned { .. } => "ListenerPortNotOwned",
             Problem::L4RouteConflict { .. } => "L4RouteConflict",
-            Problem::WeightedBackendsUnsupported => "WeightedBackendsUnsupported",
-            Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
+            Problem::NoPositiveBackendWeight => "NoPositiveBackendWeight",
+            Problem::WeightedBackendsInvalid { .. } => "WeightedBackendsInvalid",
             Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
             Problem::HeaderOrQueryMatchUnsupported => "HeaderOrQueryMatchUnsupported",
             Problem::NamespaceSelectorInvalid { .. } => "NamespaceSelectorInvalid",
@@ -495,14 +494,12 @@ impl std::fmt::Display for Problem {
                 "{protocol} port {port} is already claimed by route {winner} (older, or first by \
                  name); this route remains accepted but does not receive traffic"
             ),
-            Problem::WeightedBackendsUnsupported => write!(
-                f,
-                "multiple backendRefs (weighted split) are not supported"
-            ),
-            Problem::ZeroWeightBackendUnsupported { service } => write!(
-                f,
-                "backendRef {service:?} with weight 0 cannot be honoured (Sōzu cannot drain by weight); the rule was skipped"
-            ),
+            Problem::NoPositiveBackendWeight => {
+                write!(f, "all backendRef weights are zero; no traffic will be forwarded")
+            }
+            Problem::WeightedBackendsInvalid { reason } => {
+                write!(f, "cannot represent weighted backendRefs: {reason}")
+            }
             Problem::TimeoutsUnsupported => {
                 write!(f, "rule.timeouts has no Sōzu equivalent; the rule routes without it")
             }
