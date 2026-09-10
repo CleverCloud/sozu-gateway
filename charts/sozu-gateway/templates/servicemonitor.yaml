@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.servicemonitor" -}}
 {{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
 # Prometheus Operator scrape config for the controller's /metrics endpoint.
 # Requires the monitoring.coreos.com CRDs (kube-prometheus-stack &co).
@@ -18,3 +19,6 @@ spec:
     - port: metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
 {{- end }}
+
+{{- end -}}
+{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.servicemonitor") }}

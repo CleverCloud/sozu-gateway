@@ -1,0 +1,22 @@
+{
+  "revision": "a8d54a3c5e03018316fe1fb0f262380d0da77d02",
+  "tree": "/workspaces/sozu-gateway/.scratch/conformance-fixes-2026-09-10/isolation",
+  "image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e:24h",
+  "started_at": "2026-09-10T16:07:36.914217+00:00",
+  "finished_at": "2026-09-10T16:09:56.338404+00:00",
+  "exit_code": 0,
+  "containerimage.config.digest": "sha256:e7a874ab4151d57b4d38aa817c7abf8626f16a90c678b44764a4441c89b73339",
+  "containerimage.descriptor": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+    "size": 866,
+    "platform": {
+      "architecture": "amd64",
+      "os": "linux"
+    }
+  },
+  "containerimage.digest": "sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "image.name": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e:24h",
+  "digest": "sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "pinned": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982"
+}

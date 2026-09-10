@@ -1,0 +1,70 @@
+{
+  "started": "2026-09-10T16:14:51.533236+00:00",
+  "context": "sozu-gateway-upgrade@kubernetes_01M257SQRH3TT7QCXPQB7RM1FH",
+  "installation_namespace": "sozu-auto-test-0910",
+  "gateway_class": "sozu-auto-0910",
+  "test_namespace": "sozu-repair-probe-605edf007b0b",
+  "result": "FAIL",
+  "steps": [
+    {
+      "name": "existing-installation-verified",
+      "time": "2026-09-10T16:14:52.163546+00:00",
+      "anchor": {
+        "name": "sozu-auto-gateway-template",
+        "namespace": "sozu-auto-test-0910",
+        "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+        "resourceVersion": "125288",
+        "labels": {
+          "app.kubernetes.io/instance": "sozu-auto",
+          "app.kubernetes.io/managed-by": "Helm",
+          "app.kubernetes.io/name": "sozu-gateway",
+          "app.kubernetes.io/part-of": "sozu-gateway",
+          "helm.sh/chart": "sozu-gateway-0.1.0"
+        }
+      },
+      "gateway_class": {
+        "name": "sozu-auto-0910",
+        "uid": "04bd5388-a9db-4c62-be58-0012b2cc6726",
+        "generation": 1,
+        "resourceVersion": "122041"
+      }
+    },
+    {
+      "name": "dedicated-instance-ready",
+      "time": "2026-09-10T16:15:04.573793+00:00",
+      "gateway_uid": "99753bd4-8fa6-4326-911b-8de61df5e08f",
+      "deployment_uid": "441fbb06-3987-4c23-a222-73100f850433",
+      "service_uid": "b6bd816e-1acc-49b1-a595-3dc774bb3267"
+    }
+  ],
+  "cleanup_errors": [],
+  "revision": "a8d54a3c5e03018316fe1fb0f262380d0da77d02",
+  "expected_image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "test": "Deployment replica drift and Service recreation",
+  "attribution": "Observed convergence bounds; Gateway status events may also wake the provisioner.",
+  "sources": {
+    "recovery-probe.py": "9dd2de9caa166edeb4cc35c76577a1a253bcacd7170b6d12a366c49eb57ddc9c",
+    "e2e-gateway-provisioning.py": "de9c71cc38712bab6cf54b313728561fc7d5be736d34ca834b59829d369c6c9b"
+  },
+  "installation": {
+    "name": "sozu-auto-gateway-template",
+    "namespace": "sozu-auto-test-0910",
+    "uid": "112347fd-6d42-44a0-aa5b-3988a23090c3",
+    "resourceVersion": "125288",
+    "labels": {
+      "app.kubernetes.io/instance": "sozu-auto",
+      "app.kubernetes.io/managed-by": "Helm",
+      "app.kubernetes.io/name": "sozu-gateway",
+      "app.kubernetes.io/part-of": "sozu-gateway",
+      "helm.sh/chart": "sozu-gateway-0.1.0"
+    }
+  },
+  "controller_image": "ttl.sh/sozu-conformance-automatic-final-9d43c484-21f0-47b4-9fe8-d0b31ea79e1e@sha256:4f7b6534fc7f2760aae91e9ca0a326ed0100bdfd13593ab910f82e3ea62a3982",
+  "sozu_image": "clevercloud/sozu:2.2.1",
+  "template_sha256": "98e8fac43513ec881f15c0db5ee9a5576c99db28e07797075275a7630d127de0",
+  "provisioner_resync_secs": 60,
+  "test_namespace_uid": "623793d6-c150-4087-821a-33b4df145dc5",
+  "error": "kubectl patch deployment sozu-gw-9461b660-99753bd4-8fa6-4326-911b-8de61df5e08f --namespace: error: unable to read patch file: open -: no such file or directory",
+  "traceback": "Traceback (most recent call last):\n  File \"/workspaces/sozu-gateway/.scratch/conformance-fixes-2026-09-10/automatic-provisioning/recovery-probe.py\", line 203, in main\n    run.exercise()\n  File \"/workspaces/sozu-gateway/.scratch/conformance-fixes-2026-09-10/automatic-provisioning/recovery-probe.py\", line 128, in exercise\n    patched = json.loads(self.kubectl(\"patch\", \"deployment\", dep_name, \"--namespace\", self.args.namespace,\n                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspaces/sozu-gateway/.scratch/conformance-fixes-2026-09-10/automatic-provisioning/recovery-probe.py\", line 46, in kubectl\n    raise RuntimeError(f\"kubectl {' '.join(arguments[:4])}: {result.stderr.strip()}\")\nRuntimeError: kubectl patch deployment sozu-gw-9461b660-99753bd4-8fa6-4326-911b-8de61df5e08f --namespace: error: unable to read patch file: open -: no such file or directory\n",
+  "finished": "2026-09-10T16:15:30.522508+00:00"
+}

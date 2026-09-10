@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.rbac" -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -85,3 +86,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "sozu-gateway.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+
+{{- end -}}
+{{ include "sozu-gateway.rbac" . }}

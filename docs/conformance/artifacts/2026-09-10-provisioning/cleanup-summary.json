@@ -1,0 +1,220 @@
+{
+  "result": "PASS",
+  "remaining_namespaces": [
+    "default",
+    "kube-node-lease",
+    "kube-public",
+    "kube-system",
+    "sozu-demo",
+    "sozu-system"
+  ],
+  "ready_nodes": 3,
+  "removed": [
+    {
+      "kind": "ClusterRoleBinding",
+      "name": "sozu-conformance-4824940e42aa",
+      "uid": "d290808a-8a4d-46ce-bb7f-cea8e3c35cea",
+      "response": {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Success",
+        "details": {
+          "name": "sozu-conformance-4824940e42aa",
+          "group": "rbac.authorization.k8s.io",
+          "kind": "clusterrolebindings",
+          "uid": "d290808a-8a4d-46ce-bb7f-cea8e3c35cea"
+        }
+      }
+    },
+    {
+      "kind": "ClusterRole",
+      "name": "sozu-conformance-4824940e42aa",
+      "uid": "99a5ccdf-3a8c-4bb5-88e8-b81bd80fb311",
+      "response": {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Success",
+        "details": {
+          "name": "sozu-conformance-4824940e42aa",
+          "group": "rbac.authorization.k8s.io",
+          "kind": "clusterroles",
+          "uid": "99a5ccdf-3a8c-4bb5-88e8-b81bd80fb311"
+        }
+      }
+    },
+    {
+      "kind": "Namespace",
+      "name": "sozu-gateway-conformance",
+      "uid": "6128cb18-fbd4-4481-a8e6-2670819bddfe",
+      "response": {
+        "kind": "Namespace",
+        "apiVersion": "v1",
+        "metadata": {
+          "name": "sozu-gateway-conformance",
+          "uid": "6128cb18-fbd4-4481-a8e6-2670819bddfe",
+          "resourceVersion": "129027",
+          "creationTimestamp": "2026-09-10T15:55:12Z",
+          "deletionTimestamp": "2026-09-10T16:19:04Z",
+          "labels": {
+            "kubernetes.io/metadata.name": "sozu-gateway-conformance"
+          },
+          "annotations": {
+            "conformance.sozu.io/run-id": "4824940e42aa47a9bc18efbfed212ad7"
+          },
+          "managedFields": [
+            {
+              "manager": "kubectl-create",
+              "operation": "Update",
+              "apiVersion": "v1",
+              "time": "2026-09-10T15:55:12Z",
+              "fieldsType": "FieldsV1",
+              "fieldsV1": {
+                "f:metadata": {
+                  "f:annotations": {
+                    ".": {},
+                    "f:conformance.sozu.io/run-id": {}
+                  },
+                  "f:labels": {
+                    ".": {},
+                    "f:kubernetes.io/metadata.name": {}
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "spec": {
+          "finalizers": [
+            "kubernetes"
+          ]
+        },
+        "status": {
+          "phase": "Terminating"
+        }
+      }
+    },
+    {
+      "kind": "GatewayClass",
+      "name": "sozu-auto-0910",
+      "uid": "04bd5388-a9db-4c62-be58-0012b2cc6726",
+      "response": {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Success",
+        "details": {
+          "name": "sozu-auto-0910",
+          "group": "gateway.networking.k8s.io",
+          "kind": "gatewayclasses",
+          "uid": "04bd5388-a9db-4c62-be58-0012b2cc6726"
+        }
+      }
+    },
+    {
+      "kind": "Namespace",
+      "name": "sozu-auto-test-0910",
+      "uid": "fff76e77-5d5c-4e68-8c1f-cdb8e4613fdb",
+      "response": {
+        "kind": "Namespace",
+        "apiVersion": "v1",
+        "metadata": {
+          "name": "sozu-auto-test-0910",
+          "uid": "fff76e77-5d5c-4e68-8c1f-cdb8e4613fdb",
+          "resourceVersion": "129034",
+          "creationTimestamp": "2026-09-10T15:53:48Z",
+          "deletionTimestamp": "2026-09-10T16:19:05Z",
+          "labels": {
+            "kubernetes.io/metadata.name": "sozu-auto-test-0910"
+          },
+          "annotations": {
+            "provisioning.sozu.io/test-owner": "2b2c8c10-3f5e-4a32-9d64-19dee26bacd1"
+          },
+          "managedFields": [
+            {
+              "manager": "kubectl-create",
+              "operation": "Update",
+              "apiVersion": "v1",
+              "time": "2026-09-10T15:53:48Z",
+              "fieldsType": "FieldsV1",
+              "fieldsV1": {
+                "f:metadata": {
+                  "f:annotations": {
+                    ".": {},
+                    "f:provisioning.sozu.io/test-owner": {}
+                  },
+                  "f:labels": {
+                    ".": {},
+                    "f:kubernetes.io/metadata.name": {}
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "spec": {
+          "finalizers": [
+            "kubernetes"
+          ]
+        },
+        "status": {
+          "phase": "Terminating"
+        }
+      }
+    },
+    {
+      "kind": "Namespace",
+      "name": "sozu-auto-build-0910",
+      "uid": "09a013f5-27f2-4d55-898d-ea0d38a22b7b",
+      "response": {
+        "kind": "Namespace",
+        "apiVersion": "v1",
+        "metadata": {
+          "name": "sozu-auto-build-0910",
+          "uid": "09a013f5-27f2-4d55-898d-ea0d38a22b7b",
+          "resourceVersion": "129036",
+          "creationTimestamp": "2026-09-10T15:38:05Z",
+          "deletionTimestamp": "2026-09-10T16:19:05Z",
+          "labels": {
+            "app.kubernetes.io/part-of": "sozu-conformance-fixes",
+            "kubernetes.io/metadata.name": "sozu-auto-build-0910"
+          },
+          "annotations": {
+            "provisioning.sozu.io/test-owner": "2b2c8c10-3f5e-4a32-9d64-19dee26bacd1"
+          },
+          "managedFields": [
+            {
+              "manager": "kubectl-create",
+              "operation": "Update",
+              "apiVersion": "v1",
+              "time": "2026-09-10T15:38:05Z",
+              "fieldsType": "FieldsV1",
+              "fieldsV1": {
+                "f:metadata": {
+                  "f:annotations": {
+                    ".": {},
+                    "f:provisioning.sozu.io/test-owner": {}
+                  },
+                  "f:labels": {
+                    ".": {},
+                    "f:app.kubernetes.io/part-of": {},
+                    "f:kubernetes.io/metadata.name": {}
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "spec": {
+          "finalizers": [
+            "kubernetes"
+          ]
+        },
+        "status": {
+          "phase": "Terminating"
+        }
+      }
+    }
+  ]
+}

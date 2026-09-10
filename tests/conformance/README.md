@@ -125,10 +125,10 @@ kind delete cluster --name conformance-local
 
 `kind.sh` refuses an existing cluster name. It builds the repository's controller Dockerfile and
 the runner Dockerfile, loads both images and installs the repository chart. The workflow deletes
-only its uniquely named Kind cluster. The exposure model currently accepts one HTTP listener:
-`TCPRouteInvalidNonTCPListener` requires an additional HTTP 5300 listener and therefore fails
-that precondition with the stock chart. Full runs record that limitation rather than editing the
-fixture or claiming that its TCP-to-HTTP rejection assertion passed.
+only its uniquely named Kind cluster. The supplied `values.yaml` exposes UDP 5300 but omits the
+additional HTTP 5300 listener required by `TCPRouteInvalidNonTCPListener`. The chart supports
+that HTTP entry with a separate bind port. Full runs using the supplied overlay record the failed
+precondition rather than claiming that its TCP-to-HTTP rejection assertion passed.
 
 `just conformance-test` tests ShortName validation, final verdict classification and namespace
 ownership without Docker or a cluster. Docker builds additionally run the Go selection tests.

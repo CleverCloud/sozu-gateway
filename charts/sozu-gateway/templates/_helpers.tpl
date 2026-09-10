@@ -2,7 +2,7 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "sozu-gateway.fullname" -}}
+{{- define "sozu-gateway.baseFullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -10,9 +10,30 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "sozu-gateway.fullname" -}}
+{{- if .gatewayInstance -}}
+{{- printf "%s-%s" (include "sozu-gateway.baseFullname" .) .gatewayInstance.name -}}
+{{- else -}}
+{{- include "sozu-gateway.baseFullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "sozu-gateway.instanceLabel" -}}
+{{- if .gatewayInstance -}}
+{{- /* Helm release names cannot contain underscores. Keep instance Pods out
+     of every historical default selector, including a release named x-y. */ -}}
+{{- printf "%s_gateway" .Release.Name -}}
+{{- else -}}
+{{- .Release.Name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sozu-gateway.labels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
+{{- if .gatewayInstance }}
+sozu.io/gateway-instance: {{ .gatewayInstance.name }}
+{{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: sozu-gateway
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
@@ -20,11 +41,14 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 
 {{- define "sozu-gateway.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
+{{- if .gatewayInstance }}
+sozu.io/gateway-instance: {{ .gatewayInstance.name }}
+{{- end }}
 {{- end -}}
 
 {{- define "sozu-gateway.serviceAccountName" -}}
-{{ include "sozu-gateway.fullname" . }}
+{{ include "sozu-gateway.baseFullname" . }}
 {{- end -}}
 
 {{/*
@@ -228,4 +252,79 @@ number the user never wrote.
 {{- if le $g $d -}}
   {{- fail (printf "sozu.drain.gracePeriodSeconds (%d) must exceed sozu.drain.delaySeconds (%d), otherwise the kubelet SIGKILLs the proxy before it has begun draining" $g $d) -}}
 {{- end -}}
+{{- end -}}
+
+{{/* Automatic provisioning is opt-in so an upgrade does not move existing
+     Gateway addresses. Old unreleased static entries must not disappear silently. */}}
+{{- define "sozu-gateway.gatewayProvisioningEnabled" -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- if hasKey $settings "enabled" -}}{{ $settings.enabled }}{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{- define "sozu-gateway.validateGatewayProvisioning" -}}
+{{- if .Values.gatewayInstances -}}
+  {{- fail "gatewayInstances has been replaced by gatewayProvisioning.enabled: automatic provisioning creates an instance for each managed Gateway; migrate existing addresses before enabling it" -}}
+{{- end -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- if not (kindIs "map" $settings) -}}{{- fail "gatewayProvisioning must be a mapping" -}}{{- end -}}
+{{- if and (hasKey $settings "enabled") (not (kindIs "bool" $settings.enabled)) -}}
+  {{- fail "gatewayProvisioning.enabled must be a boolean" -}}
+{{- end -}}
+{{- if and (hasKey $settings "service") (not (kindIs "map" $settings.service)) -}}
+  {{- fail "gatewayProvisioning.service must be a mapping" -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $settings.replicaCount) -}}
+  {{- if or (not (regexMatch "^[1-9][0-9]*$" (printf "%v" $settings.replicaCount))) (gt (int $settings.replicaCount) 2147483647) -}}
+    {{- fail "gatewayProvisioning.replicaCount must be a positive integer or null" -}}
+  {{- end -}}
+{{- end -}}
+{{- if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" -}}
+  {{- if gt (len (include "sozu-gateway.baseFullname" .)) 46 -}}
+    {{- fail "automatic Gateway provisioning requires fullnameOverride shorter than 47 characters so its template and metrics resource names fit Kubernetes limits" -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Helm owns the existing default instance. Gateway instances are created at
+     runtime from the template below, without a predeclared list of Gateways. */}}
+{{- define "sozu-gateway.renderDefault" -}}
+{{- include "sozu-gateway.validateGatewayProvisioning" .root -}}
+{{- include .template .root -}}
+{{- end -}}
+
+{{- define "sozu-gateway.gatewayTemplateName" -}}
+{{ include "sozu-gateway.baseFullname" . }}-gateway-template
+{{- end -}}
+
+{{- define "sozu-gateway.provisionerName" -}}
+{{ include "sozu-gateway.baseFullname" . }}-provisioner
+{{- end -}}
+
+{{/* Typed Kubernetes resource templates retain every release-level setting.
+     Names and selectors here are placeholders: the provisioner replaces them
+     with the installation and Gateway identities before creating resources. */}}
+{{- define "sozu-gateway.gatewayTemplate" -}}
+{{- $values := deepCopy .Values -}}
+{{- $settings := .Values.gatewayProvisioning | default dict -}}
+{{- $service := deepCopy .Values.service -}}
+{{- range $key, $value := $settings.service | default dict -}}
+  {{- $_ := set $service $key $value -}}
+{{- end -}}
+{{- $_ := set $values "service" $service -}}
+{{- if not (kindIs "invalid" $settings.replicaCount) -}}
+  {{- $_ := set $values "replicaCount" $settings.replicaCount -}}
+{{- end -}}
+{{- $context := deepCopy . -}}
+{{- $_ := set $context "Values" $values -}}
+{{- $_ := set $context "gatewayInstance" (dict "name" "template" "gateway" (dict "namespace" "template" "name" "template")) -}}
+{{- $config := dict "namespace" .Release.Namespace "template_config_map" (include "sozu-gateway.gatewayTemplateName" .) -}}
+{{- range $key, $template := dict "deployment" "deployment" "service" "service" "config_map" "configmap" "pod_disruption_budget" "pdb" "metrics_service" "metrics-service" "service_monitor" "servicemonitor" -}}
+  {{- $rendered := include (printf "sozu-gateway.%s" $template) $context -}}
+  {{- if trim $rendered -}}
+    {{- $resource := fromYaml $rendered -}}
+    {{- if hasKey $resource "Error" -}}{{- fail (get $resource "Error") -}}{{- end -}}
+    {{- $_ := set $config $key $resource -}}
+  {{- end -}}
+{{- end -}}
+{{ toJson $config }}
 {{- end -}}

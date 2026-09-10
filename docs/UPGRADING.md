@@ -4,6 +4,82 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Automatic Gateway instances
+
+Enable automatic provisioning once for the Helm release:
+
+```yaml
+gatewayProvisioning:
+  enabled: true
+  # Optional: otherwise inherit replicaCount and Service settings.
+  replicaCount: 2
+  service:
+    type: LoadBalancer
+```
+
+Every Gateway whose GatewayClass names this controller then gets a dedicated
+controller + Sōzu Deployment, Service and ConfigMap in the release namespace.
+Enabled disruption budgets and metrics resources are provisioned with it. Adding
+a Gateway requires no Helm change. The original Deployment and Service continue
+serving Ingress; they remain the only writers of Ingress and GatewayClass status.
+There is no list of Gateway names. The earlier, unreleased `gatewayInstances`
+setting is rejected so it cannot silently stop isolating configured Gateways.
+The Gateway API CRDs must already be installed. Remove any manually scoped
+Gateway deployments before enabling provisioning to avoid duplicate workers for
+the same Gateway. Creating a Gateway on this class allocates workloads and,
+with the default Service type, a LoadBalancer in the release namespace; grant
+Gateway creation rights with that infrastructure cost in mind.
+
+Provisioning is disabled by default to preserve existing addresses and routing
+on upgrade. Enabling it moves all owned Gateways to new Services; disabling it
+moves their routes back to the shared instance. Neither migration is atomic.
+Allow for LoadBalancer provisioning, watch `Programmed` and update DNS or clients
+before relying on the new addresses. Private `ClusterIP` Services publish their
+internal addresses. Pending LoadBalancers never publish their ClusterIP as an
+external address. NodePort address publication is not implemented.
+
+The provisioner runs separately with one replica and a `Recreate` update strategy.
+Its write permissions cover infrastructure only in the release namespace;
+workers retain their existing routing permissions and cannot create workloads.
+Each worker still keeps its own Kubernetes caches and programs its co-located
+Sōzu through the local command socket. This change automates infrastructure; a
+shared routing controller and remote configuration transport are separate work.
+
+Instances inherit images, resources, exposure, scheduling, drain, TLS hardening,
+timeouts and metrics settings from the release. `gatewayProvisioning.replicaCount`
+and `gatewayProvisioning.service` override the generated instances only. An
+explicit Service field replaces that field, including maps: `annotations: {}`
+clears inherited annotations. Listener ports still use the chart's `exposure`
+table; automatic provisioning does not add support for arbitrary HTTP binds.
+
+Names and ownership distinguish the installation UID and Gateway UID. Recreating
+a Gateway under the same namespace/name creates a new instance; an old worker
+cannot claim the replacement. The provisioner reconciles on Gateway/Class changes
+and checks infrastructure drift every `controller.resyncSecs` (60 by default;
+0 disables periodic checks). Failed operations retry after five seconds. It
+checks current API identity before updating or removing resources and refuses
+to adopt a foreign object with a colliding name.
+Gateway deletion or loss of class ownership removes that Gateway's generated
+resources. The Helm-managed template ConfigMap owns them within the release
+namespace, so uninstalling the release also triggers Kubernetes garbage
+collection. An absent provisioner delays Gateway cleanup until it returns.
+Recreating the template ConfigMap, including a `fullnameOverride` change,
+changes the installation UID: its old instances are collected and replacements
+receive new names and addresses. Preserve that ConfigMap's identity during
+ordinary upgrades.
+Edit the template through Helm. Direct ConfigMap edits leave the running
+provisioner NotReady until a Helm upgrade or a restart of the provisioner
+Deployment reloads the template; it does not reload mounted changes in place.
+
+Each Pod has its own command socket and persisted shadow. Route status updates
+preserve the full parent references and entries from other instances. Service
+addresses are published only by the worker that owns the corresponding Gateway.
+The shadow format is unchanged. Existing NetworkPolicies and monitors selecting
+only the default Deployment's labels need selectors for generated Pods too;
+`sozu.io/installation-uid` and `sozu.io/gateway-uid` identify those instances.
+
+---
+
 ## Gateway certificate name inference
 
 HTTPS listeners sharing a certificate now retain the DNS names inferred by a

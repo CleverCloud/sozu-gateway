@@ -46,6 +46,8 @@ mod changes;
 mod events;
 mod health;
 mod metrics;
+mod provision;
+mod scope;
 mod shadow;
 mod status;
 
@@ -57,6 +59,14 @@ const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-cl
     about = "Sōzu-based Ingress + Gateway API controller"
 )]
 struct Args {
+    #[command(flatten)]
+    gateway_scope: scope::GatewayScope,
+    /// Run only infrastructure provisioning, using a Helm-rendered JSON template.
+    #[arg(long, env = "SOZU_GW_PROVISION_TEMPLATE", conflicts_with_all = ["gateway_scope", "gateway_uid", "ingress_only", "exclude_gateway"])]
+    provision_template: Option<String>,
+    /// Pin an automatically provisioned worker to one Gateway incarnation.
+    #[arg(long, env = "SOZU_GW_GATEWAY_UID", requires = "gateway_scope")]
+    gateway_uid: Option<String>,
     /// IngressClass name we own.
     #[arg(long, env = "SOZU_GW_CLASS", default_value = "sozu")]
     class_name: String,
@@ -130,6 +140,10 @@ struct Args {
         action = clap::ArgAction::Set
     )]
     gateway_status_writes: bool,
+    /// Write Ingress status when publishing a Service address. Scoped Gateway
+    /// instances never write it; the default instance can disable it for RBAC.
+    #[arg(long, env = "SOZU_GW_INGRESS_STATUS_WRITES", default_value_t = true, action = clap::ArgAction::Set)]
+    ingress_status_writes: bool,
     /// Server-side `timeoutSeconds` on every watch, which also sets kube-rs's
     /// **client-side** idle timeout (that timeout is derived from this value
     /// plus a margin). `0` keeps kube-rs's default of 290 s.
@@ -558,6 +572,120 @@ async fn probe_sozu_generation(
     outcome
 }
 
+fn parse_publish_service(value: &str) -> Option<(&str, &str)> {
+    value.split_once('/').filter(|(namespace, name)| {
+        !namespace.is_empty() && !name.is_empty() && !name.contains('/')
+    })
+}
+
+/// Names can be reused after deletion. An old Pod must never program the
+/// replacement Gateway or publish its old Service address into its status.
+async fn verify_gateway_identity(args: &Args, client: &Client) -> Result<()> {
+    let Some(uid) = &args.gateway_uid else {
+        return Ok(());
+    };
+    let scope = args
+        .gateway_scope
+        .gateway_scope
+        .as_ref()
+        .context("--gateway-uid requires --gateway-scope")?;
+    let gateway = Api::<Gateway>::namespaced(client.clone(), &scope.namespace)
+        .get_opt(&scope.name)
+        .await
+        .context("verify the scoped Gateway identity")?
+        .context("the scoped Gateway no longer exists")?;
+    anyhow::ensure!(
+        gateway.metadata.uid.as_ref() == Some(uid) && gateway.metadata.deletion_timestamp.is_none(),
+        "the scoped Gateway was replaced or is being deleted"
+    );
+    Ok(())
+}
+
+/// Infrastructure provisioning is separate from socket reconciliation. One
+/// failed Service or rollout must not stall already serving proxy workers.
+async fn run_provisioner(
+    args: &Args,
+    path: &str,
+    watch_client: Client,
+    ops_client: Client,
+    ready: Arc<AtomicBool>,
+) -> Result<()> {
+    let config: provision::ProvisionConfig =
+        serde_json::from_slice(&std::fs::read(path).context("read the provisioning template")?)
+            .context("parse the provisioning template")?;
+    let provisioner = provision::Provisioner::new(ops_client, config).await?;
+    let (tx, mut rx) = mpsc::channel(64);
+    let watch_config = || {
+        watcher::Config::default().timeout(if args.watch_timeout_secs == 0 {
+            60
+        } else {
+            args.watch_timeout_secs
+        })
+    };
+    let (gateways, writer) = reflector::store();
+    spawn_watch(
+        Api::<Gateway>::all(watch_client.clone()),
+        watch_config(),
+        writer,
+        tx.clone(),
+        "provisioner Gateway",
+    );
+    let (classes, writer) = reflector::store();
+    spawn_watch(
+        Api::<GatewayClass>::all(watch_client),
+        watch_config(),
+        writer,
+        tx,
+        "provisioner GatewayClass",
+    );
+    tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::try_join!(gateways.wait_until_ready(), classes.wait_until_ready())
+    })
+    .await
+    .context("timed out waiting for provisioning caches; check Gateway API CRDs and RBAC")?
+    .context("provisioning cache writer stopped")?;
+
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    // Watch events drive provisioning immediately. A slower resync repairs
+    // infrastructure drift, while failed operations get a short retry delay.
+    let mut resync = resync_period(args.resync_secs).map(resync_interval);
+    loop {
+        let failed = match provisioner
+            .reconcile(&gateways.state(), &classes.state(), &args.controller_name)
+            .await
+        {
+            Ok(outcome) => {
+                for (uid, failure) in &outcome.failures {
+                    warn!(gateway_uid = %uid, error = %failure, "Gateway provisioning failed; will retry");
+                }
+                mark_ready(&ready);
+                !outcome.failures.is_empty()
+            }
+            Err(error) => {
+                ready.store(false, Ordering::Relaxed);
+                warn!(error = %error, "provisioning failed; will retry");
+                true
+            }
+        };
+        tokio::select! {
+            event = rx.recv() => {
+                if event.is_none() {
+                    anyhow::bail!("provisioning watch channel closed");
+                }
+                tokio::time::sleep(Duration::from_millis(args.debounce_ms)).await;
+                while rx.try_recv().is_ok() {}
+            }
+            _ = maybe_tick(resync.as_mut()) => {}
+            _ = tokio::time::sleep(Duration::from_secs(5)), if failed => {}
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+        }
+    }
+    Ok(())
+}
+
 /// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
 /// last-applied IR) only on a successful apply, so a failed push is retried from
 /// the same baseline.
@@ -572,6 +700,7 @@ async fn reconcile(
     referenced_services: &RwLock<BTreeSet<String>>,
     exposure: &[ExposedPort],
 ) -> Result<()> {
+    verify_gateway_identity(args, client).await?;
     let cfg = BuildConfig {
         class_name: args.class_name.clone(),
         class_is_default: class_is_default(stores, &args.class_name),
@@ -580,7 +709,7 @@ async fn reconcile(
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
-    let inputs = Inputs {
+    let mut inputs = Inputs {
         ingresses: stores.ingresses.state(),
         namespaces: stores.namespaces.state(),
         services: stores.services.state(),
@@ -594,6 +723,13 @@ async fn reconcile(
         udp_routes: stores.udp_routes.state(),
     };
 
+    args.gateway_scope.filter_inputs(&mut inputs);
+    if let Some(uid) = &args.gateway_uid {
+        anyhow::ensure!(
+            inputs.gateways.len() == 1 && inputs.gateways[0].metadata.uid.as_ref() == Some(uid),
+            "waiting for the scoped Gateway incarnation in the reflector cache"
+        );
+    }
     let out = build(&cfg, &inputs);
 
     // Publish the Services this build referenced (resolved or not) for the
@@ -650,35 +786,44 @@ async fn reconcile(
         applied = true;
     }
 
+    verify_gateway_identity(args, client).await?;
+
     // Report Gateway API status (best-effort; never fails the reconcile). It is
     // loop-safe: a no-op patch is skipped, so our own writes don't re-trigger.
     // Resolve our own LoadBalancer Service once: its address is published into
     // both Ingress `.status` and Gateway `.status.addresses` (what external-dns
     // consumes). Best-effort + loop-safe (writes skipped when already current).
-    let publish_svc = args
+    let publish_reference = args
         .publish_service
         .as_deref()
-        .and_then(|s| s.split_once('/'))
-        .and_then(|(ns, name)| {
-            inputs.services.iter().find(|s| {
-                s.metadata.namespace.as_deref() == Some(ns)
-                    && s.metadata.name.as_deref() == Some(name)
-            })
-        });
-    let gw_addresses = publish_svc
-        .map(|s| status::gateway_addresses(s))
-        .unwrap_or_default();
+        .and_then(parse_publish_service);
+    let publish_svc = publish_reference.and_then(|(ns, name)| {
+        inputs.services.iter().find(|s| {
+            s.metadata.namespace.as_deref() == Some(ns) && s.metadata.name.as_deref() == Some(name)
+        })
+    });
+    let gw_addresses = status::published_gateway_addresses(
+        publish_reference.is_some(),
+        publish_svc.map(|svc| svc.as_ref()),
+    );
 
     // Skippable for least-privilege deployments running without the
     // gateways/status RBAC grants, where every write would 403.
     if args.gateway_status_writes {
+        let route_updates = status::route_updates(
+            &out.routes,
+            &inputs,
+            &args.controller_name,
+            &args.gateway_scope,
+        );
         status::write_status(
             client,
             &args.controller_name,
             &out.gateway_classes,
             &out.gateways,
-            &out.routes,
-            &gw_addresses,
+            &route_updates,
+            gw_addresses.as_deref(),
+            &args.gateway_scope,
         )
         .await;
     } else {
@@ -688,7 +833,9 @@ async fn reconcile(
     let lb_points = publish_svc
         .map(|s| status::lb_points(s))
         .unwrap_or_default();
-    status::write_ingress_status(client, &out.results, &lb_points).await;
+    if args.gateway_scope.is_default() && args.ingress_status_writes {
+        status::write_ingress_status(client, &out.results, &lb_points).await;
+    }
 
     // Shadow advances only on a successful socket apply. On failure it stays at
     // the previous applied IR. The emitted requests are not all idempotent, so
@@ -713,6 +860,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    args.gateway_scope.validate().map_err(anyhow::Error::msg)?;
     info!(?args, "starting sozu gateway controller");
 
     // The exposure table decides both what a Gateway listener may declare and
@@ -747,10 +895,7 @@ async fn main() -> Result<()> {
     );
 
     if let Some(ps) = &args.publish_service {
-        let valid = ps
-            .split_once('/')
-            .is_some_and(|(ns, name)| !ns.is_empty() && !name.is_empty() && !name.contains('/'));
-        if !valid {
+        if parse_publish_service(ps).is_none() {
             warn!(publish_service = %ps, "--publish-service must be namespace/name; Ingress status will not be written");
         }
     }
@@ -786,6 +931,9 @@ async fn main() -> Result<()> {
         bound_ops_config(&mut cfg);
         Client::try_from(cfg).context("create bounded ops client")?
     };
+    if let Some(path) = &args.provision_template {
+        return run_provisioner(&args, path, client, ops_client, ready).await;
+    }
     let agent = SozuAgentHandle::spawn(&args.socket).context("spawn sozu-agent")?;
 
     // Optional Prometheus `/metrics`: each scrape pulls Sōzu's aggregated
@@ -1218,6 +1366,105 @@ mod tests {
     use super::*;
     // Only as a stand-in resource type for the reflector-readiness tests.
     use k8s_openapi::api::core::v1::ConfigMap;
+
+    #[test]
+    fn provisioning_and_worker_modes_cannot_be_combined() {
+        for arguments in [
+            vec!["controller", "--gateway-uid", "uid"],
+            vec!["controller", "--ingress-only", "--gateway-scope", "demo/gw"],
+            vec![
+                "controller",
+                "--provision-template",
+                "/template",
+                "--ingress-only",
+            ],
+            vec![
+                "controller",
+                "--provision-template",
+                "/template",
+                "--gateway-scope",
+                "demo/gw",
+            ],
+        ] {
+            assert!(Args::try_parse_from(arguments).is_err());
+        }
+        assert!(Args::try_parse_from([
+            "controller",
+            "--gateway-scope",
+            "demo/gw",
+            "--gateway-uid",
+            "uid"
+        ])
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn pinned_workers_reject_replaced_deleted_and_unreadable_gateways() {
+        use kube::client::Body;
+        use serde_json::json;
+        let args = Args::try_parse_from([
+            "controller",
+            "--gateway-scope",
+            "demo/gw",
+            "--gateway-uid",
+            "original",
+        ])
+        .unwrap();
+        for (code, uid, deleting, expected) in [
+            (200, "original", false, true),
+            (200, "replacement", false, false),
+            (200, "original", true, false),
+            (404, "", false, false),
+            (403, "", false, false),
+        ] {
+            let service = tower::service_fn(move |request: http::Request<Body>| async move {
+                assert_eq!(request.method(), http::Method::GET);
+                assert_eq!(
+                    request.uri().path(),
+                    "/apis/gateway.networking.k8s.io/v1/namespaces/demo/gateways/gw"
+                );
+                let object = if code == 200 {
+                    let mut gateway = json!({
+                        "apiVersion": "gateway.networking.k8s.io/v1", "kind": "Gateway",
+                        "metadata": {"namespace": "demo", "name": "gw", "uid": uid},
+                        "spec": {"gatewayClassName": "sozu", "listeners": []}
+                    });
+                    if deleting {
+                        gateway["metadata"]["deletionTimestamp"] = json!("2026-09-10T00:00:00Z");
+                    }
+                    gateway
+                } else {
+                    json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "code": code, "reason": if code == 404 {"NotFound"} else {"Forbidden"}, "message": "unavailable"})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .body(Body::from(serde_json::to_vec(&object).unwrap()))
+                        .unwrap(),
+                )
+            });
+            let client = Client::new(service, "default");
+            assert_eq!(
+                verify_gateway_identity(&args, &client).await.is_ok(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn publish_service_requires_one_nonempty_namespace_and_name() {
+        for (value, expected) in [
+            ("", None),
+            ("service", None),
+            ("/service", None),
+            ("namespace/", None),
+            ("namespace/service/extra", None),
+            ("namespace/service", Some(("namespace", "service"))),
+        ] {
+            assert_eq!(parse_publish_service(value), expected, "{value}");
+        }
+    }
 
     /// An EndpointSlice labelled for `svc` in `ns` (`None` omits the piece).
     fn slice(ns: Option<&str>, svc: Option<&str>) -> EndpointSlice {

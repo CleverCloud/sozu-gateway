@@ -74,6 +74,12 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=3 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowGatewayStatusWrites=false > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":5432,"bind":5432,"protocol":"TCP","transport":"TCP"},{"name":"dns","port":5353,"bind":5353,"protocol":"UDP","transport":"UDP"}]' > /dev/null
+    # Automatic provisioning carries typed resource templates; static Gateway
+    # assignments must fail rather than silently losing their addresses.
+    helm template {{HELM_RELEASE}} {{CHART}} --set gatewayProvisioning.enabled=true --set metrics.serviceMonitor.enabled=true > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set gatewayProvisioning.enabled=true --set gatewayProvisioning.replicaCount=1 --set gatewayProvisioning.service.type=ClusterIP > /dev/null
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"old","gateway":{"namespace":"apps","name":"old"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set gatewayProvisioning.enabled=true --set gatewayProvisioning.replicaCount=0 > /dev/null 2>&1
     # A budget with neither bound is accepted by the apiserver and then blocks
     # every drain, so it must fail the render instead.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set pdb.maxUnavailable=null > /dev/null 2>&1
@@ -91,6 +97,8 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"}]' > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} -f {{CHART}}/ci/multiple-listeners.yaml --show-only templates/configmap.yaml | python3 scripts/check-listener-config.py
     helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
+
+    python3 scripts/test_gateway_instances.py
 
 # Package the Helm chart into dist/ (use TAG=v<semver>).
 chart-package:
