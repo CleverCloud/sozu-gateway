@@ -25,9 +25,11 @@
 # (port, protocol) twice.
 #
 # A socket carries exactly one route: there is no hostname to multiplex on. If
-# two routes claim one socket, the older (by creationTimestamp, then
-# namespace/name) keeps it and the other reports `L4RouteConflict` on its own
-# status — `kubectl describe tcproute` says so.
+# two routes with resolved backend references claim one socket, the older (by
+# creationTimestamp, then namespace/name) keeps it. Both stay Accepted=True and
+# count as attached; the loser emits an L4RouteConflict event visible through
+# `kubectl describe tcproute`. If the oldest Service disappears, the younger
+# route can receive traffic; use exposure.owner to reserve a port by namespace.
 #
 # Verify (raw TCP, no HTTP):
 #   printf 'hello-l4\n' | nc <lb-ip> 9000      # echoes: hello-l4

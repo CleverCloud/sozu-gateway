@@ -60,7 +60,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `rule.timeouts` | ❌ | no Sōzu equivalent; reported (`TimeoutsUnsupported`), the rule still routes without the timeout |
 | Gateway API | TLS `Passthrough` | ❌ | terminate only |
 | Gateway API | `Gateway` TCP/UDP listeners | ✅ | the declared port must be a `TCP`/`UDP` entry of the chart's `exposure` table (only Helm can open a Service port); `owner` may reserve it for one namespace |
-| Gateway API | `TCPRoute` / `UDPRoute` | ✅ | one Service `backendRef`; a socket forwards to the oldest route by `creationTimestamp` then `namespace/name` (`L4RouteConflict` on other claimants); all admitted routes remain `Accepted: True` and count toward the listener's `attachedRoutes` |
+| Gateway API | `TCPRoute` / `UDPRoute` | ✅ | one Service `backendRef`; a socket forwards to the oldest route with a resolved backend reference, by `creationTimestamp` then `namespace/name` (`L4RouteConflict` on other claimants); all admitted routes remain `Accepted: True` and count toward the listener's `attachedRoutes` |
 | Gateway API | `GRPCRoute` / `TLSRoute` | ❌ | |
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
 | Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
@@ -155,6 +155,11 @@ A full example is in [`examples/api-gateway/l4-routes.yaml`](../examples/api-gat
   and count toward the listener's `attachedRoutes`, including those whose
   backends are unresolved. A route counts once per listener even when several
   parentRefs select it. The conflict does not fail the reconcile.
+- Only routes whose backend reference resolves to a Service and port contend
+  for the socket. If the oldest route's Service disappears, a younger route
+  with a resolved backend can receive traffic. A Service with no ready endpoints
+  still holds its route's place. Reserve shared L4 ports with `owner` when
+  separate namespaces must not compete for them.
 - The exposure entry's optional `owner` names the only namespace whose Gateways
   may declare that port. Down here there is no hostname to arbitrate with, so
   the alternative would be a race.

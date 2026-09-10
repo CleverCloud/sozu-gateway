@@ -321,8 +321,9 @@ pub enum Problem {
     },
     /// Two layer-4 routes claim one listen socket for different Services. A
     /// socket carries exactly one route, so the older one (by
-    /// `creationTimestamp`, then `namespace/name`) keeps it and this one is
-    /// dropped. Settled here rather than in the translator on purpose: a
+    /// `creationTimestamp`, then `namespace/name`) keeps it. This route stays
+    /// accepted but does not receive traffic. Settled here rather than in the
+    /// translator on purpose: a
     /// translator error fails the whole reconcile, so one tenant's second route
     /// would stop routing for every other tenant.
     L4RouteConflict {
@@ -492,7 +493,7 @@ impl std::fmt::Display for Problem {
             } => write!(
                 f,
                 "{protocol} port {port} is already claimed by route {winner} (older, or first by \
-                 name); this route was dropped"
+                 name); this route remains accepted but does not receive traffic"
             ),
             Problem::WeightedBackendsUnsupported => write!(
                 f,

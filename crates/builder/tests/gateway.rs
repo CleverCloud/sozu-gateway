@@ -2124,6 +2124,52 @@ fn accepted_l4_routes_with_unresolved_backends_count_as_attached() {
 }
 
 #[test]
+fn a_missing_l4_service_releases_the_socket_but_empty_endpoints_do_not() {
+    let mut inputs = l4_inputs(
+        vec![
+            tcp_route(
+                "older",
+                Some("2026-01-01T00:00:00Z"),
+                json!([{ "name": "postgres", "port": 5432 }]),
+            ),
+            tcp_route(
+                "younger",
+                Some("2026-02-01T00:00:00Z"),
+                json!([{ "name": "postgres-b", "port": 5432 }]),
+            ),
+        ],
+        vec![],
+    );
+    let before = build(&l4_config(), &inputs);
+    assert_eq!(before.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+
+    inputs
+        .endpointslices
+        .retain(|slice| slice.metadata.name.as_deref() != Some("postgres-1"));
+    let empty = build(&l4_config(), &inputs);
+    assert_eq!(empty.ir.l4_frontends[0].cluster_id, "demo.postgres.5432");
+
+    inputs
+        .services
+        .retain(|service| service.metadata.name.as_deref() != Some("postgres"));
+    let missing = build(&l4_config(), &inputs);
+    assert_eq!(missing.ir.l4_frontends.len(), 1);
+    assert_eq!(
+        missing.ir.l4_frontends[0].cluster_id,
+        "demo.postgres-b.5432"
+    );
+    assert_eq!(missing.gateways[0].listeners[0].attached_routes, 2);
+    assert!(missing.routes.iter().all(|route| route.parents[0].accepted));
+    let older = missing
+        .routes
+        .iter()
+        .find(|route| route.name == "older")
+        .unwrap();
+    assert!(!older.parents[0].resolved_refs);
+    assert_eq!(older.parents[0].resolved_refs_reason, "BackendNotFound");
+}
+
+#[test]
 fn overlapping_l4_parent_refs_count_each_route_once_per_listener() {
     // API validation rejects overlapping references. The pure builder still
     // counts routes, not parentRefs, if such an input reaches it.
