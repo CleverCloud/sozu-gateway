@@ -172,6 +172,25 @@ fn https_listener_loads_cert() {
 }
 
 #[test]
+fn missing_listener_certificate_preserves_gateway_acceptance() {
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![https_gateway()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    let gateway = &out.gateways[0];
+    assert!(gateway.accepted);
+    assert_eq!(gateway.accepted_reason, "Accepted");
+    assert!(!gateway.programmed);
+    let listener = &gateway.listeners[0];
+    assert!(listener.accepted);
+    assert!(!listener.programmed);
+    assert!(!listener.resolved_refs);
+    assert_eq!(listener.resolved_refs_reason, "InvalidCertificateRef");
+}
+
+#[test]
 fn other_controller_is_ignored() {
     let inputs = Inputs {
         gateway_classes: arcs(vec![gateway_class("other.io/controller")]),
@@ -1365,6 +1384,8 @@ fn listener_port_mismatch_is_reported_and_not_programmed() {
     let out = build(&BuildConfig::default(), &inputs);
 
     assert!(out.ir.frontends.is_empty(), "no traffic on the wrong port");
+    assert!(!out.gateways[0].accepted);
+    assert_eq!(out.gateways[0].accepted_reason, "ListenersNotValid");
     assert!(out.gateways[0].problems.contains(&Problem::PortNotExposed {
         listener: "http-alt".to_string(),
         declared: 8080,
