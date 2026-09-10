@@ -91,6 +91,13 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   exclude an error backend and redistribute its share to the other available
   backends in that cluster. This also applies to ordinary backend connection
   failures; it does not change the compiled reference weights.
+- **Gateway certificate name inference.** An HTTPS listener without `hostname` uses its
+  certificate's DNS SANs, falling back to the CN only when no DNS SAN exists. Names are merged
+  with explicit listener hostnames only after validation. Empty inference, malformed SNI
+  patterns, regex syntax, non-ASCII names, and names longer than Sōzu's 4096-byte limit leave
+  that listener `ResolvedRefs: False` with reason `InvalidCertificateRef`. Exact names,
+  leading `*.` wildcards and the certificate wildcard `*` remain supported. A rejected
+  listener does not reload a shared certificate already serving explicit hostnames.
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR

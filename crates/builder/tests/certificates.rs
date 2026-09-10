@@ -16,6 +16,8 @@ use sozu_gw_translator::reconcile;
 const CERT: &str = include_str!("fixtures/cert_gateway.pem");
 const ROTATED_CERT: &str = include_str!("fixtures/cert_gateway_rotated.pem");
 const CN_CERT: &str = include_str!("fixtures/cert_cn_only.pem");
+const INVALID_SAN_CERT: &str = include_str!("fixtures/cert_invalid_san.pem");
+const NO_NAMES_CERT: &str = include_str!("fixtures/cert_no_names.pem");
 const KEY: &str = include_str!("fixtures/key_a.pem");
 const NAMESPACE: &str = "gateway-conformance-infra";
 const GATEWAY: &str = "same-namespace-with-https-listener";
@@ -334,4 +336,97 @@ fn an_existing_shadow_is_repaired_without_a_schema_change() {
     };
     assert_eq!(add.certificate.names, expected_names());
     assert!(reconcile(&desired, &desired).unwrap().is_empty());
+}
+
+// A shared certificate may have usable explicit overrides even when its SANs
+// cannot enter Sōzu's trie. Adding an invalid inference must leave that existing
+// certificate installed, regardless of listener order.
+fn assert_rejected_inference_preserves_named_listener(pem: &str, reason: &str) {
+    for inferred_first in [false, true] {
+        let mut inputs = inputs();
+        replace_secret_cert(&mut inputs, pem);
+        let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+        let inferred = listeners.remove(0);
+        listeners.truncate(1);
+        let before = build(&BuildConfig::default(), &inputs);
+        assert!(before.gateways[0].listeners[0].programmed);
+        assert!(before.gateways[0].problems.is_empty());
+        assert_eq!(before.ir.certificates.len(), 1);
+        assert_eq!(before.ir.certificates[0].names, vec!["second-example.org"]);
+        assert_eq!(before.ir.frontends.len(), 1);
+
+        let listeners = &mut Arc::make_mut(&mut inputs.gateways[0]).spec.listeners;
+        listeners.insert(if inferred_first { 0 } else { 1 }, inferred);
+        let after = build(&BuildConfig::default(), &inputs);
+        let inferred_status = after.gateways[0]
+            .listeners
+            .iter()
+            .find(|listener| listener.name == "https")
+            .unwrap();
+        assert!(!inferred_status.resolved_refs);
+        assert_eq!(
+            inferred_status.resolved_refs_reason,
+            "InvalidCertificateRef"
+        );
+        assert!(!inferred_status.programmed);
+        let named_status = after.gateways[0]
+            .listeners
+            .iter()
+            .find(|listener| listener.name == "https-with-hostname")
+            .unwrap();
+        assert!(named_status.resolved_refs && named_status.programmed);
+        assert!(after.gateways[0].problems.iter().any(|problem| matches!(
+            problem,
+            sozu_gw_builder::Problem::InvalidCertificate { reason: detail, .. }
+                if detail.contains(reason)
+        )));
+        assert_eq!(after.ir.certificates, before.ir.certificates);
+        assert_eq!(after.ir.frontends, before.ir.frontends);
+        assert!(
+            reconcile(&before.ir, &after.ir)
+                .unwrap()
+                .iter()
+                .all(|request| !matches!(
+                    request.request_type,
+                    Some(
+                        RequestType::RemoveCertificate(_)
+                            | RequestType::AddCertificate(_)
+                            | RequestType::ReplaceCertificate(_)
+                    )
+                )),
+            "a rejected listener must not remove or reload the working certificate"
+        );
+    }
+}
+
+#[test]
+fn invalid_inferred_san_preserves_the_named_listeners_certificate() {
+    // The valid SAN matches the named listener; the extra malformed SAN must
+    // not enter the merged names when another listener requests inference.
+    assert_rejected_inference_preserves_named_listener(
+        INVALID_SAN_CERT,
+        "unsupported inferred SNI",
+    );
+}
+
+#[test]
+fn missing_inferred_names_fail_only_the_hostname_less_listener() {
+    assert_rejected_inference_preserves_named_listener(NO_NAMES_CERT, "no DNS SAN or common name");
+}
+
+#[test]
+fn a_hostname_less_listener_needs_at_least_one_inferred_name() {
+    let mut inputs = inputs();
+    replace_secret_cert(&mut inputs, NO_NAMES_CERT);
+    Arc::make_mut(&mut inputs.gateways[0])
+        .spec
+        .listeners
+        .truncate(1);
+    let out = build(&BuildConfig::default(), &inputs);
+    let listener = &out.gateways[0].listeners[0];
+    assert!(!listener.resolved_refs);
+    assert_eq!(listener.resolved_refs_reason, "InvalidCertificateRef");
+    assert!(!listener.programmed);
+    assert!(out.ir.certificates.is_empty());
+    assert!(out.ir.frontends.is_empty());
 }

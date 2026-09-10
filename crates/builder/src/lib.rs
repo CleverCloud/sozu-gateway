@@ -686,6 +686,26 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
 /// PEM labels we accept for `tls.key` (PKCS#8, PKCS#1 and SEC1).
 const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"];
 
+/// Inferred names reach Sōzu's SNI trie directly, including its regex grammar.
+/// Validate before merging: an invalid name must not trigger a reload that
+/// removes a certificate still used by a listener with an explicit hostname.
+fn validate_inferred_certificate_names(names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
+        return Err("tls.crt has no DNS SAN or common name to infer for the listener".into());
+    }
+    for name in names {
+        // Sōzu's TLS resolver caps names at MAX_HOSTNAME_LENGTH (4096 bytes).
+        // Its public SNI validator excludes malformed labels and regex syntax;
+        // the bare wildcard is also supported by certificate name inference.
+        if name.len() > 4096
+            || (name != "*" && sozu_command_lib::config::validate_sni_pattern(name).is_err())
+        {
+            return Err("tls.crt contains an unsupported inferred SNI name".into());
+        }
+    }
+    Ok(())
+}
+
 /// Extract **and validate** leaf + chain + key PEM from a TLS Secret
 /// (`tls.crt` / `tls.key`). An empty name override uses Sōzu's CN/SAN inference
 /// before certificates are merged, so an explicit override on another listener
@@ -733,6 +753,7 @@ pub(crate) fn extract_cert(
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
     if names.is_empty() {
         names = sozu_command_lib::certificate::get_cn_and_san_attributes(&x509);
+        validate_inferred_certificate_names(&names)?;
     }
     let fingerprint =
         sozu_command_lib::certificate::calculate_fingerprint_from_der(&leaf_pem.contents);
@@ -1597,5 +1618,46 @@ mod http_route_collisions {
         let (kept, collisions) = resolve_frontend_collisions(frontends);
         assert_eq!(kept.len(), 6);
         assert!(collisions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod certificate_name_tests {
+    use super::validate_inferred_certificate_names;
+
+    #[test]
+    fn inferred_names_reject_trie_syntax_and_unusable_identities() {
+        for name in [
+            "",
+            ".example.org",
+            "example..org",
+            "example.org/",
+            "/example.*/",
+            "*.",
+            "a.*.org",
+            "éxample.org",
+        ] {
+            assert!(
+                validate_inferred_certificate_names(&["valid.example.org".into(), name.into()])
+                    .is_err(),
+                "invalid inferred name {name:?} must not poison a shared certificate"
+            );
+        }
+        assert!(validate_inferred_certificate_names(&[]).is_err());
+        assert!(validate_inferred_certificate_names(&["a".repeat(4097)]).is_err());
+    }
+
+    #[test]
+    fn inferred_names_keep_certificate_wildcards_and_the_resolver_length_bound() {
+        let names = [
+            "*",
+            "*.org",
+            "*.wildcard.org",
+            "cn-only.example.org",
+            "xn--xample-9ua.org",
+        ]
+        .map(String::from);
+        assert!(validate_inferred_certificate_names(&names).is_ok());
+        assert!(validate_inferred_certificate_names(&["a".repeat(4096)]).is_ok());
     }
 }
