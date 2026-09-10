@@ -15,8 +15,10 @@
 //! are ordered before frontend *adds*: Sōzu keys a route by host+path (not by
 //! cluster_id), so re-pointing a route at another cluster is a Remove+Add on the
 //! same key, and adding first would be rejected as a duplicate. A new/replacement
-//! certificate lands before the old one is removed → no TLS gap. This also makes
-//! the otherwise HashSet-ordered routing diff deterministic.
+//! certificate lands before the old one is removed. A name-only update of the
+//! same certificate needs removal before addition, with a brief TLS gap: Sōzu
+//! ignores ReplaceCertificate when the fingerprint is unchanged. Ordering also
+//! makes the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -331,7 +333,7 @@ struct KeyedCert {
 /// byte-different PEM encodings of the *same* certificate share one identity in
 /// Sōzu; kept as separate entries they would make the diff compare the single
 /// loaded cert against whichever duplicate it pairs with — re-emitting a
-/// ReplaceCertificate on every cycle and clamping SNI coverage to that entry's
+/// certificate update on every cycle and clamping SNI coverage to that entry's
 /// names. Grouping first keeps `reconcile(&ir, &ir)` empty and every hostname
 /// covered. The first occurrence fixes the group's position and PEM bytes
 /// (the DER is identical anyway); the merged name set is sorted.
@@ -540,10 +542,22 @@ fn tier(req: &Request) -> u8 {
 }
 
 /// Reorder into dependency-safe tiers with a deterministic secondary key.
-fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
+/// Only certificate removals paired with a name update move ahead of the
+/// certificate adds. An Add with an existing fingerprint is a worker no-op;
+/// leaving its paired removal at the teardown tier would delete the cert.
+fn canonicalize(
+    mut requests: Vec<Request>,
+    certificate_reloads: &BTreeSet<(SocketAddr, String)>,
+) -> Vec<Request> {
     requests.sort_by_cached_key(|req| {
+        let reload = match &req.request_type {
+            Some(RequestType::RemoveCertificate(c)) => {
+                certificate_reloads.contains(&(c.address.into(), c.fingerprint.clone()))
+            }
+            _ => false,
+        };
         let key = serde_json::to_string(req).unwrap_or_default();
-        (tier(req), key)
+        (if reload { 4 } else { tier(req) }, !reload, key)
     });
     requests
 }
@@ -604,7 +618,7 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     requests.extend(l4_listener_adds(&ir.l4_frontends));
     requests.extend(l4.into_iter().map(l4_frontend_request));
     let mut state = ConfigState::new();
-    for req in canonicalize(requests) {
+    for req in canonicalize(requests, &BTreeSet::new()) {
         // The library's own message identifies the clashing object only by the
         // byte length of its id, so the request has to carry the diagnosis: on a
         // duplicate route key, this is the only thing that names the route. Safe
@@ -616,6 +630,14 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     Ok(state)
 }
 
+#[derive(Default)]
+struct CertificateRequests {
+    requests: Vec<Request>,
+    /// Same-fingerprint name updates need removal before their add. All other
+    /// certificate removals keep the normal teardown order.
+    reloads: BTreeSet<(SocketAddr, String)>,
+}
+
 /// Minimal certificate requests to converge `previous` → `desired`. Identity is
 /// (listener, fingerprint) — matching Sōzu's own cert store — so the same cert on
 /// two listeners is tracked independently. Both sides are grouped by that
@@ -623,15 +645,15 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
 /// to a single entry carrying the union of their SNI names. Handles:
 ///  - new cert at (listener, fp)        -> AddCertificate
 ///  - cert gone from (listener, fp)     -> RemoveCertificate
-///  - same (listener, fp), names differ -> ReplaceCertificate (same fp; Sōzu
-///    skips a plain AddCertificate whose fp already exists, so a Replace is the
-///    only way to update SNI names in place)
+///  - same (listener, fp), names differ -> RemoveCertificate + AddCertificate;
+///    Sōzu 2.2.1 skips both Add and Replace when the fingerprint already exists.
+///    Removal must precede the add, leaving a brief TLS availability gap.
 ///  - rotation (a removed + an added at the same listener sharing the SNI name
 ///    set) -> a single ReplaceCertificate (zero-gap)
 fn certificate_requests(
     previous: &[ir::Certificate],
     desired: &[ir::Certificate],
-) -> Result<Vec<Request>, TranslatorError> {
+) -> Result<CertificateRequests, TranslatorError> {
     let prev = keyed_certs(previous)?;
     let des = keyed_certs(desired)?;
 
@@ -644,15 +666,20 @@ fn certificate_requests(
         .map(|k| (k.listener, k.fingerprint.as_str()))
         .collect();
 
-    let mut out = Vec::new();
+    let mut out = CertificateRequests::default();
     let mut truly_added: Vec<&KeyedCert> = Vec::new();
 
     for d in &des {
         match prev_by_key.get(&(d.listener, d.fingerprint.as_str())) {
-            // Same (listener, fp): in place. Only a name change needs a request.
+            // Same (listener, fp): only a name change needs a reload.
             Some(p) => {
                 if names_set(&p.cert) != names_set(&d.cert) {
-                    out.push(replace_certificate_request(&d.cert, d.fingerprint.clone()));
+                    out.reloads.insert((d.listener, d.fingerprint.clone()));
+                    out.requests.push(remove_certificate_request(
+                        d.listener,
+                        d.fingerprint.clone(),
+                    ));
+                    out.requests.push(add_certificate_request(&d.cert));
                 }
             }
             None => truly_added.push(d),
@@ -671,17 +698,17 @@ fn certificate_requests(
             !used[i] && old.listener == new.listener && names_set(&old.cert) == names_set(&new.cert)
         }) {
             used[idx] = true;
-            out.push(replace_certificate_request(
+            out.requests.push(replace_certificate_request(
                 &new.cert,
                 truly_removed[idx].fingerprint.clone(),
             ));
         } else {
-            out.push(add_certificate_request(&new.cert));
+            out.requests.push(add_certificate_request(&new.cert));
         }
     }
     for (i, old) in truly_removed.iter_mut().enumerate() {
         if !used[i] {
-            out.push(remove_certificate_request(
+            out.requests.push(remove_certificate_request(
                 old.listener,
                 old.fingerprint.clone(),
             ));
@@ -711,7 +738,7 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
             .into_iter()
             .map(l4_frontend_request),
     );
-    canonicalize(requests)
+    canonicalize(requests, &BTreeSet::new())
 }
 
 /// Minimal, dependency-safe requests to converge a `previous` applied IR towards
@@ -720,11 +747,12 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
 /// successful apply.
 pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, TranslatorError> {
     let mut requests = routing_state(previous)?.diff(&routing_state(desired)?);
-    requests.extend(certificate_requests(
-        &previous.certificates,
-        &desired.certificates,
-    )?);
-    let mut requests = canonicalize(drop_superseded_backend_removes(requests));
+    let certificates = certificate_requests(&previous.certificates, &desired.certificates)?;
+    requests.extend(certificates.requests);
+    let mut requests = canonicalize(
+        drop_superseded_backend_removes(requests),
+        &certificates.reloads,
+    );
     // `ConfigState::diff` emits the activation of a newly-added active TCP/UDP
     // listener twice (once inline, once in its trailing activation sweep).
     // After `canonicalize` the batch is fully sorted, so identical requests

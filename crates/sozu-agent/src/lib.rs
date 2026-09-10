@@ -994,6 +994,66 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn certificate_name_reload_recovers_after_a_failed_add() {
+        let certificate = sozu_gw_ir::Certificate {
+            listener: "127.0.0.1:8443".parse().unwrap(),
+            certificate: include_str!("../../translator/tests/fixtures/cert_a.pem").into(),
+            key: include_str!("../../translator/tests/fixtures/key_a.pem").into(),
+            chain: vec![],
+            names: vec!["app.example.com".into()],
+        };
+        let previous = sozu_gw_ir::Ir {
+            certificates: vec![certificate],
+            ..Default::default()
+        };
+        let mut desired = previous.clone();
+        desired.certificates[0].names.push("www.example.com".into());
+        let requests = sozu_gw_translator::reconcile(&previous, &desired).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            requests[0].request_type,
+            Some(RequestType::RemoveCertificate(_))
+        ));
+        assert!(matches!(
+            requests[1].request_type,
+            Some(RequestType::AddCertificate(_))
+        ));
+
+        let path = temp_socket_path("cert-reload-retry");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                ok_response(), // the first remove succeeds
+                failure_response("certificate add failed"),
+                failure_response("certificate not found"), // the retry sees the prior remove
+                ok_response(),
+                ok_response(), // replay after a completed batch missing from the shadow
+                ok_response(),
+            ],
+        );
+        let mut agent = SozuAgent::new(path.to_str().unwrap());
+        let error = agent
+            .apply(&requests)
+            .expect_err("a failed add must fail the batch");
+        assert!(matches!(error, SozuError::Failure(_)));
+        agent
+            .apply(&requests)
+            .expect("an already-gone certificate must not block its add");
+        agent
+            .apply(&requests)
+            .expect("the unchanged shadow can replay the completed batch");
+        drop(agent);
+
+        let received = server.join().expect("fake sozu thread");
+        let expected: Vec<_> = requests.iter().cycle().take(6).cloned().collect();
+        assert_eq!(
+            received, expected,
+            "each attempt preserves remove-before-add order"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// L4 listener adds keep plain tolerance: they are keyed by address alone,
     /// so a duplicate cannot mask a different routing target — and no repair
     /// traffic may be emitted for them.

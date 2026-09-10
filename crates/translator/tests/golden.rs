@@ -428,9 +428,9 @@ fn reconcile_same_cert_on_two_listeners_adds_both() {
 }
 
 #[test]
-fn reconcile_cert_name_change_replaces_in_place() {
-    // Same PEM (same fingerprint), different SNI names -> ReplaceCertificate
-    // (a plain AddCertificate would be skipped by Sōzu as the fp already exists).
+fn reconcile_cert_name_change_removes_before_readding() {
+    // The worker ignores ReplaceCertificate when both fingerprints match.
+    // Exercise both widening and restricting the live SNI name set.
     let before = ir::Ir {
         certificates: vec![cert(CERT_A, KEY_A)],
         ..Default::default()
@@ -441,16 +441,111 @@ fn reconcile_cert_name_change_replaces_in_place() {
         certificates: vec![renamed],
         ..Default::default()
     };
-    let reqs = tr::reconcile(&before, &after).expect("reconcile");
-    assert_eq!(reqs.len(), 1);
-    assert!(
-        matches!(
-            reqs[0].request_type,
-            Some(RequestType::ReplaceCertificate(_))
-        ),
-        "a name-only change must Replace in place, got {:?}",
-        reqs[0].request_type
-    );
+    for (previous, desired) in [(&before, &after), (&after, &before)] {
+        let reqs = tr::reconcile(previous, desired).expect("reconcile");
+        assert_eq!(reqs.len(), 2);
+        let Some(RequestType::RemoveCertificate(remove)) = &reqs[0].request_type else {
+            panic!("a name update must remove the old certificate first");
+        };
+        let Some(RequestType::AddCertificate(add)) = &reqs[1].request_type else {
+            panic!("a name update must re-add the certificate");
+        };
+        assert_eq!(remove.address, add.address);
+        assert_eq!(add.certificate.names, desired.certificates[0].names);
+        assert_eq!(
+            add.certificate.certificate,
+            desired.certificates[0].certificate
+        );
+        assert_certificate_replay(previous, desired, &reqs);
+        assert!(tr::reconcile(desired, desired).unwrap().is_empty());
+    }
+}
+
+fn assert_certificate_replay(previous: &ir::Ir, desired: &ir::Ir, requests: &[Request]) {
+    let mut state = ConfigState::new();
+    let initial = tr::reconcile(&ir::Ir::default(), previous).unwrap();
+    for request in initial.iter().chain(requests) {
+        state.dispatch(request).expect("replay certificate update");
+    }
+    let mut expected = ConfigState::new();
+    for request in tr::reconcile(&ir::Ir::default(), desired).unwrap() {
+        expected
+            .dispatch(&request)
+            .expect("desired certificate state");
+    }
+    // ConfigState retains an empty listener bucket after its last certificate
+    // is removed; a fresh apply has no bucket for that listener.
+    state
+        .certificates
+        .retain(|_, certificates| !certificates.is_empty());
+    assert_eq!(state.certificates, expected.certificates);
+}
+
+#[test]
+fn certificate_reload_order_is_scoped_to_its_listener_and_fingerprint() {
+    let mut before = sample_ir();
+    let mut other_fingerprint = cert(CERT_B, KEY_B);
+    other_fingerprint.names = vec!["removed.example.com".into()];
+    let mut other_listener = cert(CERT_A, KEY_A);
+    other_listener.listener = addr("0.0.0.0:8443");
+    let mut rotation = cert(CERT_A, KEY_A);
+    rotation.listener = addr("0.0.0.0:9443");
+    rotation.names = vec!["rotation.example.com".into()];
+    before
+        .certificates
+        .extend([other_fingerprint, other_listener, rotation.clone()]);
+    let mut after = sample_ir();
+    after.certificates[0].names = vec!["www.example.com".into()];
+    rotation.certificate = CERT_B.into();
+    rotation.key = KEY_B.into();
+    after.certificates.push(rotation);
+    for frontend in &mut after.frontends {
+        if frontend.tls {
+            frontend.hostname = "www.example.com".into();
+        }
+    }
+
+    let reqs = tr::reconcile(&before, &after).unwrap();
+    let add_index = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::AddCertificate(_))))
+        .unwrap();
+    let Some(RequestType::RemoveCertificate(reload)) = &reqs[add_index - 1].request_type else {
+        panic!("the certificate reload must remove before adding");
+    };
+    assert_eq!(SocketAddr::from(reload.address), addr("0.0.0.0:443"));
+    let frontend_index = reqs
+        .iter()
+        .position(|r| matches!(r.request_type, Some(RequestType::AddHttpsFrontend(_))))
+        .unwrap();
+    assert!(add_index < frontend_index);
+    let removals: Vec<_> = reqs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| match &r.request_type {
+            Some(RequestType::RemoveCertificate(c)) => Some((i, c)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removals.len(), 3);
+    for (index, certificate) in removals {
+        if certificate.address != reload.address || certificate.fingerprint != reload.fingerprint {
+            assert!(
+                index > frontend_index,
+                "unrelated removals stay after frontends"
+            );
+        }
+    }
+    let rotations: Vec<_> = reqs
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::ReplaceCertificate(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rotations.len(), 1);
+    assert_eq!(SocketAddr::from(rotations[0].address), addr("0.0.0.0:9443"));
+    assert_certificate_replay(&before, &after, &reqs);
 }
 
 #[test]
@@ -488,8 +583,8 @@ fn reconcile_duplicate_fingerprint_certs_is_idempotent() {
 #[test]
 fn reconcile_duplicate_fingerprint_certs_union_names() {
     // The desired side has duplicate entries for one cert whose SNI name UNION
-    // differs from the loaded names: exactly one ReplaceCertificate, carrying
-    // the union — neither hostname may lose coverage.
+    // differs from the loaded names: one remove/add pair carrying the union.
+    // Both hostnames must be present after the reload.
     let before = ir::Ir {
         certificates: vec![cert(CERT_A, KEY_A)], // names: app.example.com
         ..Default::default()
@@ -503,20 +598,25 @@ fn reconcile_duplicate_fingerprint_certs_union_names() {
     let reqs = tr::reconcile(&before, &after).expect("reconcile");
     assert_eq!(
         reqs.len(),
-        1,
-        "one ReplaceCertificate expected: {dump}",
-        dump = dump(&reqs)
+        2,
+        "one remove/add pair expected: {}",
+        dump(&reqs)
     );
-    match &reqs[0].request_type {
-        Some(RequestType::ReplaceCertificate(r)) => {
+    assert!(matches!(
+        reqs[0].request_type,
+        Some(RequestType::RemoveCertificate(_))
+    ));
+    match &reqs[1].request_type {
+        Some(RequestType::AddCertificate(r)) => {
             assert_eq!(
-                r.new_certificate.names,
+                r.certificate.names,
                 vec!["app.example.com".to_string(), "www.example.com".to_string()],
-                "the replacement must carry the union of the SNI names"
+                "the reloaded certificate must carry the union of the SNI names"
             );
         }
-        other => panic!("expected ReplaceCertificate, got {other:?}"),
+        other => panic!("expected AddCertificate, got {other:?}"),
     }
+    assert_certificate_replay(&before, &after, &reqs);
 }
 
 #[test]

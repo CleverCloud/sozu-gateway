@@ -217,6 +217,13 @@ Build `CertificateAndKey` straight from the Kubernetes Secret bytes (`tls.crt` /
 - **Rotation decision**: `ConfigState::diff` emits cert change as `RemoveCertificate(old)` +
   `AddCertificate(new)` (brief gap). For zero-gap rotation we will emit
   `ReplaceCertificate { old_fingerprint, new_certificate }` ourselves.
+- In Sōzu 2.2.1, the worker's certificate resolver treats a replacement with the
+  **same fingerprint** as a no-op before updating SNI names
+  ([`replace_certificate`](https://github.com/sozu-proxy/sozu/blob/2.2.1/lib/src/tls.rs#L556)).
+  The main process's `ConfigState` still accepts that replacement, so a state
+  dump alone cannot prove the names changed in workers. Name-only changes need
+  `RemoveCertificate` before `AddCertificate`; a plain add also skips an existing
+  fingerprint. This reload has a TLS availability gap, unlike a leaf rotation.
 
 ---
 
