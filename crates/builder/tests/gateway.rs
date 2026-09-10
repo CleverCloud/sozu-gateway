@@ -3646,8 +3646,12 @@ mod weighted_refs {
                 .collect();
             assert_eq!(selected, expected.ir.backends);
             let loser = out.routes.iter().find(|r| r.name == "younger").unwrap();
-            assert!(!loser.parents[0].accepted);
-            assert_eq!(loser.parents[0].accepted_reason, "RouteConflict");
+            assert!(loser.parents[0].accepted);
+            assert_eq!(loser.parents[0].accepted_reason, "Accepted");
+            assert!(loser.parents[0].problems.iter().any(|p| matches!(p,
+                Problem::L4RouteConflict { winner, .. } if winner == "demo/older"
+            )));
+            assert_eq!(out.gateways[0].listeners[0].attached_routes, 2);
             assert!(reconcile(&out.ir, &out.ir).unwrap().is_empty());
         }
     }
