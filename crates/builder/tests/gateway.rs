@@ -2650,3 +2650,68 @@ fn a_redirect_does_not_override_an_older_forwarding_route() {
     );
     assert!(out.ir.frontends[0].cluster_id.is_none());
 }
+
+#[test]
+fn ingress_and_rejection_frontends_use_the_selected_http_route() {
+    for ingress_namespace in ["demo", "zzzz"] {
+        let older = collision_route(
+            "demo",
+            "z-old",
+            Some("2026-01-01T00:00:00Z"),
+            Some("missing"),
+        );
+        let newer = collision_route("demo", "a-new", Some("2026-01-01T00:00:01Z"), Some("a"));
+        let mut inputs = colliding_routes(vec![newer, older]);
+        let ingress: Ingress = from_json(json!({
+            "metadata": {"namespace": ingress_namespace, "name": "ingress"},
+            "spec": {"ingressClassName": "sozu", "rules": [{
+                "host": "app.example.com",
+                "http": {"paths": [{"path": "/", "pathType": "Prefix",
+                    "backend": {"service": {"name": "z", "port": {"number": 80}}}}]}
+            }]}
+        }));
+        inputs.ingresses = arcs(vec![ingress]);
+        if ingress_namespace != "demo" {
+            let mut service = web_service();
+            service.metadata.namespace = Some(ingress_namespace.into());
+            service.metadata.name = Some("z".into());
+            inputs.services.push(Arc::new(service));
+            let mut slice = web_slice();
+            slice.metadata.namespace = Some(ingress_namespace.into());
+            slice
+                .metadata
+                .labels
+                .as_mut()
+                .unwrap()
+                .insert("kubernetes.io/service-name".into(), "z".into());
+            inputs.endpointslices.push(Arc::new(slice));
+        }
+        // The newer healthy route's demo.a.80 never enters the Ingress
+        // comparison: the older rejection first wins between HTTPRoutes.
+        // The Ingress target sorts on either side of the rejection id.
+        let rejection_wins = ingress_namespace == "zzzz";
+        let expected = if rejection_wins {
+            "sozu-gateway/http-error"
+        } else {
+            "demo.z.80"
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1);
+        assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some(expected));
+        let older = out.routes.iter().find(|r| r.name == "z-old").unwrap();
+        assert!(!older.parents[0].resolved_refs);
+        assert_eq!(older.parents[0].accepted, rejection_wins);
+        let newer = out.routes.iter().find(|r| r.name == "a-new").unwrap();
+        assert!(!newer.parents[0].accepted);
+        assert!(newer.parents[0].problems.iter().any(|p| matches!(p,
+            Problem::RouteCollision { winner, .. } if winner == expected
+        )));
+        let ingress = out.results.iter().find(|r| r.name == "ingress").unwrap();
+        assert_eq!(
+            ingress.problems.iter().any(|p| matches!(p,
+                Problem::RouteCollision { winner, .. } if winner == expected
+            )),
+            rejection_wins
+        );
+    }
+}
