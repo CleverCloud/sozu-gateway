@@ -34,6 +34,11 @@ at most 256 active connections and 64 KiB of header buffering per connection. Se
 [the support matrix](features.md) for request deadlines and the full limits.
 If either responder is unavailable or in Sōzu's retry backoff, a mixed cluster can
 redistribute its share to the remaining available backends until it recovers.
+Sōzu also reuses a connected HTTP backend before making another weighted selection. Independent
+connections sample the configured shares, but requests on a persistent connection can remain on
+one Service. Because error responses close their backend connection, a persistent client can
+eventually select a healthy Service and keep it. This limits both ordinary and HTTP error shares;
+no per-request distribution within an existing connection is guaranteed.
 
 The IR schema is unchanged. No persisted-shadow migration or Sōzu upgrade is required. An older
 controller still reads the shadow and removes composite clusters on its next reconcile, reverting

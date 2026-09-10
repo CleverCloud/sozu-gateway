@@ -161,6 +161,9 @@ controller owns both fixed loopback responders (ports 8082/8083 by default); the
 ordinary backend addresses without I/O. An all-zero HTTP rule returns 500 without forwarding to
 any reference. TCP/UDP retain redistribution of unavailable shares and an empty cluster if none
 remain. A rule with one backendRef of positive weight retains its Service cluster and annotations.
+HTTP weights apply when Sōzu selects a backend; a connected backend is reused first. Persistent
+HTTP connections therefore do not guarantee per-request shares, including local 500/503 shares.
+The conformance client's disabled keep-alives leave that behavior outside its coverage.
 Anything Sōzu cannot represent (header/query matches, TLS passthrough) is reported as a `Problem`.
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
