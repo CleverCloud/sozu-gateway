@@ -108,9 +108,12 @@ then a no-op that still counts as a successful reconcile.
   the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**
   (probed via `save_state`): if Sōzu itself restarted (empty), the stale shadow is ignored and the
   full state is re-applied, so a fresh Sōzu is never left unprogrammed. Mid-life, a Sōzu restart
-  under a live controller is detected by its **worker-PID generation** (checked on every resync
+  under a live controller is detected by its **command-socket identity and worker-PID generation** (checked on every resync
   tick, pending reconnect, and post-apply reconnect); a changed generation resets the shadow so
   the next reconcile re-applies everything — an emptiness probe would be raceable there.
+  Worker PIDs alone are insufficient: a restarted container can reuse the same PID set.
+  Socket identity must describe the connection that answered the worker probe, not a later
+  pathname lookup that could already refer to a replacement socket.
 - **The shadow is a bare `Ir` with no version field**, so every new field needs `#[serde(default)]`
   — enforced by a frozen fixture (`controller/tests/fixtures/shadow-v0.2.json`), not by convention.
   The reverse direction cannot be defaulted: an older build has no variant for an enum value a

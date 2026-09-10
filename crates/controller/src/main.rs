@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use sozu_gw_agent::SozuAgentHandle;
+use sozu_gw_agent::{SozuAgentHandle, SozuGeneration};
 use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
@@ -496,7 +496,7 @@ fn gateway_crds_absent(err: &kube::Error) -> bool {
 async fn probe_sozu_generation(
     agent: &SozuAgentHandle,
     acked_reconnects: &mut u64,
-    baseline: &mut Option<BTreeSet<i32>>,
+    baseline: &mut Option<SozuGeneration>,
     shadow: &mut Ir,
     self_metrics: &metrics::SelfMetrics,
 ) -> shadow::GenerationCheck {
@@ -953,29 +953,38 @@ async fn main() -> Result<()> {
         .context("informer cache writer dropped before becoming ready")?;
     info!("caches synced");
 
-    // Shadow of the last successfully-applied IR. Resumed from the shared volume
-    // when Sōzu still holds its state (a controller-only restart), so the first
-    // reconcile prunes orphans instead of re-adding everything; otherwise empty,
-    // so a fresh/just-restarted Sōzu gets the full state.
-    let probe_file = format!("{}.probe", args.shadow_file);
-    let mut shadow = shadow::load_initial(&agent, &args.shadow_file, &probe_file).await;
-
-    // Baseline for Sōzu restart detection: its current *worker generation*
-    // (live worker-PID set). Any later change — the main process restarting
-    // and forking fresh workers, or a single worker bounce — resets the shadow
-    // so the full state is re-applied. A failed capture leaves it unset; the
-    // first successful check then resets a non-empty shadow (an unproven
-    // generation is not trusted) and establishes the baseline.
-    let mut worker_baseline = match agent.worker_pids().await {
-        Ok(pids) => Some(pids),
+    // Capture the socket/worker generation BEFORE loading the persisted shadow.
+    // Otherwise a restart between the state probe and this capture could attach
+    // the old shadow to a fresh Sōzu generation and hide its lost state.
+    let mut generation_baseline = match agent.generation().await {
+        Ok(generation) => Some(generation),
         Err(e) => {
-            warn!(error = %e, "could not capture Sōzu's worker-PID baseline; will capture it on the first successful probe");
+            warn!(error = %e, "could not capture Sōzu's generation baseline; will capture it on the first successful probe");
             None
         }
     };
     // The reconnect epoch acknowledged by a successful restart probe; anything
     // newer is a pending reconnect to investigate before trusting the shadow.
     let mut acked_reconnects = agent.reconnect_epoch();
+
+    // Resume only while Sōzu retains its state and generation. A failed startup
+    // proof discards the persisted baseline, as load_initial already does for
+    // an unreadable state probe. Mid-life failures retain the in-memory shadow.
+    let probe_file = format!("{}.probe", args.shadow_file);
+    let mut shadow = shadow::load_initial(&agent, &args.shadow_file, &probe_file).await;
+    if probe_sozu_generation(
+        &agent,
+        &mut acked_reconnects,
+        &mut generation_baseline,
+        &mut shadow,
+        &self_metrics,
+    )
+    .await
+        == shadow::GenerationCheck::ProbeFailed
+    {
+        warn!("could not verify Sōzu's generation after loading the shadow; will re-apply");
+        shadow = Ir::default();
+    }
 
     let debounce = Duration::from_millis(args.debounce_ms);
     let mut resync = resync_period(args.resync_secs).map(resync_interval);
@@ -1022,7 +1031,7 @@ async fn main() -> Result<()> {
         && probe_sozu_generation(
             &agent,
             &mut acked_reconnects,
-            &mut worker_baseline,
+            &mut generation_baseline,
             &mut shadow,
             &self_metrics,
         )
@@ -1088,7 +1097,7 @@ async fn main() -> Result<()> {
 
         // If Sōzu restarted under us, the agent reconnects transparently and
         // the diff against the stale shadow stays empty — every request would
-        // 404 forever. Check Sōzu's restart generation (its worker-PID set) on
+        // 404 forever. Check Sōzu's socket/worker generation on
         // every resync tick and whenever a reconnect is pending, resetting the
         // shadow on a change so the reconcile below re-applies the full state.
         // The reconnect signal is consumed only by a *successful* probe: on a
@@ -1101,7 +1110,7 @@ async fn main() -> Result<()> {
             && probe_sozu_generation(
                 &agent,
                 &mut acked_reconnects,
-                &mut worker_baseline,
+                &mut generation_baseline,
                 &mut shadow,
                 &self_metrics,
             )
@@ -1144,7 +1153,7 @@ async fn main() -> Result<()> {
             && probe_sozu_generation(
                 &agent,
                 &mut acked_reconnects,
-                &mut worker_baseline,
+                &mut generation_baseline,
                 &mut shadow,
                 &self_metrics,
             )

@@ -13,10 +13,8 @@
 //! Sōzu unprogrammed; in that case we start empty and re-apply everything. Any
 //! error falls back to empty too, because re-applying is always correct.
 
-use std::collections::BTreeSet;
-
 use anyhow::Context;
-use sozu_gw_agent::{SozuAgentHandle, SozuError};
+use sozu_gw_agent::{SozuAgentHandle, SozuError, SozuGeneration};
 use sozu_gw_ir::Ir;
 use tracing::{debug, info, warn};
 
@@ -80,7 +78,7 @@ pub enum GenerationCheck {
 }
 
 /// Mid-life counterpart of [`load_initial`]: check Sōzu's *restart generation*
-/// — its live worker-PID set — against the baseline, and reset the shadow to
+/// — its command-socket identity and live workers — against the baseline, and reset the shadow to
 /// empty when it changed.
 ///
 /// If the Sōzu container restarts under a live controller (main-process crash;
@@ -90,62 +88,62 @@ pub enum GenerationCheck {
 /// this reliably: any successful add-bearing apply that lands on the restarted
 /// Sōzu first (e.g. the tail of the very batch whose reconnect signalled the
 /// restart) makes it non-empty again, masking the restart forever. The
-/// worker-PID set is immune to that race — the restarted main process forks
-/// fresh workers no matter what got re-applied. The cost is a false positive
+/// generation is immune to that race: a container restart recreates the command
+/// socket even when its new PID namespace reuses the same worker PIDs. The cost is a false positive
 /// on a single worker bounce (`worker_automatic_restart` changes one PID): an
 /// acceptable, logged, harmless full re-apply.
 ///
-/// On success the baseline advances to the observed set. A missing baseline
+/// On success the baseline advances to the observed generation. A missing baseline
 /// (the startup capture failed) resets too when the shadow is non-empty: with
 /// no established generation there is no proof Sōzu still holds what the
 /// shadow claims, and one extra full re-apply is the safe way out.
 pub async fn check_restart_generation(
     agent: &SozuAgentHandle,
-    baseline: &mut Option<BTreeSet<i32>>,
+    baseline: &mut Option<SozuGeneration>,
     shadow: &mut Ir,
 ) -> GenerationCheck {
-    let probe = agent.worker_pids().await;
+    let probe = agent.generation().await;
     if let Err(e) = &probe {
-        warn!(error = %e, "could not query Sōzu's workers; keeping the shadow and retrying");
+        warn!(error = %e, "could not query Sōzu's generation; keeping the shadow and retrying");
         return GenerationCheck::ProbeFailed;
     }
     let outcome = if should_reset(&probe, baseline.as_ref(), shadow) {
         warn!(
             baseline = ?baseline,
             current = ?probe.as_ref().ok(),
-            "Sōzu's worker generation changed (restarted?); resetting the shadow to re-apply the full state"
+            "Sōzu's generation changed (restarted?); resetting the shadow to re-apply the full state"
         );
         *shadow = Ir::default();
         GenerationCheck::Reset
     } else {
         GenerationCheck::Unchanged
     };
-    if let Ok(pids) = probe {
-        *baseline = Some(pids);
+    if let Ok(generation) = probe {
+        *baseline = Some(generation);
     }
     outcome
 }
 
-/// Pure reset decision, keyed on (probe result, PID-set change, shadow
+/// Pure reset decision, keyed on (probe result, generation change, shadow
 /// emptiness). A probe *error* never resets (a transient failure must not
 /// trigger a full blind re-apply — the caller retries), and an empty shadow
 /// never resets (nothing applied, nothing to lose). On a successful probe the
-/// shadow is reset when the PID set differs from the baseline — including a
+/// shadow is reset when the generation differs from the baseline — including a
 /// single worker bounce — or when no baseline was ever established (an
 /// unproven generation under a claimed-applied shadow is not trustworthy).
 fn should_reset(
-    probe: &Result<BTreeSet<i32>, SozuError>,
-    baseline: Option<&BTreeSet<i32>>,
+    probe: &Result<SozuGeneration, SozuError>,
+    baseline: Option<&SozuGeneration>,
     shadow: &Ir,
 ) -> bool {
-    let Ok(pids) = probe else {
+    let Ok(generation) = probe else {
         return false;
     };
     if *shadow == Ir::default() {
         return false;
     }
     match baseline {
-        Some(known) => known != pids,
+        Some(known) => known != generation,
         None => true,
     }
 }
@@ -259,6 +257,15 @@ mod tests {
 
     #[test]
     fn reset_only_on_a_successful_probe_showing_a_new_generation() {
+        let generation = |pids| SozuGeneration {
+            socket: sozu_gw_agent::SocketIdentity {
+                device: 1,
+                inode: 10,
+                changed_secs: 1,
+                changed_nanos: 0,
+            },
+            worker_pids: std::collections::BTreeSet::from(pids),
+        };
         let applied = Ir {
             clusters: vec![sozu_gw_ir::Cluster {
                 id: "demo.web.80".into(),
@@ -271,22 +278,34 @@ mod tests {
             ..Default::default()
         };
         let empty = Ir::default();
-        let baseline = BTreeSet::from([101, 102]);
+        let baseline = generation([101, 102]);
 
         // Sōzu's main process restarted: every worker PID is new.
         assert!(should_reset(
-            &Ok(BTreeSet::from([201, 202])),
+            &Ok(generation([201, 202])),
             Some(&baseline),
             &applied
         ));
         // A single worker bounce (worker_automatic_restart) resets too: an
         // acceptable, logged, harmless full re-apply.
         assert!(should_reset(
-            &Ok(BTreeSet::from([101, 103])),
+            &Ok(generation([101, 103])),
             Some(&baseline),
             &applied
         ));
-        // Same set: Sōzu did not restart, the shadow stands.
+        // Container restarts can reuse every PID; a new socket still resets.
+        let mut replaced_socket = baseline.clone();
+        replaced_socket.socket.inode += 1;
+        assert!(should_reset(
+            &Ok(replaced_socket),
+            Some(&baseline),
+            &applied
+        ));
+        // Even if the filesystem reuses the inode, a later ctime distinguishes it.
+        let mut reused_inode = baseline.clone();
+        reused_inode.socket.changed_nanos += 1;
+        assert!(should_reset(&Ok(reused_inode), Some(&baseline), &applied));
+        // Same socket and worker set: a transient reconnect preserves the shadow.
         assert!(!should_reset(
             &Ok(baseline.clone()),
             Some(&baseline),
@@ -294,7 +313,7 @@ mod tests {
         ));
         // Nothing was ever applied: nothing a restarted Sōzu could have lost.
         assert!(!should_reset(
-            &Ok(BTreeSet::from([201, 202])),
+            &Ok(generation([201, 202])),
             Some(&baseline),
             &empty
         ));
@@ -310,6 +329,40 @@ mod tests {
         assert!(should_reset(&Ok(baseline.clone()), None, &applied));
         // ... but an empty shadow with no baseline is just a fresh start.
         assert!(!should_reset(&Ok(baseline), None, &empty));
+    }
+
+    #[tokio::test]
+    async fn failed_generation_probe_keeps_the_baseline_and_shadow() {
+        let agent =
+            SozuAgentHandle::spawn("/nonexistent/sozu-generation.sock").expect("spawn agent");
+        let mut baseline = Some(SozuGeneration {
+            socket: sozu_gw_agent::SocketIdentity {
+                device: 1,
+                inode: 10,
+                changed_secs: 1,
+                changed_nanos: 0,
+            },
+            worker_pids: std::collections::BTreeSet::from([7, 8]),
+        });
+        let mut shadow = Ir {
+            clusters: vec![sozu_gw_ir::Cluster {
+                id: "demo.web.80".into(),
+                load_balancing: sozu_gw_ir::LbAlgorithm::default(),
+                sticky_session: false,
+                https_redirect: false,
+                max_connections_per_ip: None,
+                retry_after: None,
+            }],
+            ..Default::default()
+        };
+        let known = baseline.clone();
+        let applied = shadow.clone();
+        assert_eq!(
+            check_restart_generation(&agent, &mut baseline, &mut shadow).await,
+            GenerationCheck::ProbeFailed
+        );
+        assert_eq!(baseline, known);
+        assert_eq!(shadow, applied);
     }
 
     #[test]

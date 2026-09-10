@@ -411,14 +411,20 @@ Detection of the second case is **polled, not pushed**: the worker-generation
 probe runs on the periodic resync (`SOZU_GW_RESYNC_SECS`, 60 s by default) and
 when the command socket reconnects. A Sōzu main-process crash under a live
 controller therefore leaves the data plane unprogrammed for up to one resync
-period. Gap-free serving across a data-plane restart wants `replicaCount >= 2`
-so another Pod keeps answering — the chart's default of 3 satisfies it — and/or
-a lower `SOZU_GW_RESYNC_SECS`. `SOZU_GW_RESYNC_SECS=0` disables the poll entirely and
+period. Keep `replicaCount >= 2` so another Pod keeps answering — the chart's
+default is 2 — and/or lower `SOZU_GW_RESYNC_SECS`. Multiple replicas do not remove
+the restarted Pod's resync window or by themselves guarantee gap-free requests.
+`SOZU_GW_RESYNC_SECS=0` disables the poll entirely and
 leaves only the reconnect path.
 
-What the probe compares is Sōzu's live worker-PID set, not whether its state
-looks empty; the reasoning is in the doc comment on `check_restart_generation`
+The probe compares the connected command socket's identity and Sōzu's live
+worker-PID set. Worker PIDs can be reused across container restarts, so they are
+insufficient on their own. It does not depend on whether the state looks empty;
+the reasoning is in the doc comment on `check_restart_generation`
 in [crates/controller/src/shadow.rs](../crates/controller/src/shadow.rs).
+
+The [2026-09-10 container-restart checks](probes/restart-generation_2026-09-10.md)
+record the reused-PID failure and recovery with the socket identity check.
 
 Observed on a **single worker bounce** — which the probe deliberately treats as
 a restart, and which is the cheap way to exercise the path (a worker bounce
