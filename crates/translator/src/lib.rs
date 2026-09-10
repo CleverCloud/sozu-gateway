@@ -27,7 +27,7 @@ use sozu_command_lib::proto::command::{
     Header, HeaderPosition, ListenerType, LoadBalancingAlgorithms, LoadBalancingParams, PathRule,
     PathRuleKind, RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
     RequestHttpFrontend, RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig,
-    UdpListenerConfig,
+    UdpAffinityKey, UdpClusterConfig, UdpListenerConfig,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -118,7 +118,7 @@ fn path_rule(path: &ir::PathMatch) -> PathRule {
     }
 }
 
-fn cluster_request(c: &ir::Cluster) -> Request {
+fn cluster_request(c: &ir::Cluster, udp: bool) -> Request {
     RequestType::AddCluster(Cluster {
         cluster_id: c.id.clone(),
         sticky_session: c.sticky_session,
@@ -126,9 +126,29 @@ fn cluster_request(c: &ir::Cluster) -> Request {
         load_balancing: lb_algorithm(c.load_balancing),
         max_connections_per_ip: c.max_connections_per_ip,
         retry_after: c.retry_after,
+        // Distinct sockets behind one source IP are distinct UDP clients.
+        // Sōzu's source-IP-only default otherwise reuses the first socket's
+        // return address for later datagrams from other source ports.
+        udp: udp.then(|| UdpClusterConfig {
+            affinity_key: Some(UdpAffinityKey::SourceIpPort as i32),
+            ..Default::default()
+        }),
         ..Default::default()
     })
     .into()
+}
+
+fn cluster_requests(ir: &ir::Ir) -> Vec<Request> {
+    let udp_clusters: BTreeSet<&str> = ir
+        .l4_frontends
+        .iter()
+        .filter(|frontend| frontend.protocol == ir::L4Protocol::Udp)
+        .map(|frontend| frontend.cluster_id.as_str())
+        .collect();
+    ir.clusters
+        .iter()
+        .map(|cluster| cluster_request(cluster, udp_clusters.contains(cluster.id.as_str())))
+        .collect()
 }
 
 fn backend_request(b: &ir::Backend) -> Request {
@@ -593,7 +613,7 @@ fn drop_superseded_backend_removes(requests: Vec<Request>) -> Vec<Request> {
 /// enter the `ConfigState::diff` path.
 fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
     let mut requests: Vec<Request> = Vec::new();
-    requests.extend(ir.clusters.iter().map(cluster_request));
+    requests.extend(cluster_requests(ir));
     requests.extend(ir.backends.iter().map(backend_request));
     requests.extend(http_frontend_requests(ir));
     // L4: listeners (active=true, so diff derives ActivateListener) + frontends.
@@ -699,7 +719,7 @@ fn certificate_requests(
 /// golden snapshots of the IR → command mapping.
 pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     let mut requests = Vec::new();
-    requests.extend(ir.clusters.iter().map(cluster_request));
+    requests.extend(cluster_requests(ir));
     requests.extend(ir.backends.iter().map(backend_request));
     requests.extend(http_frontend_requests(ir));
     requests.extend(ir.certificates.iter().map(add_certificate_request));
