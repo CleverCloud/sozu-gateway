@@ -683,9 +683,9 @@ fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
 
 #[test]
 fn losing_route_parent_is_not_accepted_with_route_collision_reason() {
-    // Two HTTPRoutes claim app.example.com "/": the redirect-only route wins
-    // (a cluster-less frontend orders before any cluster id) and the backend
-    // route loses. The loser's parent must not read fully healthy: its
+    // Two HTTPRoutes claim app.example.com "/": without creation timestamps,
+    // demo/redirect wins before demo/route alphabetically. The backend route
+    // loses. The loser's parent must not read fully healthy: its
     // Accepted condition downgrades with the implementation-specific
     // RouteCollision reason, so kubectl shows the collision, not just a log.
     let redirect: HttpRoute = from_json(json!({
@@ -2533,4 +2533,224 @@ mod header_modifiers {
         assert_eq!(frontend.headers[1].val, "new");
         assert!(reconcile(&desired, &desired).unwrap().is_empty());
     }
+}
+
+fn collision_route(
+    namespace: &str,
+    name: &str,
+    created: Option<&str>,
+    backend: Option<&str>,
+) -> HttpRoute {
+    let rule = match backend {
+        Some(name) => json!({"backendRefs":[{"name":name,"port":80}]}),
+        None => {
+            json!({"filters":[{"type":"RequestRedirect","requestRedirect":{"scheme":"https"}}]})
+        }
+    };
+    from_json(json!({
+        "metadata":{"namespace":namespace,"name":name,"creationTimestamp":created},
+        "spec":{"parentRefs":[{"name":"gw","namespace":"demo"}],"hostnames":["app.example.com"],"rules":[rule]}
+    }))
+}
+
+fn colliding_routes(routes: Vec<HttpRoute>) -> Inputs {
+    let mut inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![from_json(json!({
+            "metadata":{"namespace":"demo","name":"gw"},
+            "spec":{"gatewayClassName":"sozu","listeners":[{"name":"http","protocol":"HTTP","port":80,"allowedRoutes":{"namespaces":{"from":"All"}}}]}
+        }))]),
+        http_routes: arcs(routes),
+        ..Default::default()
+    };
+    for namespace in ["demo", "a", "a-b"] {
+        for name in ["a", "z"] {
+            let mut service = web_service();
+            service.metadata.namespace = Some(namespace.into());
+            service.metadata.name = Some(name.into());
+            inputs.services.push(Arc::new(service));
+            let mut slice = web_slice();
+            slice.metadata.namespace = Some(namespace.into());
+            slice.metadata.name = Some(format!("{name}-pods"));
+            slice
+                .metadata
+                .labels
+                .as_mut()
+                .unwrap()
+                .insert("kubernetes.io/service-name".into(), name.into());
+            inputs.endpointslices.push(Arc::new(slice));
+        }
+    }
+    inputs
+}
+
+#[test]
+fn oldest_http_route_wins_regardless_of_backend_and_cache_order() {
+    for (old_backend, new_backend) in [("z", "a"), ("a", "z")] {
+        for reverse in [false, true] {
+            let mut routes = vec![
+                collision_route(
+                    "demo",
+                    "z-old",
+                    Some("2026-01-01T00:00:00Z"),
+                    Some(old_backend),
+                ),
+                collision_route(
+                    "demo",
+                    "a-new",
+                    Some("2026-01-01T00:00:01Z"),
+                    Some(new_backend),
+                ),
+            ];
+            if reverse {
+                routes.reverse();
+            }
+            let out = build(&BuildConfig::default(), &colliding_routes(routes));
+            let expected = format!("demo.{old_backend}.80");
+            assert_eq!(out.ir.frontends.len(), 1);
+            assert_eq!(
+                out.ir.frontends[0].cluster_id.as_deref(),
+                Some(expected.as_str())
+            );
+            let winner = out.routes.iter().find(|r| r.name == "z-old").unwrap();
+            assert!(winner.parents[0].accepted);
+            assert!(winner.parents[0].problems.is_empty());
+            let loser = out.routes.iter().find(|r| r.name == "a-new").unwrap();
+            assert!(!loser.parents[0].accepted);
+            assert!(loser.parents[0]
+                .problems
+                .contains(&Problem::RouteCollision {
+                    hostname: "app.example.com".into(),
+                    path: "/".into(),
+                    winner: expected,
+                }));
+        }
+    }
+}
+
+#[test]
+fn equal_timestamps_use_the_alphabetical_namespace_slash_name() {
+    let time = Some("2026-01-01T00:00:00Z");
+    for (first, second, expected) in [
+        (
+            collision_route("demo", "a", time, Some("z")),
+            collision_route("demo", "z", time, Some("a")),
+            "demo.z.80",
+        ),
+        // Compare the full namespace/name spelling: '-' sorts before '/',
+        // whereas comparing (namespace, name) tuples would reverse this pair.
+        (
+            collision_route("a-b", "z", time, Some("z")),
+            collision_route("a", "a", time, Some("a")),
+            "a-b.z.80",
+        ),
+        (
+            collision_route("demo", "a", None, Some("z")),
+            collision_route("demo", "z", None, Some("a")),
+            "demo.z.80",
+        ),
+        (
+            collision_route("demo", "z", time, Some("z")),
+            collision_route("demo", "a", None, Some("a")),
+            "demo.z.80",
+        ),
+    ] {
+        for routes in [
+            vec![first.clone(), second.clone()],
+            vec![second.clone(), first.clone()],
+        ] {
+            let out = build(&BuildConfig::default(), &colliding_routes(routes));
+            assert_eq!(out.ir.frontends.len(), 1);
+            assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some(expected));
+        }
+    }
+}
+
+#[test]
+fn equivalent_prefix_spellings_obey_route_precedence() {
+    let mut older = collision_route("demo", "z-old", Some("2026-01-01T00:00:00Z"), Some("z"));
+    let mut newer = collision_route("demo", "a-new", Some("2026-01-01T00:00:01Z"), Some("a"));
+    for (route, path) in [(&mut older, "/api/"), (&mut newer, "/api")] {
+        route.spec.rules.as_mut().unwrap()[0].matches = Some(vec![from_json(json!({
+            "path": {"type": "PathPrefix", "value": path}
+        }))]);
+    }
+    for routes in [
+        vec![newer.clone(), older.clone()],
+        vec![older.clone(), newer.clone()],
+    ] {
+        let out = build(&BuildConfig::default(), &colliding_routes(routes));
+        assert_eq!(out.ir.frontends.len(), 1);
+        assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some("demo.z.80"));
+        assert_eq!(
+            out.ir.frontends[0].path,
+            ir::PathMatch::Prefix("/api".into())
+        );
+        let loser = out.routes.iter().find(|r| r.name == "a-new").unwrap();
+        assert!(loser.parents[0]
+            .problems
+            .contains(&Problem::RouteCollision {
+                hostname: "app.example.com".into(),
+                path: "/api".into(),
+                winner: "demo.z.80".into(),
+            }));
+    }
+    // Exact paths retain their significant trailing slash and do not collide.
+    for route in [&mut older, &mut newer] {
+        route.spec.rules.as_mut().unwrap()[0]
+            .matches
+            .as_mut()
+            .unwrap()[0]
+            .path
+            .as_mut()
+            .unwrap()
+            .r#type = Some(from_json(json!("Exact")));
+    }
+    let out = build(
+        &BuildConfig::default(),
+        &colliding_routes(vec![newer, older]),
+    );
+    assert_eq!(out.ir.frontends.len(), 2);
+    assert!(out.routes.iter().all(|r| r.parents[0].problems.is_empty()));
+}
+
+#[test]
+fn the_first_matching_rule_wins_without_rejecting_its_route() {
+    let mut route = collision_route("demo", "route", None, Some("z"));
+    let second = collision_route("demo", "route", None, Some("a"));
+    route
+        .spec
+        .rules
+        .as_mut()
+        .unwrap()
+        .extend(second.spec.rules.unwrap());
+    for expected in ["demo.z.80", "demo.a.80"] {
+        let out = build(
+            &BuildConfig::default(),
+            &colliding_routes(vec![route.clone()]),
+        );
+        assert_eq!(out.ir.frontends.len(), 1);
+        assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some(expected));
+        assert!(out.routes[0].parents[0].accepted);
+        assert!(out.routes[0].parents[0].problems.is_empty());
+        route.spec.rules.as_mut().unwrap().reverse();
+    }
+}
+
+#[test]
+fn a_redirect_does_not_override_an_older_forwarding_route() {
+    let older = collision_route("demo", "z-old", Some("2026-01-01T00:00:00Z"), Some("z"));
+    let newer = collision_route("demo", "a-redirect", Some("2026-01-01T00:00:01Z"), None);
+    let out = build(
+        &BuildConfig::default(),
+        &colliding_routes(vec![newer.clone(), older]),
+    );
+    assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some("demo.z.80"));
+    let mut youngest = collision_route("demo", "z-young", Some("2026-01-01T00:00:02Z"), Some("z"));
+    youngest.metadata.name = Some("0-first-name".into());
+    let out = build(
+        &BuildConfig::default(),
+        &colliding_routes(vec![youngest, newer]),
+    );
+    assert!(out.ir.frontends[0].cluster_id.is_none());
 }
