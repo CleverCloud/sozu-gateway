@@ -351,18 +351,18 @@ like it implements the feature. `write_gatewayclass` compares the published list
 conditions, because a list changed by a version bump travels with conditions that did not move, and
 a conditions-only guard would compute the new list and never write it.
 
+**Header replacement has a controller fix.** In the recorded runs above, the compiler emitted
+one non-empty Sōzu `Header` for Gateway `set`, so an existing `X-Env: staging` survived alongside
+`X-Env: prod` and the request/response header-modifier tests failed. The current compiler instead
+emits a deletion followed by an append on the same frontend ([PROTOCOL.md §13](../PROTOCOL.md)).
+Empty `set`/`add` values are explicitly refused. The historical reports above remain unchanged.
+
 **Hard ceiling — not fixable with Sōzu / one LoadBalancer** (these stay failed):
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
   `backendRef` yields 503, but the spec/tests want exactly 500 → the `HTTPRouteInvalid*BackendRef` /
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
 - **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
   (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
-- **Header `set` appends instead of replacing.** Gateway `set` must overwrite an existing header,
-  but the deployed `clevercloud/sozu:2.2.0` data plane appends — a client sending `X-Env: staging`
-  into a route that sets `X-Env: prod` reaches the backend with both — so
-  `HTTPRouteRequestHeaderModifier`/`ResponseHeaderModifier` fail. (The *command-lib* documents
-  set/replace; the running binary doesn't honour it, so this is a data-plane gap pending a Sōzu
-  build that replaces. Re-verified unchanged on the 2.1.0 → 2.2.0 bump.)
 - **Catch-all collisions.** Clever Cloud's cluster currently allows **one LoadBalancer**, so all
   Gateways share one Sōzu `:80`/`:443`; two hostname-less routes on the same path collide on key
   `(:8080,*,/path)` (first wins). **`HTTPRouteMultipleGateways` is the purest case**: it puts a

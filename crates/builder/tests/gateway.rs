@@ -371,7 +371,7 @@ fn http_route_filters_map_to_ir() {
 
     assert_eq!(out.ir.frontends.len(), 1);
     let f = &out.ir.frontends[0].filters;
-    assert_eq!(f.header_mods.len(), 3);
+    assert_eq!(f.header_mods.len(), 4);
     assert!(f
         .header_mods
         .iter()
@@ -2322,4 +2322,215 @@ fn a_redirect_combined_with_url_rewrite_is_refused() {
         .iter()
         .any(|p| matches!(p, Problem::FilterUnsupported { kind }
             if kind.contains("combined with RequestRedirect"))));
+}
+
+mod header_modifiers {
+    use super::*;
+    use sozu_command_lib::proto::command::{request::RequestType, HeaderPosition, Request};
+    use sozu_gw_translator::reconcile;
+
+    fn inputs(filters: serde_json::Value) -> Inputs {
+        let route: HttpRoute = from_json(json!({
+            "metadata": { "name": "route", "namespace": "demo" },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": ["app.example.com"],
+                "rules": [
+                    {
+                        "matches": [{ "path": { "type": "PathPrefix", "value": "/filtered" } }],
+                        "filters": filters,
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    },
+                    {
+                        "matches": [{ "path": { "type": "PathPrefix", "value": "/plain" } }],
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    }
+                ]
+            }
+        }));
+        Inputs {
+            gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+            gateways: arcs(vec![http_gateway()]),
+            http_routes: arcs(vec![route]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn set_add_and_remove_keep_distinct_wire_operations_on_both_sides() {
+        // Keep the same mixed-case name on request and response: the two
+        // directions must stay independent. Comma-separated values are one
+        // insertion, not separate edits that could lose their ordering.
+        let out = build(
+            &BuildConfig::default(),
+            &inputs(json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                    "set": [{ "name": "x-Mixed-Case", "value": "request-new" }],
+                    "add": [{ "name": "X-Append", "value": "one,two" }],
+                    "remove": ["X-Remove"]
+                } },
+                { "type": "ResponseHeaderModifier", "responseHeaderModifier": {
+                    "set": [{ "name": "x-Mixed-Case", "value": "response-new" }],
+                    "add": [{ "name": "X-Append", "value": "three,four" }],
+                    "remove": ["X-Remove"]
+                } }
+            ])),
+        );
+        assert!(out.routes[0].parents[0].accepted);
+        assert!(out.routes[0].parents[0].problems.is_empty());
+
+        // The persisted IR must retain both edits with the same name. A map
+        // or name-based deduplication here would turn replacement into append
+        // again. Exercise the command serialization boundary too.
+        let restored: ir::Ir =
+            serde_json::from_str(&serde_json::to_string(&out.ir).unwrap()).unwrap();
+        assert_eq!(restored, out.ir);
+        let requests = reconcile(&ir::Ir::default(), &restored).unwrap();
+        let decoded: Vec<Request> =
+            serde_json::from_str(&serde_json::to_string(&requests).unwrap()).unwrap();
+        let headers = decoded
+            .iter()
+            .find_map(|r| match &r.request_type {
+                Some(RequestType::AddHttpFrontend(f)) if !f.headers.is_empty() => Some(&f.headers),
+                _ => None,
+            })
+            .unwrap();
+        let edits: Vec<_> = headers
+            .iter()
+            .map(|h| (h.position(), h.key.as_str(), h.val.as_str()))
+            .collect();
+        assert_eq!(
+            edits,
+            vec![
+                (HeaderPosition::Request, "x-Mixed-Case", ""),
+                (HeaderPosition::Request, "x-Mixed-Case", "request-new"),
+                (HeaderPosition::Request, "X-Append", "one,two"),
+                (HeaderPosition::Request, "X-Remove", ""),
+                (HeaderPosition::Response, "x-Mixed-Case", ""),
+                (HeaderPosition::Response, "x-Mixed-Case", "response-new"),
+                (HeaderPosition::Response, "X-Append", "three,four"),
+                (HeaderPosition::Response, "X-Remove", ""),
+            ]
+        );
+        assert!(reconcile(&restored, &out.ir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn request_and_response_filter_order_does_not_change_either_edit_list() {
+        let filters = vec![
+            json!({ "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                "set": [{ "name": "X-Same-Name", "value": "request" }]
+            } }),
+            json!({ "type": "ResponseHeaderModifier", "responseHeaderModifier": {
+                "add": [{ "name": "x-same-name", "value": "response" }]
+            } }),
+        ];
+        let mods = |filters: Vec<serde_json::Value>| {
+            let out = build(&BuildConfig::default(), &inputs(json!(filters)));
+            out.ir
+                .frontends
+                .into_iter()
+                .find(|f| !f.filters.header_mods.is_empty())
+                .unwrap()
+                .filters
+                .header_mods
+        };
+        let first = mods(filters.clone());
+        let reversed = mods(filters.into_iter().rev().collect());
+        for target in [ir::HeaderTarget::Request, ir::HeaderTarget::Response] {
+            assert_eq!(
+                first.iter().filter(|m| m.on == target).collect::<Vec<_>>(),
+                reversed
+                    .iter()
+                    .filter(|m| m.on == target)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_set_and_add_values_refuse_only_the_affected_rule() {
+        for (filter, field) in [
+            ("RequestHeaderModifier", "requestHeaderModifier"),
+            ("ResponseHeaderModifier", "responseHeaderModifier"),
+        ] {
+            for operation in ["set", "add"] {
+                let out = build(
+                    &BuildConfig::default(),
+                    &inputs(json!([
+                        { "type": filter, (field): {
+                            (operation): [{ "name": "X-Empty", "value": "" }],
+                            "remove": ["X-Sensitive"]
+                        } }
+                    ])),
+                );
+                let parent = &out.routes[0].parents[0];
+                assert!(
+                    !parent.accepted,
+                    "{filter}.{operation} must not read as healthy"
+                );
+                assert_eq!(parent.accepted_reason, "UnsupportedValue");
+                assert!(parent.problems.iter().any(|p| matches!(p,
+                    Problem::FilterUnsupported { kind }
+                        if kind == &format!("{filter}.{operation} X-Empty with an empty value")
+                )));
+                assert_eq!(
+                    out.ir.frontends.len(),
+                    1,
+                    "only the unfiltered rule remains"
+                );
+                assert_eq!(
+                    out.ir.frontends[0].path,
+                    ir::PathMatch::Prefix("/plain".into())
+                );
+                assert!(out.ir.frontends[0].filters.header_mods.is_empty());
+                assert_eq!(
+                    out.ir.backends.len(),
+                    2,
+                    "the other rule keeps its backends"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_a_legacy_append_filter_updates_the_frontend_once() {
+        let desired = build(
+            &BuildConfig::default(),
+            &inputs(json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                    "set": [{ "name": "X-Replace", "value": "new" }]
+                } }
+            ])),
+        )
+        .ir;
+        let mut previous = desired.clone();
+        let frontend = previous
+            .frontends
+            .iter_mut()
+            .find(|f| !f.filters.header_mods.is_empty())
+            .unwrap();
+        // This is the former shadow representation of Gateway set: an append
+        // without the preceding deletion. No new IR fields are needed to fix it.
+        frontend.filters.header_mods.retain(|m| m.value.is_some());
+        let previous: ir::Ir =
+            serde_json::from_str(&serde_json::to_string(&previous).unwrap()).unwrap();
+        let requests = reconcile(&previous, &desired).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            requests[0].request_type,
+            Some(RequestType::RemoveHttpFrontend(_))
+        ));
+        let Some(RequestType::AddHttpFrontend(frontend)) = &requests[1].request_type else {
+            panic!("the changed frontend must be added after its old route key is removed");
+        };
+        assert_eq!(frontend.headers.len(), 2);
+        assert_eq!(frontend.headers[0].key, "X-Replace");
+        assert!(frontend.headers[0].val.is_empty());
+        assert_eq!(frontend.headers[1].key, "X-Replace");
+        assert_eq!(frontend.headers[1].val, "new");
+        assert!(reconcile(&desired, &desired).unwrap().is_empty());
+    }
 }

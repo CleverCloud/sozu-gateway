@@ -1103,8 +1103,49 @@ struct ParsedFilters {
     unprogrammable: bool,
 }
 
+/// Append a non-empty header value, removing previous occurrences for `set`.
+/// Returns false when the requested edit cannot be represented.
+fn push_header_value(
+    mods: &mut Vec<ir::HeaderMod>,
+    on: ir::HeaderTarget,
+    key: &str,
+    value: &str,
+    replace: bool,
+    problems: &mut Vec<Problem>,
+) -> bool {
+    if value.is_empty() {
+        let filter = match on {
+            ir::HeaderTarget::Request => "RequestHeaderModifier",
+            ir::HeaderTarget::Response => "ResponseHeaderModifier",
+        };
+        let operation = if replace { "set" } else { "add" };
+        problems.push(Problem::FilterUnsupported {
+            kind: format!("{filter}.{operation} {key} with an empty value"),
+        });
+        return false;
+    }
+    // Sōzu's legacy Header encoding appends non-empty values and deletes on
+    // empty values. Both request and response paths delete every existing
+    // occurrence (case-insensitively) before inserting the non-empty values.
+    // Keep both entries on the same frontend: this is one request-time edit,
+    // not two configuration updates with an intermediate missing header.
+    if replace {
+        mods.push(ir::HeaderMod {
+            on,
+            key: key.to_string(),
+            value: None,
+        });
+    }
+    mods.push(ir::HeaderMod {
+        on,
+        key: key.to_string(),
+        value: Some(value.to_string()),
+    });
+    true
+}
+
 /// Parse HTTPRoute filters into neutral IR filters. Supported: header modifiers
-/// (set/add→set, remove→delete) and RequestRedirect (scheme + status).
+/// (set→delete+append, add→append, remove→delete) and RequestRedirect (scheme + status).
 /// Unsupported filters/sub-fields (incl. URLRewrite) are reported.
 fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>) -> ParsedFilters {
     let mut ff = ir::FrontendFilters::default();
@@ -1114,19 +1155,24 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
             HttpRouteRulesFiltersType::RequestHeaderModifier => {
                 if let Some(m) = &filter.request_header_modifier {
                     for s in m.set.iter().flatten() {
-                        ff.header_mods.push(ir::HeaderMod {
-                            on: ir::HeaderTarget::Request,
-                            key: s.name.clone(),
-                            value: Some(s.value.clone()),
-                        });
+                        unprogrammable |= !push_header_value(
+                            &mut ff.header_mods,
+                            ir::HeaderTarget::Request,
+                            &s.name,
+                            &s.value,
+                            true,
+                            problems,
+                        );
                     }
-                    // Sōzu has no header "append" — `add` is applied as set.
                     for a in m.add.iter().flatten() {
-                        ff.header_mods.push(ir::HeaderMod {
-                            on: ir::HeaderTarget::Request,
-                            key: a.name.clone(),
-                            value: Some(a.value.clone()),
-                        });
+                        unprogrammable |= !push_header_value(
+                            &mut ff.header_mods,
+                            ir::HeaderTarget::Request,
+                            &a.name,
+                            &a.value,
+                            false,
+                            problems,
+                        );
                     }
                     for r in m.remove.iter().flatten() {
                         ff.header_mods.push(ir::HeaderMod {
@@ -1140,18 +1186,24 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
             HttpRouteRulesFiltersType::ResponseHeaderModifier => {
                 if let Some(m) = &filter.response_header_modifier {
                     for s in m.set.iter().flatten() {
-                        ff.header_mods.push(ir::HeaderMod {
-                            on: ir::HeaderTarget::Response,
-                            key: s.name.clone(),
-                            value: Some(s.value.clone()),
-                        });
+                        unprogrammable |= !push_header_value(
+                            &mut ff.header_mods,
+                            ir::HeaderTarget::Response,
+                            &s.name,
+                            &s.value,
+                            true,
+                            problems,
+                        );
                     }
                     for a in m.add.iter().flatten() {
-                        ff.header_mods.push(ir::HeaderMod {
-                            on: ir::HeaderTarget::Response,
-                            key: a.name.clone(),
-                            value: Some(a.value.clone()),
-                        });
+                        unprogrammable |= !push_header_value(
+                            &mut ff.header_mods,
+                            ir::HeaderTarget::Response,
+                            &a.name,
+                            &a.value,
+                            false,
+                            problems,
+                        );
                     }
                     for r in m.remove.iter().flatten() {
                         ff.header_mods.push(ir::HeaderMod {

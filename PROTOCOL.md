@@ -380,13 +380,21 @@ What that settles:
 | `Request X-Env=` (empty val) | `X-Env: staging` | *(absent)* — delete works as documented |
 | `Response X-Served-By=sozu` | backend answers `X-Served-By: backend` | `X-Served-By: backend`, `X-Served-By: sozu` |
 
-Two separate consequences, and they belong to two separate upstream reports:
+These observations describe a **single protobuf Header entry**. They do not prevent composing
+Gateway `set` from two entries: an empty value deletes existing occurrences, then a non-empty
+value appends the replacement. Gateway `add` uses only the append entry; `remove` uses only the
+delete entry. The controller now preserves this distinction without a protocol extension.
 
-1. **A bug.** Set is documented as replace and does not replace, on both the request and the
-   response side. Delete is unaffected, which narrows it usefully.
-2. **A gap.** There is no APPEND mode anywhere in the proto — `Header` carries only
-   `position`, `key`, `val`, whose only documented behaviours are set and (empty `val`) delete. So
-   Gateway API's `add`, which *must* append, has no field to map onto even once the bug is fixed.
-   This controller applies `add` as a set and says so.
+Sōzu 2.2.1's request path (`lib/src/protocol/mux/router.rs`, `apply_request_rewrites_and_headers`)
+separates deletions from insertions, and its response path (`lib/src/protocol/mux/shared.rs`,
+`apply_response_header_edits`) does the same for both HTTP/1 and HTTP/2. Each removes all existing
+occurrences with a case-insensitive name comparison before appending the non-empty values.
+The two entries belong to one frontend configuration, not separate control-plane updates.
+
+A literal empty Gateway `set` or `add` value remains unrepresentable: the legacy wire encoding
+would delete it. The builder rejects the affected rule with `FilterUnsupported` and
+`Accepted=False` / `UnsupportedValue` instead of silently changing its meaning. The IR schema
+is unchanged; an older shadow containing the former append-only `set` is updated by replacing
+the frontend on the next reconcile.
 
 Raw run: [docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt](docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt).

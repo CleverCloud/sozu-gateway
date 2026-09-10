@@ -95,8 +95,10 @@ pub struct FrontendFilters {
     pub rewrite: Option<Rewrite>,
 }
 
-/// Set/overwrite (`value: Some`) or delete (`value: None`) a header on the
-/// request or the response.
+/// Append (`value: Some(non_empty)`) or delete (`value: None`) a header on the
+/// request or the response. Replacement is a delete followed by an append on
+/// the same frontend. An empty value also means delete in Sōzu's legacy wire
+/// encoding, so the builder rejects empty Gateway `set` and `add` values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderMod {
     pub on: HeaderTarget,
