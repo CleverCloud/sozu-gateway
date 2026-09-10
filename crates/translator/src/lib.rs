@@ -360,7 +360,7 @@ fn http_frontend_requests(ir: &ir::Ir) -> Vec<Request> {
         }
     }
     requests.extend(variants);
-    canonicalize(requests)
+    canonicalize(requests, &BTreeSet::new())
 }
 
 fn certificate_and_key(c: &ir::Certificate) -> CertificateAndKey {
