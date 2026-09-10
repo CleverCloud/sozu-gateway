@@ -29,3 +29,4 @@ serde_json = { workspace = true }
 k8s-openapi = { version = "0.28", features = ["v1_36"] }
 sozu-gw-gateway-api = { workspace = true }
 sozu-gw-ir = { workspace = true }
+sozu-gw-translator = { workspace = true }

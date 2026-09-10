@@ -34,7 +34,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Routing | Load-balancing algorithm selection | ✅ | Service annotation `sozu.io/load-balancing` (round-robin/random/least-loaded/power-of-two) |
 | Routing | Sticky sessions | ✅ | Service annotation `sozu.io/sticky-sessions: "true"` |
 | Routing | Per-endpoint weights | 🟡 | IR + translator support it; no standard K8s per-endpoint weight to map from |
-| API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier` (Sōzu has no append → `add` applied as set) |
+| API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier`: `set` replaces, `add` appends, `remove` deletes; empty `set`/`add` values are rejected |
 | API gateway | URL rewrite — `ReplaceFullPath` / `hostname` | 🟡 | **measured expressible** on Sōzu 2.2.0 ([E2E-RESULTS §5c](E2E-RESULTS.md)), not wired: reported as `FilterUnsupported`. Wiring it must first refuse a literal `$` (Sōzu rejects the frontend outright) and answer for the query string, which a path rewrite drops |
 | API gateway | URL rewrite — `ReplacePrefixMatch` | ❌ | the compiled prefix regex's only capture group is the element boundary, so `$PATH[1]` yields `/`, not the remainder — measured |
 | API gateway | Redirects — scheme + status | ✅ | `RequestRedirect`, 301/302/308 (303 and 307 have no Sōzu policy and are refused) |
@@ -73,9 +73,12 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
-  and Gateway API HTTPRoute filters (Phase 3). Sōzu has no header *append*, so a Gateway `add` is
-  applied as a set. Redirect host/path/port targets are **wired** — measured working on Sōzu 2.2.0 under
-  every policy (see [E2E-RESULTS §5c](E2E-RESULTS.md) and [PROTOCOL.md §13](../PROTOCOL.md)),
+  and Gateway API HTTPRoute filters (Phase 3). A Gateway `set` deletes existing occurrences before
+  appending its value; `add` appends and `remove` deletes, on requests and responses. Empty `set`
+  or `add` values cannot be distinguished from deletion in Sōzu's protocol: the affected rule is
+  skipped with `Accepted=False`, reason `UnsupportedValue`, and a `FilterUnsupported` problem.
+  Other rules keep routing. Redirect host/path/port targets are **wired** — measured working on
+  Sōzu 2.2.0 under every policy (see [E2E-RESULTS §5c](E2E-RESULTS.md) and [PROTOCOL.md §13](../PROTOCOL.md)),
   with a literal `$` refused in the builder because Sōzu reads it as a rewrite template and
   rejects the frontend outright, which an all-or-nothing translation turns into a failed
   reconcile for everyone. `URLRewrite` stays unwired for one measured reason: on the *forwarding*
