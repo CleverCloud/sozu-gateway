@@ -160,6 +160,53 @@ Ingress result. The IR and persisted shadow format are unchanged.
 
 ---
 
+## Separate Gateway instances
+
+`gatewayInstances` can assign a Gateway to its own controller, Sōzu Pods and
+Service. The default instance excludes those Gateways automatically and remains
+the only instance that handles Ingress and GatewayClass status. The empty list
+preserves the existing Deployment identity and selectors.
+
+```yaml
+gatewayInstances:
+  - name: public
+    gateway:
+      namespace: apps
+      name: public
+    replicaCount: 2
+    service:
+      type: LoadBalancer
+```
+
+Each entry provisions a separate Deployment, Service, ConfigMap, disruption
+budget and enabled metrics resources. Images, exposure, resource settings and
+the ServiceAccount are shared settings; each Pod has its own command socket
+and persisted shadow. `service` overrides and `replicaCount` are optional.
+Use a LoadBalancer Service for a public Gateway address. ClusterIP Services can
+publish their internal addresses for in-cluster clients; a pending LoadBalancer
+never publishes its ClusterIP as an external address.
+
+Creating, removing or retargeting an entry moves the Gateway to a different
+address. Allow for LoadBalancer provisioning and update DNS or clients; this
+handoff is not atomic. Gateway and instance names must be unique within the
+release. Overlong names fail rendering instead of being truncated into another
+instance's resource or selector. Service names also reserve the `-metrics`
+suffix, so an instance cannot claim another instance's metrics Service.
+
+Outside Helm, `--gateway-scope namespace/name` owns one Gateway and ignores
+Ingress; the default controller must receive matching `--exclude-gateway`
+arguments. Keep that ownership partition disjoint. All instances may use the
+same `controllerName`: route status retains other instances' parent entries,
+including their complete references, and retries conflicting updates against
+the latest resourceVersion. A route losing its last local parent also has its
+stale status removed. The shadow format is unchanged.
+
+When using the Helm topology with Ingress status RBAC disabled, the controller
+still publishes its Service for Gateway addresses and disables Ingress status
+writes explicitly. The standalone equivalent is `--ingress-status-writes=false`.
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's

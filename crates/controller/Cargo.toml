@@ -31,6 +31,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
+http = "1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 # `start_paused` tests for the resync interval (virtual time, instant runs).
 tokio = { workspace = true, features = ["test-util"] }
 

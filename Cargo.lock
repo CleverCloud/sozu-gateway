@@ -2432,6 +2432,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2447,6 +2448,7 @@ dependencies = [
  "sozu-gw-translator",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
