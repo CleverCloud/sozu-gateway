@@ -1,0 +1,138 @@
+# JSON is valid YAML; these are the published ports used by the unmodified suite.
+{
+  "replicaCount": 1,
+  "rbac": {
+    "allowStatusWrites": true
+  },
+  "image": {
+    "controller": {
+      "repository": "sozu-gateway-controller",
+      "tag": "conformance"
+    }
+  },
+  "service": {
+    "type": "LoadBalancer",
+    "externalTrafficPolicy": "Cluster"
+  },
+  "exposure": [
+    {
+      "name": "http",
+      "port": 80,
+      "bind": 8080,
+      "protocol": "HTTP",
+      "transport": "TCP"
+    },
+    {
+      "name": "https",
+      "port": 443,
+      "bind": 8443,
+      "protocol": "HTTPS",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9300",
+      "port": 9300,
+      "bind": 9300,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9301",
+      "port": 9301,
+      "bind": 9301,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9302",
+      "port": 9302,
+      "bind": 9302,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9310",
+      "port": 9310,
+      "bind": 9310,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9311",
+      "port": 9311,
+      "bind": 9311,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9312",
+      "port": 9312,
+      "bind": 9312,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9313",
+      "port": 9313,
+      "bind": 9313,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9320",
+      "port": 9320,
+      "bind": 9320,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "tcp-9321",
+      "port": 9321,
+      "bind": 9321,
+      "protocol": "TCP",
+      "transport": "TCP"
+    },
+    {
+      "name": "udp-5300",
+      "port": 5300,
+      "bind": 5300,
+      "protocol": "UDP",
+      "transport": "UDP"
+    },
+    {
+      "name": "udp-5301",
+      "port": 5301,
+      "bind": 5301,
+      "protocol": "UDP",
+      "transport": "UDP"
+    },
+    {
+      "name": "udp-5302",
+      "port": 5302,
+      "bind": 5302,
+      "protocol": "UDP",
+      "transport": "UDP"
+    },
+    {
+      "name": "udp-5310",
+      "port": 5310,
+      "bind": 5310,
+      "protocol": "UDP",
+      "transport": "UDP"
+    },
+    {
+      "name": "udp-5311",
+      "port": 5311,
+      "bind": 5311,
+      "protocol": "UDP",
+      "transport": "UDP"
+    },
+    {
+      "name": "udp-5312",
+      "port": 5312,
+      "bind": 5312,
+      "protocol": "UDP",
+      "transport": "UDP"
+    }
+  ]
+}
