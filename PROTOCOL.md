@@ -5,11 +5,14 @@ verbatim from the real crate source and **confirmed against a live Sōzu 2.1.0**
 with the probe in [`crates/sozu-agent/examples/probe.rs`](crates/sozu-agent/examples/probe.rs).
 If this document and the scoping prompt disagree, this document wins.
 
-- **Crate**: `sozu-command-lib` **2.2.1** (latest on crates.io). License **LGPL-3.0**.
+- **Crate**: `sozu-command-lib` **2.2.1** (pinned). License **LGPL-3.0**.
   Edition 2024, `rust-version = 1.93.1`. protobuf via **prost 0.14**. Its `command.proto`
-  is byte-identical to 2.2.0's, so everything recorded here against a 2.2.0 proxy still
-  holds; what 2.2.1 changed is `Debug` output, not the wire.
-- **Data plane**: Sōzu **2.2.0** (`clevercloud/sozu:2.2.0`; binary is **musl** → run via Docker).
+  and channel framing are byte-identical to 2.2.0's. Version 2.2.1 redacts sensitive
+  `Debug` and error output without changing the wire format.
+- **Data plane**: Sōzu **2.2.1** (`clevercloud/sozu:2.2.1`; binary is **musl** → run via Docker).
+  The dated 2.1.0/2.2.0 observations below retain their original versions; see
+  [the 2.2.1 validation](docs/E2E-RESULTS.md#sozu-221-upgrade-validation-2026-09-10)
+  for checks against the current image.
 - **Generated proto**: `src/proto/command.rs` (prost-generated; `package command;`, **`syntax = "proto2"`**).
 - **Type paths**: there are *no* root re-exports. Use the literal paths:
   - `sozu_command_lib::proto::command::{Request, Response, Cluster, AddBackend, RemoveBackend, RequestHttpFrontend, AddCertificate, ReplaceCertificate, RemoveCertificate, CertificateAndKey, PathRule, SocketAddress, IpAddress, Status, ...}`

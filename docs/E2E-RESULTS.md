@@ -4,7 +4,11 @@ This document records the behaviour of the Sōzu gateway as validated end-to-end
 Kubernetes cluster, not just in unit tests. The pure logic (builder, translator) is covered by
 golden tests in `crates/*/tests/`; this page is about the assembled system serving real traffic.
 
-## Environment
+The latest data-plane upgrade check is
+[Sōzu 2.2.1 on 2026-09-10](#sozu-221-upgrade-validation-2026-09-10).
+Earlier measurements keep their original versions and environments.
+
+## Environment of the original runs
 
 - Managed Kubernetes cluster, **Cilium** CNI (LoadBalancer via Cilium LB-IPAM), single node,
   Kubernetes v1.36.
@@ -67,8 +71,9 @@ the time the LoadBalancer routes to it, the routes exist.
 > after its first successful reconcile (Sōzu programmed). A fresh Pod is therefore `Ready` — and
 > joins the Service — only once its routes exist, closing the cold-start "program gap" the plain
 > Sōzu TCP probe left open. A robust data-plane upgrade wants `replicaCount >= 2` and
-> `maxUnavailable=0`, both of which the chart now defaults to. A real version bump must also bump the controller (built against a
-> matching `sozu-command-lib`) and the Sōzu image together.
+> `maxUnavailable=0`, both of which the chart now defaults to. Keep the controller's
+> `sozu-command-lib` compatible with the target Sōzu image; the 2.2.1 patch upgrade
+> already has the matching library and needs no controller dependency change.
 
 ## 4. Gateway API (Phase 2)
 
@@ -441,3 +446,32 @@ Sōzu restart is gap-free — see the resync window above.
   (`SOZU_GW_RESYNC_SECS`, 60 s by default), not immediately: the controller re-probes, then exits so
   the restarted process can wire the watches. With `SOZU_GW_RESYNC_SECS=0` there is no re-probe, and
   the Deployment has to be restarted by hand.
+
+## Sozu 2.2.1 upgrade validation (2026-09-10)
+
+The dedicated `sozu-gateway-upgrade` cluster had three amd64 nodes, Kubernetes
+**v1.36.3**, Cilium and Gateway API **v1.6.1** standard CRDs. Two gateway replicas
+were upgraded from `clevercloud/sozu:2.2.0` to `clevercloud/sozu:2.2.1`, with the
+same controller built from revision `c8c0226` before and after. The running
+binary reported `sozu 2.2.1`; both Pods became `2/2` Ready.
+
+| Check | Result |
+| ----- | ------ |
+| Fresh HTTP connections during the rolling upgrade | **3,133 requests** over **180.02 s**, all **200**, no transport errors |
+| Ingress with TLS | HTTP **301** to HTTPS, HTTPS **200**, certificate CN `app.example.com`, **404** after hot route removal |
+| Gateway API header filters and redirect | Request/response header injection passed; backend-less HTTPS redirect returned **301** with the expected Location |
+| TCP and UDP echo | Passed with independent in-cluster probes; the original L4 suite's TCP probe half-closed before receiving its reply, also reproduced on 2.2.0 |
+| Existing header plus Gateway `set` | Still appends: the backend received both `X-Env: staging` and `X-Env: prod` |
+
+The continuous HTTP probe targeted the gateway Service from inside the cluster,
+using a separate Ingress, a new connection per request, a 50 ms pause and a 5 s
+timeout. It covered the image upgrade and the later L4 exposure rollout. This
+is one measured upgrade window, not a throughput benchmark.
+
+Docker was unavailable. The release controller binary was packaged with `crane`
+on Ubuntu 24.04 (it requires GLIBC 2.39), with public CA certificates and uid/gid
+1000, then distributed by digest through `ttl.sh` with a 24-hour tag. The Sōzu
+image was unmodified. This run does **not** validate the shipped Debian bookworm
+Dockerfile. HTTP/TLS suite probes used pod port-forwarding; the external
+LoadBalancer addresses were unreachable from the workspace. Full Gateway API
+conformance was not rerun, so the historical scores above remain unchanged.

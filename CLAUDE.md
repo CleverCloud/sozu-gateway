@@ -252,17 +252,16 @@ changes.
 
 ### Version pins (verified, do not bump casually)
 
-`sozu-command-lib` **2.2.1** (LGPL-3.0, pinned exactly) against Sōzu **2.2.0**, `kube` **4**, `k8s-openapi`
+`sozu-command-lib` **2.2.1** (LGPL-3.0, pinned exactly) against Sōzu **2.2.1**, `kube` **4**, `k8s-openapi`
 **0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
 **v1.6.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
 `kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
 rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
 
-The library is deliberately one patch ahead of the data-plane image: 2.2.1 redacts
+The library and data-plane image are aligned at 2.2.1. The library redacts
 certificate and key material from `Debug`, and its `command.proto`, `ConfigState::diff`
-and channel framing are byte-identical to 2.2.0, so the two interoperate exactly. Keep
-checking that before widening the gap — a library newer than the proxy is only safe
-while the wire format agrees.
+and channel framing are byte-identical to 2.2.0. If the versions diverge again,
+verify that the wire format still agrees before upgrading either side.
 
 ## Deployment model
 
@@ -270,7 +269,7 @@ Control plane (this repo) and data plane (Sōzu) are **separate processes/contai
 sharing the command socket via an `emptyDir` volume. Both run as the **same unprivileged uid
 (1000)** so they can share that socket. The Helm chart ([charts/sozu-gateway](charts/sozu-gateway))
 ships both containers, an `IngressClass`, RBAC, and Sōzu's `ConfigMap`. The Sōzu image is used
-as-is (`clevercloud/sozu:2.2.0`) because the release binary is musl-linked.
+as-is (`clevercloud/sozu:2.2.1`) because the release binary is musl-linked.
 
 Releases (`v*` tags) publish the controller image (`ghcr.io/clevercloud/sozu-gateway-controller`)
 and the Helm chart (`oci://ghcr.io/clevercloud/sozu-gateway`) via

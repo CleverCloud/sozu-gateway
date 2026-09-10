@@ -4,6 +4,26 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu 2.2.1
+
+The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's
+`sozu-command-lib` was already pinned to `2.2.1` and stays there. The protobuf
+schema, channel framing and routing diff are unchanged between these versions;
+no controller configuration or persisted-shadow migration is needed.
+
+[Upstream 2.2.1](https://github.com/sozu-proxy/sozu/releases/tag/2.2.1) fixes
+frontend validation and command failure handling, and redacts sensitive debug
+and error output. Existing header and rewrite limitations are unchanged.
+
+Changing the image rolls the gateway Pods. Keep at least two replicas during
+the rollout. If your values pin `image.sozu.tag`, or you use `--reuse-values`,
+set `--set image.sozu.tag=2.2.1` to adopt the new image.
+
+See the [upgrade validation](E2E-RESULTS.md#sozu-221-upgrade-validation-2026-09-10)
+for the measured results and coverage limits.
+
+---
+
 ## The data plane defaults to two replicas
 
 `replicaCount` was `3`. It is now `2`. Nothing else changes: the same hard
