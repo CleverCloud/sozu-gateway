@@ -131,6 +131,8 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} -f {{CHART}}/ci/multiple-listeners.yaml --show-only templates/configmap.yaml | python3 scripts/check-listener-config.py
     helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
 
+    python3 scripts/test_gateway_instances.py
+
 # Package the Helm chart into dist/ (use TAG=v<semver>).
 chart-package:
     mkdir -p dist

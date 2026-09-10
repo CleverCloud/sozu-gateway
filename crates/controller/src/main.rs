@@ -664,7 +664,9 @@ async fn reconcile(
             &out.gateway_classes,
             &out.gateways,
             &route_updates,
-            &gw_addresses,
+            args.publish_service
+                .as_ref()
+                .map(|_| gw_addresses.as_slice()),
             &args.gateway_scope,
         )
         .await;
