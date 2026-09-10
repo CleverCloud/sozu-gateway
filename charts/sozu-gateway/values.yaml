@@ -58,6 +58,7 @@ controller:
                           # detection then only runs on a command-socket reconnect)
   healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
   httpErrorPort: 8082     # loopback-only HTTP 500 backend; never exposed by a Service
+  httpUnavailablePort: 8083 # loopback-only HTTP 503 backend for unavailable weighted shares
 
   # How long a watch may be silently dead before the client gives up and
   # re-lists. A replaced control plane leaves the connection open and silent

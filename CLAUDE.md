@@ -155,11 +155,12 @@ declare the **advertised** ports (default `80`/`443`, `--gateway-http(s)-port` �
 client-facing ports, wired by the chart; a mismatch is rejected with `PortUnavailable`); cross-ns
 refs are gated on ReferenceGrant. Weighted backendRefs use a content-identified Random cluster,
 normalizing Service shares across ready endpoints and merging identical addresses. Zero-weight
-references are validated but never programmed. Invalid or unavailable targets redistribute their
-share to valid ready endpoints; exact proportional HTTP 500 responses remain unsupported.
-An all-zero rule retains an isolated empty cluster so it never forwards to a drained backend
-(HTTP 503 for now). A rule with one backendRef of positive weight retains its Service cluster
-and annotations.
+references are validated but never programmed. HTTP invalid references retain their shares as
+500 responses; resolved Services without endpoints retain their shares as 503 responses. The
+controller owns both fixed loopback responders (ports 8082/8083 by default); the builder records
+ordinary backend addresses without I/O. An all-zero HTTP rule returns 500 without forwarding to
+any reference. TCP/UDP retain redistribution of unavailable shares and an empty cluster if none
+remain. A rule with one backendRef of positive weight retains its Service cluster and annotations.
 Anything Sōzu cannot represent (header/query matches, TLS passthrough) is reported as a `Problem`.
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and

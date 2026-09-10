@@ -1,4 +1,4 @@
-//! A loopback backend for HTTPRoute rules that must return HTTP 500.
+//! Fixed loopback responses for HTTPRoute backend errors.
 //!
 //! Sōzu forwards the response normally, including conversion for HTTP/2 clients.
 //! A dedicated runtime keeps this backend responsive during CPU-bound builds.
@@ -23,9 +23,33 @@ use tracing::{debug, warn};
 use crate::health::READ_TIMEOUT;
 
 const BODY: &[u8] = b"Internal Server Error\n";
+const UNAVAILABLE_BODY: &[u8] = b"Service Unavailable\n";
+// Limits apply separately to the 500 and 503 listeners.
 const MAX_CONNECTIONS: usize = 256;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(25);
+
+#[derive(Clone, Copy)]
+pub enum ResponseCode {
+    InternalServerError,
+    ServiceUnavailable,
+}
+
+impl ResponseCode {
+    fn status(self) -> StatusCode {
+        match self {
+            Self::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    fn body(self) -> &'static [u8] {
+        match self {
+            Self::InternalServerError => BODY,
+            Self::ServiceUnavailable => UNAVAILABLE_BODY,
+        }
+    }
+}
 
 pub struct ErrorResponder {
     address: SocketAddr,
@@ -36,7 +60,7 @@ pub struct ErrorResponder {
 
 impl ErrorResponder {
     /// Bind synchronously before the controller starts caches or readiness.
-    pub fn start(address: SocketAddr) -> Result<Self> {
+    pub fn start(address: SocketAddr, response: ResponseCode) -> Result<Self> {
         let listener = StdTcpListener::bind(address)
             .with_context(|| format!("binding HTTP error backend at {address}"))?;
         let address = listener.local_addr()?;
@@ -53,7 +77,7 @@ impl ErrorResponder {
                 let result = runtime.block_on(async {
                     let listener = TcpListener::from_std(listener)?;
                     tokio::select! {
-                        result = serve(listener) => result,
+                        result = serve(listener, response) => result,
                         _ = shutdown_rx => Ok(()),
                     }
                 });
@@ -94,13 +118,13 @@ impl Drop for ErrorResponder {
     }
 }
 
-async fn serve(listener: TcpListener) -> Result<()> {
+async fn serve(listener: TcpListener, response: ResponseCode) -> Result<()> {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
                 match accepted {
-                    Ok((stream, _)) => { connections.spawn(serve_one(stream)); }
+                    Ok((stream, _)) => { connections.spawn(serve_one(stream, response)); }
                     Err(error) => {
                         // Resource exhaustion can be temporary and affects the
                         // entire process. Avoid turning a failed accept into a
@@ -119,7 +143,7 @@ async fn serve(listener: TcpListener) -> Result<()> {
     }
 }
 
-async fn serve_one(stream: TcpStream) {
+async fn serve_one(stream: TcpStream, response: ResponseCode) {
     let mut builder = http1::Builder::new();
     builder
         .keep_alive(false)
@@ -130,7 +154,10 @@ async fn serve_one(stream: TcpStream) {
     // bodies and a client that stops reading the response. The body budget is
     // separate from the short header timeout and remains below Sōzu's default
     // 30-second backend timeout.
-    let connection = builder.serve_connection(TokioIo::new(stream), service_fn(respond));
+    let connection = builder.serve_connection(
+        TokioIo::new(stream),
+        service_fn(move |request| respond(request, response)),
+    );
     match tokio::time::timeout(CONNECTION_TIMEOUT, connection).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => debug!(%error, "HTTP error backend connection rejected"),
@@ -138,21 +165,24 @@ async fn serve_one(stream: TcpStream) {
     }
 }
 
-async fn respond(mut request: Request<Incoming>) -> Result<Response<Full<Bytes>>, hyper::Error> {
+async fn respond(
+    mut request: Request<Incoming>,
+    code: ResponseCode,
+) -> Result<Response<Full<Bytes>>, hyper::Error> {
     // Sōzu streams request bodies. Closing before consuming them can reset its
     // backend connection before it reads the 500, or leave client bytes unread.
     // Drain frames without accumulating them; serve_one bounds the total time.
     while let Some(frame) = request.body_mut().frame().await {
         frame?;
     }
-    let mut response = Response::new(Full::new(Bytes::from_static(BODY)));
-    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    let mut response = Response::new(Full::new(Bytes::from_static(code.body())));
+    *response.status_mut() = code.status();
     let headers = response.headers_mut();
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    headers.insert(CONTENT_LENGTH, BODY.len().into());
+    headers.insert(CONTENT_LENGTH, code.body().len().into());
     headers.insert(CONNECTION, HeaderValue::from_static("close"));
     Ok(response)
 }
@@ -163,7 +193,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn responder() -> ErrorResponder {
-        ErrorResponder::start("127.0.0.1:0".parse().unwrap()).unwrap()
+        ErrorResponder::start(
+            "127.0.0.1:0".parse().unwrap(),
+            ResponseCode::InternalServerError,
+        )
+        .unwrap()
     }
 
     async fn response(stream: &mut TcpStream) -> String {
@@ -217,6 +251,39 @@ mod tests {
             stream.write_all(request.as_bytes()).await.unwrap();
             assert_500(&response(&mut stream).await, method == "HEAD");
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_backend_keeps_its_503_body_and_does_not_change_500s() {
+        let invalid = responder();
+        let unavailable = ErrorResponder::start(
+            "127.0.0.1:0".parse().unwrap(),
+            ResponseCode::ServiceUnavailable,
+        )
+        .unwrap();
+        for method in ["GET", "HEAD", "POST"] {
+            let mut stream = TcpStream::connect(unavailable.address()).await.unwrap();
+            let request = format!("{method} /any/path HTTP/1.1\r\nHost: example.org\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nbody\r\n0\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let response = response(&mut stream).await;
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 503 "));
+            assert!(headers.to_ascii_lowercase().contains("content-length: 20"));
+            assert_eq!(
+                body.as_bytes(),
+                if method == "HEAD" {
+                    b""
+                } else {
+                    UNAVAILABLE_BODY
+                }
+            );
+        }
+        let mut stream = TcpStream::connect(invalid.address()).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n")
+            .await
+            .unwrap();
+        assert_500(&response(&mut stream).await, false);
     }
 
     #[tokio::test]
@@ -317,7 +384,7 @@ mod tests {
                 .await
                 .unwrap();
             let (stream, _) = listener.accept().await.unwrap();
-            let task = tokio::spawn(serve_one(stream));
+            let task = tokio::spawn(serve_one(stream, ResponseCode::InternalServerError));
             client.write_all(request).await.unwrap();
             tokio::task::yield_now().await;
             tokio::time::advance(CONNECTION_TIMEOUT).await;
@@ -339,7 +406,11 @@ mod tests {
     #[test]
     fn an_occupied_backend_port_is_a_startup_error() {
         let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(ErrorResponder::start(listener.local_addr().unwrap()).is_err());
+        assert!(ErrorResponder::start(
+            listener.local_addr().unwrap(),
+            ResponseCode::InternalServerError
+        )
+        .is_err());
     }
 
     #[tokio::test]

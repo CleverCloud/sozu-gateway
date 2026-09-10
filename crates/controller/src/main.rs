@@ -115,6 +115,13 @@ struct Args {
         default_value = "127.0.0.1:8082"
     )]
     http_error_listen: SocketAddr,
+    /// Loopback HTTP 503 backend for weighted Services without ready endpoints.
+    #[arg(
+        long,
+        env = "SOZU_GW_HTTP_UNAVAILABLE_LISTEN",
+        default_value = "127.0.0.1:8083"
+    )]
+    http_unavailable_listen: SocketAddr,
     /// File on the shared volume where the last-applied state is persisted, so a
     /// controller-only restart resumes from it (and prunes orphaned Sōzu state)
     /// instead of re-applying everything. Empty disables persistence.
@@ -541,6 +548,7 @@ async fn reconcile(
         controller_name: args.controller_name.clone(),
         exposure: exposure.to_vec(),
         http_error_backend: args.http_error_listen,
+        http_unavailable_backend: args.http_unavailable_listen,
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
@@ -706,35 +714,50 @@ async fn main() -> Result<()> {
         }
     }
     validate_http_error_listener(&args, &exposure)?;
-    let mut responder = http_error::ErrorResponder::start(args.http_error_listen)?;
-    info!(address = %responder.address(), "HTTP error backend listening");
+    let mut responder = http_error::ErrorResponder::start(
+        args.http_error_listen,
+        http_error::ResponseCode::InternalServerError,
+    )?;
+    let mut unavailable = http_error::ErrorResponder::start(
+        args.http_unavailable_listen,
+        http_error::ResponseCode::ServiceUnavailable,
+    )?;
+    info!(address = %responder.address(), "HTTP 500 backend listening");
+    info!(address = %unavailable.address(), "HTTP 503 backend listening");
     tokio::select! {
         result = run(args, exposure) => result,
         result = responder.wait() => result,
+        result = unavailable.wait() => result,
     }
 }
 
 fn validate_http_error_listener(args: &Args, exposure: &[ExposedPort]) -> Result<()> {
-    let address = args.http_error_listen;
-    let port = address.port();
-    if !address.ip().is_loopback() || port <= 1024 {
-        anyhow::bail!("--http-error-listen must use a loopback address and a port above 1024");
+    if args.http_error_listen.port() == args.http_unavailable_listen.port() {
+        anyhow::bail!("HTTP 500 and 503 backends must use different ports");
     }
-    if args.health_listen.port() == port
-        || args
-            .metrics_listen
-            .is_some_and(|address| address.port() == port)
-    {
-        anyhow::bail!("--http-error-listen port {port} is reserved by health or metrics");
-    }
-    if let Some(entry) = exposure
-        .iter()
-        .find(|entry| entry.bind == port && entry.protocol != sozu_gw_builder::ExposedProtocol::Udp)
-    {
-        anyhow::bail!(
-            "exposure entry {:?} binds HTTP error backend port {port}/TCP",
-            entry.name
-        );
+    for (flag, address) in [
+        ("--http-error-listen", args.http_error_listen),
+        ("--http-unavailable-listen", args.http_unavailable_listen),
+    ] {
+        let port = address.port();
+        if !address.ip().is_loopback() || port <= 1024 {
+            anyhow::bail!("{flag} must use a loopback address and a port above 1024");
+        }
+        if args.health_listen.port() == port
+            || args
+                .metrics_listen
+                .is_some_and(|address| address.port() == port)
+        {
+            anyhow::bail!("{flag} port {port} is reserved by health or metrics");
+        }
+        if let Some(entry) = exposure.iter().find(|entry| {
+            entry.bind == port && entry.protocol != sozu_gw_builder::ExposedProtocol::Udp
+        }) {
+            anyhow::bail!(
+                "exposure entry {:?} binds {flag} port {port}/TCP",
+                entry.name
+            );
+        }
     }
     Ok(())
 }
@@ -1236,6 +1259,41 @@ mod tests {
 
     fn set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn unavailable_backend_is_loopback_and_has_its_own_reserved_port() {
+        let defaults = Args::try_parse_from(["controller"]).unwrap();
+        let exposure: Vec<ExposedPort> = serde_json::from_str(&defaults.exposure).unwrap();
+        for address in [
+            "0.0.0.0:8083",
+            "127.0.0.1:0",
+            "127.0.0.1:1024",
+            "127.0.0.1:8081",
+            "127.0.0.1:8082",
+            "127.0.0.1:8080",
+            "127.0.0.1:8443",
+        ] {
+            let mut args = defaults.clone();
+            args.http_unavailable_listen = address.parse().unwrap();
+            assert!(
+                validate_http_error_listener(&args, &exposure).is_err(),
+                "{address}"
+            );
+        }
+        let mut args = defaults.clone();
+        args.metrics_listen = Some(args.http_unavailable_listen);
+        assert!(validate_http_error_listener(&args, &exposure).is_err());
+        for protocol in ["TCP", "UDP"] {
+            let entry: ExposedPort = serde_json::from_value(serde_json::json!({
+                "name": "other", "port": 18083, "bind": 8083, "protocol": protocol
+            }))
+            .unwrap();
+            assert_eq!(
+                validate_http_error_listener(&defaults, &[entry]).is_ok(),
+                protocol == "UDP"
+            );
+        }
     }
 
     #[test]

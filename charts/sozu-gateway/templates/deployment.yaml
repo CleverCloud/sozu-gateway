@@ -147,6 +147,8 @@ spec:
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
             - name: SOZU_GW_HTTP_ERROR_LISTEN
               value: "127.0.0.1:{{ include "sozu-gateway.httpErrorPort" . }}"
+            - name: SOZU_GW_HTTP_UNAVAILABLE_LISTEN
+              value: "127.0.0.1:{{ include "sozu-gateway.httpUnavailablePort" . }}"
             {{- if .Values.controller.watchTimeoutSecs }}
             - name: SOZU_GW_WATCH_TIMEOUT_SECS
               value: {{ .Values.controller.watchTimeoutSecs | quote }}

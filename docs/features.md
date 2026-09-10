@@ -51,9 +51,9 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
 | Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
-| Gateway API | One Service `backendRef` per rule | ✅ | positive weights retain the existing Service cluster; weight zero creates a non-forwarding rule (HTTP 503 rather than the required 500) |
+| Gateway API | One Service `backendRef` per rule | ✅ | positive weights retain the existing Service cluster; an all-zero HTTP rule returns 500 without forwarding to its references |
 | Gateway API | Weighted multi-`backendRef` split | ✅ | HTTPRoute, TCPRoute and UDPRoute; zero-weight targets never receive traffic |
-| Gateway API | Invalid or omitted HTTP `backendRefs` | ✅ | a single missing Service/port, disallowed cross-namespace ref or unsupported kind returns HTTP 500 while preserving the match. Invalid refs report `ResolvedRefs: False`; omitted/empty refs report `True`. A resolved Service without ready endpoints retains HTTP 503. Redirects remain independent of backends; see weighted limitations below |
+| Gateway API | Invalid or omitted HTTP `backendRefs` | ✅ | a missing Service/port, disallowed cross-namespace ref or unsupported kind keeps its declared share as HTTP 500 while preserving the match. Invalid refs report `ResolvedRefs: False`; omitted/empty refs report `True`. A resolved Service without ready endpoints retains HTTP 503. Redirects remain independent of backends; see weighted limitations below |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
 | Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
 | Gateway API | Per-`backendRef` filters | ❌ | filters wire onto the frontend, not one backend; reported (`FilterUnsupported`), the rule still routes without them |
@@ -72,15 +72,22 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 
 ## Notes
 
-- **HTTP error responses.** The controller serves a fixed HTTP 500 on loopback,
-  and Sōzu forwards matching rejected rules to it. The port is reserved from TCP
-  exposure (`controller.httpErrorPort`, default `8082`). During a controller
+- **HTTP error responses.** The controller serves fixed HTTP 500 and 503 responses
+  on separate loopback listeners. Their TCP ports are reserved from exposure
+  (`controller.httpErrorPort`, default `8082`, and `controller.httpUnavailablePort`,
+  default `8083`). Each listener permits up to 256 active connections with 64 KiB
+  of header buffering per connection. During a controller
   restart those requests can return 503 until the responder and Sōzu's backend
   retries recover; they retain their match instead of falling through to another
   route. Request headers have a five-second deadline; complete request bodies
   are discarded within a 25-second connection deadline. Slower requests are
   closed and may receive 503 instead of 500. Malformed or oversized headers
   may be closed earlier.
+  Weighted proportions assume both local responders remain available. During a
+  controller restart, listener saturation or backend retry backoff, Sōzu can
+  exclude an error backend and redistribute its share to the other available
+  backends in that cluster. This also applies to ordinary backend connection
+  failures; it does not change the compiled reference weights.
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
@@ -103,13 +110,15 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   annotations for load balancing, connection limits or retry settings. A rule with one backendRef of positive
   weight keeps its existing Service cluster and annotations. UDP chooses a backend for each new flow;
   datagrams of an established flow keep that choice.
-  Invalid references set `ResolvedRefs=False`; Services without ready endpoints report
-  `NoReadyEndpoints`. Their share is redistributed to ready valid references, so proportional
-  HTTP 500 responses for invalid backends are **not implemented**. If no usable positive target
-  remains in a composite or all-zero rule, it still matches an isolated empty cluster: HTTP returns 503 rather than the
-  required 500, and TCP/UDP forward nothing. All-zero references report `NoPositiveBackendWeight`
-  without incorrectly declaring valid references unresolved. Namespace grants are still checked
-  for zero-weight references.
+  For HTTP, invalid references set `ResolvedRefs=False` and retain their share as 500 responses.
+  Resolved Services without ready endpoints report `NoReadyEndpoints` and retain their share as
+  503 responses. The proportions follow the [Gateway API error rules](https://github.com/kubernetes-sigs/gateway-api/blob/v1.6.2/apis/v1/httproute_types.go#L278-L291),
+  including when endpoint membership or ReferenceGrants change. An all-zero HTTP rule returns
+  500 as an implementation choice: zero-weight references receive no traffic, as the API requires.
+  They still report `NoPositiveBackendWeight` without declaring valid references unresolved.
+  Namespace grants, Service existence and ports are checked even for zero-weight references.
+  For TCP/UDP, invalid or unavailable shares retain the previous redistribution to usable targets;
+  an empty or all-zero cluster forwards nothing.
 - **Hard limits.** Matching on header values or query parameters and request mirroring are not
   expressible in Sōzu today, so they are out of scope rather than merely deferred.
 

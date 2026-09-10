@@ -357,8 +357,8 @@ a conditions-only guard would compute the new list and never write it.
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
 - **No header/query-value matching** (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
   The weighted-split failures in the historical runs predate the current compiler's normalized
-  Random clusters. Those reports remain unchanged; exact proportional HTTP 500 responses for
-  invalid weighted references are still unsupported (see [features](features.md)).
+  Random clusters and local HTTP error backends. Those reports remain unchanged; current
+  weighted HTTP error behavior is described in [features](features.md).
 - **Header `set` appends instead of replacing.** Gateway `set` must overwrite an existing header,
   but the deployed `clevercloud/sozu:2.2.0` data plane appends — a client sending `X-Env: staging`
   into a route that sets `X-Env: prod` reaches the backend with both — so

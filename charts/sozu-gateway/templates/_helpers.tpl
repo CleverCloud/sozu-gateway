@@ -34,6 +34,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}8082{{- end -}}
 {{- end -}}
 
+{{- define "sozu-gateway.httpUnavailablePort" -}}
+{{- if hasKey .Values.controller "httpUnavailablePort" -}}
+{{- .Values.controller.httpUnavailablePort -}}
+{{- else -}}8083{{- end -}}
+{{- end -}}
+
 {{/*
 Reject an exposure table that cannot work, with a message that says why.
 
@@ -59,6 +65,14 @@ caught here rather than left to `helm install` to reject obscurely.
   {{- fail "controller.httpErrorPort must differ from the health and metrics ports" -}}
 {{- end -}}
 {{- $_ := set $binds (printf "%s/TCP" (toString $errorPort)) "the HTTP error backend" -}}
+{{- $unavailablePort := include "sozu-gateway.httpUnavailablePort" . -}}
+{{- if or (not (regexMatch "^[0-9]+$" $unavailablePort)) (lt (int $unavailablePort) 1025) (gt (int $unavailablePort) 65535) -}}
+  {{- fail "controller.httpUnavailablePort must be an integer between 1025 and 65535" -}}
+{{- end -}}
+{{- if or (eq (int $unavailablePort) (int $errorPort)) (eq (int $unavailablePort) (int (.Values.controller.healthPort | default 8081))) (and .Values.metrics.enabled (eq (int $unavailablePort) (int .Values.metrics.port))) -}}
+  {{- fail "controller.httpUnavailablePort must differ from the HTTP error, health and metrics ports" -}}
+{{- end -}}
+{{- $_ := set $binds (printf "%s/TCP" $unavailablePort) "the HTTP unavailable backend" -}}
 {{- if .Values.metrics.enabled -}}
   {{- $_ := set $binds (printf "%s/TCP" (toString .Values.metrics.port)) "the metrics endpoint" -}}
 {{- end -}}
