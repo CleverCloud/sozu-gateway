@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.service" -}}
 {{- include "sozu-gateway.validateExposure" . }}
 {{- /* Both chart-wide preconditions are asserted here, and not in the file
      they guard: deployment.yaml re-renders the ConfigMap to checksum it, so a
@@ -32,3 +33,6 @@ spec:
       targetPort: {{ .bind }}
       protocol: {{ .transport | default "TCP" }}
     {{- end }}
+
+{{- end -}}
+{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.service") }}

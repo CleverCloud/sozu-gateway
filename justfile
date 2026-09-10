@@ -74,6 +74,16 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} --set replicaCount=3 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set rbac.allowGatewayStatusWrites=false > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":5432,"bind":5432,"protocol":"TCP","transport":"TCP"},{"name":"dns","port":5353,"bind":5353,"protocol":"UDP","transport":"UDP"}]' > /dev/null
+    # Explicit Gateway instances render their own data plane and reject
+    # ambiguous ownership or names that would collide after truncation.
+    helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"public","gateway":{"namespace":"apps","name":"public"}},{"name":"internal","gateway":{"namespace":"apps","name":"internal"},"replicaCount":1,"service":{"type":"ClusterIP"}}]' --set metrics.serviceMonitor.enabled=true > /dev/null
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"a","gateway":{"namespace":"apps","name":"one"}},{"name":"a","gateway":{"namespace":"apps","name":"two"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"a","gateway":{"namespace":"apps","name":"one"}},{"name":"b","gateway":{"namespace":"apps","name":"one"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"Bad_Name","gateway":{"namespace":"apps","name":"one"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"a","gateway":{"namespace":"bad/ns","name":"one"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"a","gateway":{"namespace":"apps","name":"one"}}]' --set fullnameOverride=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"metrics","gateway":{"namespace":"apps","name":"one"}}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'gatewayInstances=[{"name":"a","gateway":{"namespace":"apps","name":"one"}},{"name":"a-metrics","gateway":{"namespace":"apps","name":"two"}}]' > /dev/null 2>&1
     # A budget with neither bound is accepted by the apiserver and then blocks
     # every drain, so it must fail the render instead.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set pdb.maxUnavailable=null > /dev/null 2>&1

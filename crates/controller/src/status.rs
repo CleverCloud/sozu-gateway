@@ -15,6 +15,9 @@
 //! nothing in common — they are foreign types, so the trait tying them together
 //! ([`RouteParents`]) is declared here and implemented once per kind.
 
+use std::sync::Arc;
+
+use crate::scope::GatewayScope;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::networking::v1::{Ingress, IngressLoadBalancerIngress};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
@@ -27,7 +30,7 @@ use serde_json::json;
 use tracing::{debug, warn};
 
 use sozu_gw_builder::{
-    GatewayClassResult, GatewayResult, IngressResult, Problem, RouteKind, RouteResult,
+    GatewayClassResult, GatewayResult, IngressResult, Inputs, Problem, RouteKind, RouteResult,
 };
 use sozu_gw_gateway_api::gateway::{
     GatewayStatusAddresses, GatewayStatusListeners, GatewayStatusListenersSupportedKinds,
@@ -72,10 +75,14 @@ pub async fn write_status(
     controller_name: &str,
     gateway_classes: &[GatewayClassResult],
     gateways: &[GatewayResult],
-    routes: &[RouteResult],
+    routes: &[RouteStatusUpdate],
     gateway_addresses: &[GatewayStatusAddresses],
+    scope: &GatewayScope,
 ) {
-    for gc in gateway_classes.iter().filter(|gc| gc.accepted) {
+    for gc in gateway_classes
+        .iter()
+        .filter(|gc| gc.accepted && scope.is_default())
+    {
         if let Err(e) = write_gatewayclass(client, gc).await {
             warn!(name = %gc.name, error = %e, "failed to write GatewayClass status");
         }
@@ -85,13 +92,20 @@ pub async fn write_status(
             warn!(namespace = %gw.namespace, name = %gw.name, error = %e, "failed to write Gateway status");
         }
     }
-    for route in routes {
+    for update in routes {
+        let route = &update.route;
         // One arm per route kind: the writer is generic, but `Api<K>` needs a
         // concrete type, so the kind carried by the build result picks it.
         let written = match route.kind {
-            RouteKind::HttpRoute => write_route::<HttpRoute>(client, controller_name, route).await,
-            RouteKind::TcpRoute => write_route::<TcpRoute>(client, controller_name, route).await,
-            RouteKind::UdpRoute => write_route::<UdpRoute>(client, controller_name, route).await,
+            RouteKind::HttpRoute => {
+                write_route::<HttpRoute>(client, controller_name, update, scope).await
+            }
+            RouteKind::TcpRoute => {
+                write_route::<TcpRoute>(client, controller_name, update, scope).await
+            }
+            RouteKind::UdpRoute => {
+                write_route::<UdpRoute>(client, controller_name, update, scope).await
+            }
         };
         if let Err(e) = written {
             warn!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, error = %e, "failed to write route status");
@@ -388,7 +402,29 @@ async fn write_gateway(
 /// Map the publish Service's load-balancer address(es) to Gateway status
 /// addresses (`IPAddress` for an IP, `Hostname` otherwise).
 pub(crate) fn gateway_addresses(svc: &Service) -> Vec<GatewayStatusAddresses> {
-    lb_points(svc)
+    let points = lb_points(svc);
+    if points.is_empty() {
+        if let Some(spec) = svc
+            .spec
+            .as_ref()
+            .filter(|s| s.type_.as_deref() == Some("ClusterIP"))
+        {
+            return spec
+                .cluster_ips
+                .iter()
+                .flatten()
+                .chain(spec.cluster_ip.iter())
+                .filter_map(|ip| ip.parse::<std::net::IpAddr>().ok())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|ip| GatewayStatusAddresses {
+                    r#type: Some("IPAddress".into()),
+                    value: ip.to_string(),
+                })
+                .collect();
+        }
+    }
+    points
         .into_iter()
         .filter_map(|p| {
             if let Some(ip) = p.ip {
@@ -426,7 +462,7 @@ pub struct RouteParentStatus {
 /// reference, `sectionName` and `port` included: a route may legally name the
 /// same Gateway several times, once per listener, and each of those parentRefs
 /// gets its own entry. Matching on `(name, namespace)` alone collapses them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RouteParentRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -489,7 +525,8 @@ impl_route_parents!(TcpRoute);
 impl_route_parents!(UdpRoute);
 
 /// The `status.parents[]` we want on a route: every entry owned by another
-/// controller kept verbatim, followed by one entry per parentRef we resolved.
+/// controller or Gateway instance kept verbatim, plus our resolved parents.
+/// All writers use the same ordering so instances never rotate the list.
 ///
 /// Pure, so the loop-safety property is testable without an apiserver: feeding
 /// this function its own output must be a fixed point, or the controller
@@ -499,14 +536,21 @@ fn route_parents(
     route: &RouteResult,
     current: &[RouteParentStatus],
     generation: Option<i64>,
+    scope: &GatewayScope,
 ) -> Vec<RouteParentStatus> {
     let mut parents: Vec<RouteParentStatus> = current
         .iter()
-        .filter(|p| p.controller_name != controller_name)
+        .filter(|p| {
+            p.controller_name != controller_name || !owned_parent(scope, &route.namespace, p)
+        })
         .cloned()
         .collect();
 
-    for parent in &route.parents {
+    for parent in route
+        .parents
+        .iter()
+        .filter(|p| scope.owns_gateway(&p.gateway_namespace, &p.gateway_name))
+    {
         let parent_ref = RouteParentRef {
             group: Some(GW_GROUP.to_string()),
             kind: Some("Gateway".to_string()),
@@ -559,34 +603,155 @@ fn route_parents(
             parent_ref,
         });
     }
+    parents.sort_by(|a, b| {
+        (&a.controller_name, &a.parent_ref).cmp(&(&b.controller_name, &b.parent_ref))
+    });
     parents
+}
+
+fn owned_parent(scope: &GatewayScope, namespace: &str, parent: &RouteParentStatus) -> bool {
+    let p = &parent.parent_ref;
+    scope.owns_parent(
+        namespace,
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+    )
+}
+
+/// A result computed from a specific cached generation. A status retry must
+/// not label an older routing decision as observing a newer spec.
+pub struct RouteStatusUpdate {
+    route: RouteResult,
+    generation: Option<i64>,
+}
+
+pub fn route_updates(
+    results: &[RouteResult],
+    inputs: &Inputs,
+    controller_name: &str,
+    scope: &GatewayScope,
+) -> Vec<RouteStatusUpdate> {
+    fn collect<K: RouteParents + Resource>(
+        objects: &[Arc<K>],
+        kind: RouteKind,
+        results: &[RouteResult],
+        controller_name: &str,
+        scope: &GatewayScope,
+        updates: &mut Vec<RouteStatusUpdate>,
+    ) {
+        for object in objects {
+            let meta = object.meta();
+            let namespace = meta.namespace.as_deref().unwrap_or("default");
+            let name = meta.name.as_deref().unwrap_or_default();
+            let result = results
+                .iter()
+                .find(|r| r.kind == kind && r.namespace == namespace && r.name == name);
+            if result.is_none()
+                && !object.route_parents().iter().any(|p| {
+                    p.controller_name == controller_name && owned_parent(scope, namespace, p)
+                })
+            {
+                continue;
+            }
+            // A route absent from build results may have lost its last parent
+            // or its Gateway. Its old owned status still needs pruning.
+            updates.push(RouteStatusUpdate {
+                route: result.cloned().unwrap_or_else(|| RouteResult {
+                    kind,
+                    namespace: namespace.to_string(),
+                    name: name.to_string(),
+                    uid: meta.uid.clone(),
+                    parents: vec![],
+                }),
+                generation: meta.generation,
+            });
+        }
+    }
+    let mut updates = Vec::new();
+    collect(
+        &inputs.http_routes,
+        RouteKind::HttpRoute,
+        results,
+        controller_name,
+        scope,
+        &mut updates,
+    );
+    collect(
+        &inputs.tcp_routes,
+        RouteKind::TcpRoute,
+        results,
+        controller_name,
+        scope,
+        &mut updates,
+    );
+    collect(
+        &inputs.udp_routes,
+        RouteKind::UdpRoute,
+        results,
+        controller_name,
+        scope,
+        &mut updates,
+    );
+    updates
 }
 
 async fn write_route<K>(
     client: &Client,
     controller_name: &str,
-    route: &RouteResult,
+    update: &RouteStatusUpdate,
+    scope: &GatewayScope,
 ) -> Result<(), kube::Error>
 where
     K: RouteParents + Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned,
     K: std::fmt::Debug,
     K::DynamicType: Default,
 {
+    let route = &update.route;
     let api: Api<K> = Api::namespaced(client.clone(), &route.namespace);
-    let current = api.get(&route.name).await?;
-    let generation = current.meta().generation;
-    let current_parents = current.route_parents();
-    let parents = route_parents(controller_name, route, &current_parents, generation);
-
-    // Skip the write when the full parents list is unchanged (loop-safety).
-    if current_parents == parents {
-        return Ok(());
+    let mut conflicts = 0;
+    loop {
+        let current = api.get(&route.name).await?;
+        if current.meta().generation != update.generation || current.meta().uid != route.uid {
+            // The watch will rebuild the changed or recreated route. Reusing
+            // this stale result would claim to have observed an unseen spec.
+            return Ok(());
+        }
+        let current_parents = current.route_parents();
+        let parents = route_parents(
+            controller_name,
+            route,
+            &current_parents,
+            update.generation,
+            scope,
+        );
+        if current_parents == parents {
+            return Ok(());
+        }
+        let version = current.meta().resource_version.as_ref().ok_or_else(|| {
+            kube::Error::Service(Box::new(std::io::Error::other(
+                "route has no resourceVersion",
+            )))
+        })?;
+        let patch =
+            json!({ "metadata": { "resourceVersion": version }, "status": { "parents": parents } });
+        match api
+            .patch_status(&route.name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Err(kube::Error::Api(error)) if error.code == 409 && conflicts < 2 => {
+                conflicts += 1;
+                // Another instance wrote between GET and PATCH. Re-read its
+                // entries and merge again, with at most three total attempts.
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {
+                debug!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, "route status updated");
+                return Ok(());
+            }
+        }
     }
-    let patch = json!({ "status": { "parents": parents } });
-    api.patch_status(&route.name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await?;
-    debug!(kind = route.kind.as_str(), namespace = %route.namespace, name = %route.name, "route status updated");
-    Ok(())
 }
 
 // ---- Ingress status (.status.loadBalancer.ingress) -------------------------
@@ -705,7 +870,13 @@ mod tests {
         let mut with_port = parent(Some("b"), true);
         with_port.port = Some(8443);
         let r = route(vec![parent(Some("a"), true), with_port]);
-        let parents = route_parents("sozu.io/gateway-controller", &r, &[], Some(3));
+        let parents = route_parents(
+            "sozu.io/gateway-controller",
+            &r,
+            &[],
+            Some(3),
+            &GatewayScope::default(),
+        );
 
         assert_eq!(parents.len(), 2);
         assert_eq!(parents[0].parent_ref.section_name.as_deref(), Some("a"));
@@ -724,8 +895,8 @@ mod tests {
     fn rebuilding_from_our_own_status_is_a_fixed_point() {
         let controller = "sozu.io/gateway-controller";
         let r = route(vec![parent(Some("a"), true), parent(Some("b"), false)]);
-        let first = route_parents(controller, &r, &[], Some(3));
-        let second = route_parents(controller, &r, &first, Some(3));
+        let first = route_parents(controller, &r, &[], Some(3), &GatewayScope::default());
+        let second = route_parents(controller, &r, &first, Some(3), &GatewayScope::default());
         assert_eq!(first, second, "a second pass must be a no-op");
     }
 
@@ -751,6 +922,7 @@ mod tests {
             &route(vec![parent(None, true)]),
             std::slice::from_ref(&theirs),
             None,
+            &GatewayScope::default(),
         );
         assert_eq!(parents.len(), 2);
         assert!(parents.contains(&theirs));
@@ -890,5 +1062,307 @@ mod tests {
         assert!(addrs
             .iter()
             .any(|a| a.r#type.as_deref() == Some("Hostname") && a.value == "lb.example.com"));
+    }
+
+    #[test]
+    fn scopes_preserve_other_parents_and_remove_only_their_own() {
+        let controller = "sozu.io/gateway-controller";
+        let a = GatewayScope {
+            gateway_scope: Some("sozu-system/gw".parse().unwrap()),
+            ..Default::default()
+        };
+        let b = GatewayScope {
+            exclude_gateway: vec!["sozu-system/gw".parse().unwrap()],
+            ..Default::default()
+        };
+        let ours = route(vec![parent(Some("http"), true)]);
+        let mut other_parent = parent(Some("https"), true);
+        other_parent.gateway_name = "other".into();
+        let theirs = route(vec![other_parent]);
+        let first = route_parents(controller, &ours, &[], Some(1), &a);
+        let combined = route_parents(controller, &theirs, &first, Some(1), &b);
+        assert_eq!(combined.len(), 2);
+        assert_eq!(
+            combined,
+            route_parents(controller, &ours, &combined, Some(1), &a)
+        );
+        assert_eq!(
+            combined,
+            route_parents(controller, &theirs, &combined, Some(1), &b)
+        );
+        let mut foreign = combined[0].clone();
+        foreign.parent_ref.group = Some("example.net".into());
+        foreign.parent_ref.kind = Some("CustomParent".into());
+        foreign.parent_ref.port = Some(1234);
+        let mut current = combined;
+        current.push(foreign.clone());
+        let removed = route_parents(controller, &route(vec![]), &current, Some(2), &a);
+        assert_eq!(removed.len(), 2);
+        assert!(
+            removed.contains(&foreign),
+            "unknown references must survive verbatim"
+        );
+        assert!(removed.iter().any(|p| p.parent_ref.name == "other"));
+    }
+
+    #[test]
+    fn routes_losing_their_last_parent_still_get_a_status_update() {
+        let controller = "sozu.io/gateway-controller";
+        let scope = GatewayScope {
+            gateway_scope: Some("sozu-system/gw".parse().unwrap()),
+            ..Default::default()
+        };
+        let result = route(vec![parent(None, true)]);
+        let parents = route_parents(controller, &result, &[], Some(1), &scope);
+        let mut inputs = Inputs::default();
+        inputs.http_routes.push(Arc::new(
+            serde_json::from_value(json!({
+                "metadata":{"namespace":"demo","name":"web","uid":result.uid,"generation":2},
+                "spec":{"parentRefs":[{"name":"other","namespace":"sozu-system"}]},
+                "status":{"parents":parents}
+            }))
+            .unwrap(),
+        ));
+        let updates = route_updates(&[], &inputs, controller, &scope);
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].route.parents.is_empty());
+        assert_eq!(updates[0].generation, Some(2));
+        assert!(route_parents(controller, &updates[0].route, &parents, Some(2), &scope).is_empty());
+        let unowned = GatewayScope {
+            exclude_gateway: vec!["sozu-system/gw".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(route_updates(&[], &inputs, controller, &unowned).is_empty());
+    }
+
+    #[test]
+    fn cluster_ip_addresses_are_internal_and_pending_load_balancers_stay_pending() {
+        let mut service: Service = serde_json::from_value(json!({
+            "spec":{"type":"ClusterIP","clusterIP":"10.0.0.10","clusterIPs":["10.0.0.10","fd00::10"]}
+        })).unwrap();
+        let addresses = gateway_addresses(&service);
+        assert_eq!(addresses.len(), 2);
+        assert!(addresses
+            .iter()
+            .all(|a| a.r#type.as_deref() == Some("IPAddress")));
+        service.spec.as_mut().unwrap().type_ = Some("LoadBalancer".into());
+        assert!(gateway_addresses(&service).is_empty());
+        service.spec.as_mut().unwrap().type_ = Some("ClusterIP".into());
+        service.spec.as_mut().unwrap().cluster_ips = Some(vec!["None".into()]);
+        service.spec.as_mut().unwrap().cluster_ip = Some("None".into());
+        assert!(gateway_addresses(&service).is_empty());
+    }
+
+    struct MockApi {
+        object: serde_json::Value,
+        gets: usize,
+        patches: usize,
+        conflicts: usize,
+        reject_all: bool,
+    }
+
+    fn mock_client(
+        object: serde_json::Value,
+        rendezvous: bool,
+        reject_all: bool,
+    ) -> (Client, Arc<std::sync::Mutex<MockApi>>) {
+        use http_body_util::BodyExt;
+        use kube::client::Body;
+        let state = Arc::new(std::sync::Mutex::new(MockApi {
+            object,
+            gets: 0,
+            patches: 0,
+            conflicts: 0,
+            reject_all,
+        }));
+        let shared = state.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let service = tower::service_fn(move |request: http::Request<Body>| {
+            let shared = shared.clone();
+            let barrier = barrier.clone();
+            async move {
+                let (status, body) = if request.method() == http::Method::GET {
+                    let (object, initial) = {
+                        let mut state = shared.lock().unwrap();
+                        state.gets += 1;
+                        (state.object.clone(), state.gets <= 2)
+                    };
+                    if rendezvous && initial {
+                        barrier.wait().await;
+                    }
+                    (200, object)
+                } else {
+                    assert_eq!(request.method(), http::Method::PATCH);
+                    let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                    let patch: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let mut state = shared.lock().unwrap();
+                    state.patches += 1;
+                    let versioned = state.object["kind"] == "HTTPRoute";
+                    if versioned {
+                        assert!(patch["metadata"]["resourceVersion"].is_string());
+                    }
+                    if state.reject_all
+                        || (versioned
+                            && patch["metadata"]["resourceVersion"]
+                                != state.object["metadata"]["resourceVersion"])
+                    {
+                        state.conflicts += 1;
+                        (
+                            409,
+                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","message":"resourceVersion changed","code":409}),
+                        )
+                    } else {
+                        let version: u64 = state.object["metadata"]["resourceVersion"]
+                            .as_str()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        state.object["metadata"]["resourceVersion"] =
+                            json!((version + 1).to_string());
+                        state.object["status"] = patch["status"].clone();
+                        (200, state.object.clone())
+                    }
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+            }
+        });
+        (Client::new(service, "demo"), state)
+    }
+
+    fn current_route() -> serde_json::Value {
+        json!({
+            "apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute",
+            "metadata":{"namespace":"demo","name":"web","uid":"11111111-2222-3333-4444-555555555555","generation":1,"resourceVersion":"1"},
+            "spec":{},"status":{"parents":[]}
+        })
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_controller_writers_retry_without_losing_parents() {
+        let controller = "sozu.io/gateway-controller";
+        let (client, state) = mock_client(current_route(), true, false);
+        let a = GatewayScope {
+            gateway_scope: Some("sozu-system/gw".parse().unwrap()),
+            ..Default::default()
+        };
+        let b = GatewayScope {
+            exclude_gateway: vec!["sozu-system/gw".parse().unwrap()],
+            ..Default::default()
+        };
+        let first = RouteStatusUpdate {
+            route: route(vec![parent(Some("http"), true)]),
+            generation: Some(1),
+        };
+        let mut other = parent(Some("https"), true);
+        other.gateway_name = "other".into();
+        let second = RouteStatusUpdate {
+            route: route(vec![other]),
+            generation: Some(1),
+        };
+        let (x, y) = tokio::join!(
+            write_route::<HttpRoute>(&client, controller, &first, &a),
+            write_route::<HttpRoute>(&client, controller, &second, &b),
+        );
+        x.unwrap();
+        y.unwrap();
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.patches, 3);
+            assert_eq!(state.conflicts, 1);
+            assert_eq!(
+                state.object["status"]["parents"].as_array().unwrap().len(),
+                2
+            );
+        }
+        write_route::<HttpRoute>(&client, controller, &first, &a)
+            .await
+            .unwrap();
+        write_route::<HttpRoute>(&client, controller, &second, &b)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().unwrap().patches,
+            3,
+            "both writers settle on the same order"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_status_conflicts_are_bounded_and_new_specs_are_not_misreported() {
+        let update = RouteStatusUpdate {
+            route: route(vec![parent(None, true)]),
+            generation: Some(1),
+        };
+        let (client, state) = mock_client(current_route(), false, true);
+        let result = write_route::<HttpRoute>(
+            &client,
+            "sozu.io/gateway-controller",
+            &update,
+            &GatewayScope::default(),
+        )
+        .await;
+        assert!(matches!(result, Err(kube::Error::Api(error)) if error.code == 409));
+        assert_eq!(state.lock().unwrap().patches, 3);
+        let mut changed = current_route();
+        changed["metadata"]["generation"] = json!(2);
+        let (client, state) = mock_client(changed, false, false);
+        write_route::<HttpRoute>(
+            &client,
+            "sozu.io/gateway-controller",
+            &update,
+            &GatewayScope::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.lock().unwrap().patches, 0);
+    }
+
+    #[tokio::test]
+    async fn only_the_default_instance_writes_gatewayclass_status() {
+        let (client, state) = mock_client(
+            json!({
+                "apiVersion":"gateway.networking.k8s.io/v1","kind":"GatewayClass",
+                "metadata":{"name":"sozu","generation":1,"resourceVersion":"1"},
+                "spec":{"controllerName":"sozu.io/gateway-controller"}
+            }),
+            false,
+            false,
+        );
+        let scoped = GatewayScope {
+            gateway_scope: Some("demo/gw".parse().unwrap()),
+            ..Default::default()
+        };
+        let classes = [GatewayClassResult {
+            name: "sozu".into(),
+            accepted: true,
+        }];
+        write_status(
+            &client,
+            "sozu.io/gateway-controller",
+            &classes,
+            &[],
+            &[],
+            &[],
+            &scoped,
+        )
+        .await;
+        assert_eq!(state.lock().unwrap().gets, 0);
+        write_status(
+            &client,
+            "sozu.io/gateway-controller",
+            &classes,
+            &[],
+            &[],
+            &[],
+            &GatewayScope::default(),
+        )
+        .await;
+        assert_eq!(state.lock().unwrap().gets, 1);
+        assert_eq!(state.lock().unwrap().patches, 1);
     }
 }

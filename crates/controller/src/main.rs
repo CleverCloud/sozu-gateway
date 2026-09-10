@@ -44,6 +44,7 @@ use sozu_gw_translator as tr;
 mod events;
 mod health;
 mod metrics;
+mod scope;
 mod shadow;
 mod status;
 
@@ -55,6 +56,8 @@ const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-cl
     about = "Sōzu-based Ingress + Gateway API controller"
 )]
 struct Args {
+    #[command(flatten)]
+    gateway_scope: scope::GatewayScope,
     /// IngressClass name we own.
     #[arg(long, env = "SOZU_GW_CLASS", default_value = "sozu")]
     class_name: String,
@@ -127,6 +130,10 @@ struct Args {
         action = clap::ArgAction::Set
     )]
     gateway_status_writes: bool,
+    /// Write Ingress status when publishing a Service address. Scoped Gateway
+    /// instances never write it; the default instance can disable it for RBAC.
+    #[arg(long, env = "SOZU_GW_INGRESS_STATUS_WRITES", default_value_t = true, action = clap::ArgAction::Set)]
+    ingress_status_writes: bool,
     /// Server-side `timeoutSeconds` on every watch, which also sets kube-rs's
     /// **client-side** idle timeout (that timeout is derived from this value
     /// plus a margin). `0` keeps kube-rs's default of 290 s.
@@ -535,7 +542,7 @@ async fn reconcile(
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
-    let inputs = Inputs {
+    let mut inputs = Inputs {
         ingresses: stores.ingresses.state(),
         namespaces: stores.namespaces.state(),
         services: stores.services.state(),
@@ -549,6 +556,7 @@ async fn reconcile(
         udp_routes: stores.udp_routes.state(),
     };
 
+    args.gateway_scope.filter_inputs(&mut inputs);
     let out = build(&cfg, &inputs);
 
     // Publish the Services this build referenced (resolved or not) for the
@@ -627,13 +635,20 @@ async fn reconcile(
     // Skippable for least-privilege deployments running without the
     // gateways/status RBAC grants, where every write would 403.
     if args.gateway_status_writes {
+        let route_updates = status::route_updates(
+            &out.routes,
+            &inputs,
+            &args.controller_name,
+            &args.gateway_scope,
+        );
         status::write_status(
             client,
             &args.controller_name,
             &out.gateway_classes,
             &out.gateways,
-            &out.routes,
+            &route_updates,
             &gw_addresses,
+            &args.gateway_scope,
         )
         .await;
     } else {
@@ -643,7 +658,9 @@ async fn reconcile(
     let lb_points = publish_svc
         .map(|s| status::lb_points(s))
         .unwrap_or_default();
-    status::write_ingress_status(client, &out.results, &lb_points).await;
+    if args.gateway_scope.is_default() && args.ingress_status_writes {
+        status::write_ingress_status(client, &out.results, &lb_points).await;
+    }
 
     // Shadow advances only on a successful socket apply. On failure it stays at
     // the previous applied IR. The emitted requests are not all idempotent, so
@@ -668,6 +685,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    args.gateway_scope.validate().map_err(anyhow::Error::msg)?;
     info!(?args, "starting sozu gateway controller");
 
     // The exposure table decides both what a Gateway listener may declare and

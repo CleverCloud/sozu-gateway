@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.configmap" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -72,3 +73,5 @@ data:
     preload = {{ . }}
     {{- end }}
     {{- end }}
+{{ end -}}
+{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.configmap") -}}

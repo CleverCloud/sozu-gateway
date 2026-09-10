@@ -2423,6 +2423,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "http",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "serde",
@@ -2435,6 +2437,7 @@ dependencies = [
  "sozu-gw-translator",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

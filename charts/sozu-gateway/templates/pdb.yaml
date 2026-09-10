@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.pdb" -}}
 {{- if gt (int .Values.replicaCount) 1 }}
 # Only rendered with more than one replica: a budget over a single Pod can only
 # ever block every disruption or permit every one of them, and neither is a
@@ -21,3 +22,6 @@ spec:
     matchLabels:
       {{- include "sozu-gateway.selectorLabels" . | nindent 6 }}
 {{- end }}
+
+{{- end -}}
+{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.pdb") }}

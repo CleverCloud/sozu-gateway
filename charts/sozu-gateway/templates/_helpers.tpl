@@ -2,7 +2,7 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "sozu-gateway.fullname" -}}
+{{- define "sozu-gateway.baseFullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -10,9 +10,25 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "sozu-gateway.fullname" -}}
+{{- if .gatewayInstance -}}
+{{- printf "%s-%s" (include "sozu-gateway.baseFullname" .) .gatewayInstance.name -}}
+{{- else -}}
+{{- include "sozu-gateway.baseFullname" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "sozu-gateway.instanceLabel" -}}
+{{- if .gatewayInstance -}}
+{{- printf "%s-%s" .Release.Name .gatewayInstance.name -}}
+{{- else -}}
+{{- .Release.Name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sozu-gateway.labels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: sozu-gateway
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
@@ -20,11 +36,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 
 {{- define "sozu-gateway.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
 {{- end -}}
 
 {{- define "sozu-gateway.serviceAccountName" -}}
-{{ include "sozu-gateway.fullname" . }}
+{{ include "sozu-gateway.baseFullname" . }}
 {{- end -}}
 
 {{/*
@@ -223,5 +239,80 @@ number the user never wrote.
 {{- $g := int (include "sozu-gateway.drainGrace" .) -}}
 {{- if le $g $d -}}
   {{- fail (printf "sozu.drain.gracePeriodSeconds (%d) must exceed sozu.drain.delaySeconds (%d), otherwise the kubelet SIGKILLs the proxy before it has begun draining" $g $d) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* An explicit list provisions independent Pods and addresses. Reject names
+     instead of truncating them into another instance's selectors or resources. */}}
+{{- define "sozu-gateway.validateGatewayInstances" -}}
+{{- $names := dict -}}
+{{- $gateways := dict -}}
+{{- $base := include "sozu-gateway.baseFullname" . -}}
+{{- $services := dict $base "default" (printf "%s-metrics" $base) "default metrics" -}}
+{{- $instances := .Values.gatewayInstances | default list -}}
+{{- if not (kindIs "slice" $instances) -}}
+  {{- fail "gatewayInstances must be a list" -}}
+{{- end -}}
+{{- $label := "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" -}}
+{{- range $i, $instance := $instances -}}
+  {{- if not (kindIs "map" $instance) -}}
+    {{- fail (printf "gatewayInstances[%d] must be a mapping" $i) -}}
+  {{- end -}}
+  {{- $name := required (printf "gatewayInstances[%d].name is required" $i) $instance.name -}}
+  {{- if or (not (kindIs "string" $name)) (not (regexMatch $label $name)) (gt (len $name) 63) -}}
+    {{- fail (printf "gatewayInstances[%d].name must be a DNS label" $i) -}}
+  {{- end -}}
+  {{- if hasKey $names $name -}}{{- fail (printf "gatewayInstances repeats instance name %q" $name) -}}{{- end -}}
+  {{- $_ := set $names $name true -}}
+  {{- $full := printf "%s-%s" (include "sozu-gateway.baseFullname" $) $name -}}
+  {{- if or (gt (len $full) 55) (gt (len (printf "%s-%s" $.Release.Name $name)) 63) -}}
+    {{- fail (printf "gatewayInstances name %q is too long with this release: use a shorter name or fullnameOverride (the -metrics suffix must fit 63 characters)" $name) -}}
+  {{- end -}}
+  {{- range $serviceName := list $full (printf "%s-metrics" $full) -}}
+    {{- if hasKey $services $serviceName -}}
+      {{- fail (printf "gatewayInstances name %q collides with Service %s (%s)" $name $serviceName (get $services $serviceName)) -}}
+    {{- end -}}
+    {{- $_ := set $services $serviceName $name -}}
+  {{- end -}}
+  {{- $gateway := required (printf "gatewayInstances[%d].gateway is required" $i) $instance.gateway -}}
+  {{- if not (kindIs "map" $gateway) -}}{{- fail "gatewayInstances[].gateway must be a mapping" -}}{{- end -}}
+  {{- $ns := required "gatewayInstances[].gateway.namespace is required" $gateway.namespace -}}
+  {{- $gwName := required "gatewayInstances[].gateway.name is required" $gateway.name -}}
+  {{- if or (not (kindIs "string" $ns)) (not (regexMatch $label $ns)) (gt (len $ns) 63) -}}
+    {{- fail "gatewayInstances[].gateway.namespace must be a DNS label" -}}
+  {{- end -}}
+  {{- if or (not (kindIs "string" $gwName)) (gt (len $gwName) 253) -}}{{- fail "gatewayInstances[].gateway.name must be a DNS subdomain" -}}{{- end -}}
+  {{- range $part := splitList "." $gwName -}}
+    {{- if or (not (regexMatch $label $part)) (gt (len $part) 63) -}}{{- fail "gatewayInstances[].gateway.name must be a DNS subdomain" -}}{{- end -}}
+  {{- end -}}
+  {{- $key := printf "%s/%s" $ns $gwName -}}
+  {{- if hasKey $gateways $key -}}{{- fail (printf "gatewayInstances assigns Gateway %s more than once" $key) -}}{{- end -}}
+  {{- $_ := set $gateways $key true -}}
+  {{- if and (hasKey $instance "service") (not (kindIs "map" $instance.service)) -}}{{- fail "gatewayInstances[].service must be a mapping" -}}{{- end -}}
+  {{- if hasKey $instance "replicaCount" -}}
+    {{- if or (not (regexMatch "^[1-9][0-9]*$" (printf "%v" $instance.replicaCount))) (gt (int $instance.replicaCount) 2147483647) -}}
+      {{- fail "gatewayInstances[].replicaCount must be a positive integer" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Render one resource template for the default instance, then each explicit
+     Gateway instance. Only Service settings and replica count may differ;
+     all use the release's exposure, image and shared ServiceAccount. */}}
+{{- define "sozu-gateway.renderInstances" -}}
+{{- $root := .root -}}
+{{- $template := .template -}}
+{{- include "sozu-gateway.validateGatewayInstances" $root -}}
+{{- include $template $root -}}
+{{- range $instance := $root.Values.gatewayInstances | default list -}}
+  {{- $values := deepCopy $root.Values -}}
+  {{- if $instance.service -}}
+    {{- $_ := set $values "service" (mergeOverwrite (deepCopy $root.Values.service) $instance.service) -}}
+  {{- end -}}
+  {{- if hasKey $instance "replicaCount" -}}{{- $_ := set $values "replicaCount" $instance.replicaCount -}}{{- end -}}
+  {{- $context := merge (dict "gatewayInstance" $instance "Values" $values) $root -}}
+  {{- $rendered := include $template $context -}}
+  {{- if trim $rendered -}}{{ printf "\n---\n%s" $rendered }}{{- end -}}
 {{- end -}}
 {{- end -}}

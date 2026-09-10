@@ -1,3 +1,4 @@
+{{- define "sozu-gateway.deployment" -}}
 {{- include "sozu-gateway.validateDrain" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -24,7 +25,7 @@ spec:
         {{- include "sozu-gateway.selectorLabels" . | nindent 8 }}
       annotations:
         # Roll the pod when the Sōzu config changes.
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/config: {{ include "sozu-gateway.configmap" . | sha256sum }}
     spec:
       {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
       # Long enough for the data plane's preStop drain below to finish; when it
@@ -135,6 +136,17 @@ spec:
               value: {{ .Values.ingressClass.controllerValue | quote }}
             - name: SOZU_GW_SOCKET
               value: /run/sozu/sozu.sock
+            {{- if .gatewayInstance }}
+            - name: SOZU_GW_GATEWAY_SCOPE
+              value: {{ printf "%s/%s" .gatewayInstance.gateway.namespace .gatewayInstance.gateway.name | quote }}
+            {{- else if .Values.gatewayInstances }}
+            {{- $excluded := list }}
+            {{- range .Values.gatewayInstances }}
+            {{- $excluded = append $excluded (printf "%s/%s" .gateway.namespace .gateway.name) }}
+            {{- end }}
+            - name: SOZU_GW_EXCLUDE_GATEWAY
+              value: {{ join "," (sortAlpha $excluded) | quote }}
+            {{- end }}
             # Ports this gateway exposes: what a Gateway listener may declare,
             # and where Sōzu listens for it. Rendered from `exposure`.
             - name: SOZU_GW_EXPOSURE
@@ -157,11 +169,15 @@ spec:
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"
             {{- end }}
-            {{- if .Values.rbac.allowStatusWrites }}
+            {{- if or .Values.rbac.allowStatusWrites (and .Values.rbac.allowGatewayStatusWrites (or .gatewayInstance .Values.gatewayInstances)) }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'
             # .status (needs the ingresses/status grant gated by the same flag).
             - name: SOZU_GW_PUBLISH_SERVICE
               value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
+            {{- end }}
+            {{- if and (or .gatewayInstance .Values.gatewayInstances) (not .Values.rbac.allowStatusWrites) }}
+            - name: SOZU_GW_INGRESS_STATUS_WRITES
+              value: "false"
             {{- end }}
             {{- if not .Values.rbac.allowGatewayStatusWrites }}
             # Without the */status grants every write would 403; tell the
@@ -267,3 +283,6 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+{{- end -}}
+{{- include "sozu-gateway.renderInstances" (dict "root" . "template" "sozu-gateway.deployment") }}
