@@ -331,6 +331,11 @@ async fn write_gateway(
     let addresses = addresses.unwrap_or_default();
     let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
     let current = api.get(&gw.name).await?;
+    if current.metadata.uid != gw.uid {
+        // A Gateway recreated after the build belongs to a different worker.
+        // Its name alone must not inherit the previous instance's addresses.
+        return Ok(());
+    }
     let cur = current
         .status
         .as_ref()
@@ -399,7 +404,18 @@ async fn write_gateway(
     if !addresses.is_empty() {
         status.insert("addresses".to_string(), json!(addresses));
     }
-    let patch = json!({ "status": status });
+    let uid = current.metadata.uid.as_ref().ok_or_else(|| {
+        kube::Error::Service(Box::new(std::io::Error::other("Gateway has no UID")))
+    })?;
+    let version = current.metadata.resource_version.as_ref().ok_or_else(|| {
+        kube::Error::Service(Box::new(std::io::Error::other(
+            "Gateway has no resourceVersion",
+        )))
+    })?;
+    let patch = json!({
+        "metadata": { "uid": uid, "resourceVersion": version },
+        "status": status,
+    });
     api.patch_status(&gw.name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
     debug!(namespace = %gw.namespace, name = %gw.name, "Gateway status updated");
@@ -1265,6 +1281,8 @@ mod tests {
         patches: usize,
         conflicts: usize,
         reject_all: bool,
+        replace_before_patch: Option<serde_json::Value>,
+        last_patch: Option<serde_json::Value>,
     }
 
     fn mock_client(
@@ -1280,6 +1298,8 @@ mod tests {
             patches: 0,
             conflicts: 0,
             reject_all,
+            replace_before_patch: None,
+            last_patch: None,
         }));
         let shared = state.clone();
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -1303,11 +1323,20 @@ mod tests {
                     let patch: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                     let mut state = shared.lock().unwrap();
                     state.patches += 1;
-                    let versioned = state.object["kind"] == "HTTPRoute";
+                    state.last_patch = Some(patch.clone());
+                    if let Some(replacement) = state.replace_before_patch.take() {
+                        state.object = replacement;
+                    }
+                    let gateway = state.object["kind"] == "Gateway";
+                    let versioned = gateway || state.object["kind"] == "HTTPRoute";
                     if versioned {
                         assert!(patch["metadata"]["resourceVersion"].is_string());
                     }
+                    if gateway {
+                        assert!(patch["metadata"]["uid"].is_string());
+                    }
                     if state.reject_all
+                        || (gateway && patch["metadata"]["uid"] != state.object["metadata"]["uid"])
                         || (versioned
                             && patch["metadata"]["resourceVersion"]
                                 != state.object["metadata"]["resourceVersion"])
@@ -1315,7 +1344,7 @@ mod tests {
                         state.conflicts += 1;
                         (
                             409,
-                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","message":"resourceVersion changed","code":409}),
+                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","message":"identity or resourceVersion changed","code":409}),
                         )
                     } else {
                         let version: u64 = state.object["metadata"]["resourceVersion"]
@@ -1433,24 +1462,84 @@ mod tests {
         assert_eq!(state.lock().unwrap().patches, 0);
     }
 
-    #[tokio::test]
-    async fn pending_address_blocks_programmed_until_the_new_service_is_assigned() {
-        let old = json!([{ "type": "IPAddress", "value": "198.51.100.10" }]);
-        let current = json!({
+    fn current_gateway() -> serde_json::Value {
+        json!({
             "apiVersion":"gateway.networking.k8s.io/v1", "kind":"Gateway",
-            "metadata":{"namespace":"demo", "name":"gw", "generation":1, "resourceVersion":"1"},
+            "metadata":{"namespace":"demo", "name":"gw", "uid":"gateway-original", "generation":1, "resourceVersion":"1"},
             "spec":{"gatewayClassName":"sozu", "listeners":[]},
-            "status":{"addresses":old}
-        });
-        let gateway = GatewayResult {
+            "status":{"addresses":[{"type":"IPAddress", "value":"198.51.100.10"}]}
+        })
+    }
+
+    fn gateway_result() -> GatewayResult {
+        GatewayResult {
             namespace: "demo".into(),
             name: "gw".into(),
-            uid: None,
+            uid: Some("gateway-original".into()),
             accepted: true,
             programmed: true,
             problems: vec![],
             listeners: vec![],
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_status_ignores_a_replacement_observed_after_the_build() {
+        let mut replacement = current_gateway();
+        replacement["metadata"]["uid"] = json!("gateway-replacement");
+        replacement["metadata"]["resourceVersion"] = json!("2");
+        let (client, state) = mock_client(replacement.clone(), false, false);
+        write_gateway(&client, &gateway_result(), Some(&[]))
+            .await
+            .unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.gets, 1);
+        assert_eq!(state.patches, 0);
+        assert_eq!(state.object, replacement);
+    }
+
+    #[tokio::test]
+    async fn gateway_status_patch_cannot_overwrite_a_replacement_or_concurrent_update() {
+        for next_uid in ["gateway-replacement", "gateway-original"] {
+            let mut newer = current_gateway();
+            newer["metadata"]["uid"] = json!(next_uid);
+            newer["metadata"]["resourceVersion"] = json!("2");
+            newer["status"]["addresses"] = json!([{"type":"IPAddress", "value":"198.51.100.20"}]);
+            let (client, state) = mock_client(current_gateway(), false, false);
+            state.lock().unwrap().replace_before_patch = Some(newer.clone());
+
+            let result = write_gateway(&client, &gateway_result(), Some(&[])).await;
+            assert!(matches!(result, Err(kube::Error::Api(error)) if error.code == 409));
+            let state = state.lock().unwrap();
+            assert_eq!(state.gets, 1);
+            assert_eq!(state.patches, 1, "the next reconcile refreshes a conflict");
+            assert_eq!(state.conflicts, 1);
+            assert_eq!(state.object, newer);
+            assert_eq!(
+                state.last_patch.as_ref().unwrap()["metadata"],
+                json!({"uid":"gateway-original", "resourceVersion":"1"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_status_refuses_an_unversioned_write() {
+        let mut current = current_gateway();
+        current["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resourceVersion");
+        let (client, state) = mock_client(current, false, false);
+        let result = write_gateway(&client, &gateway_result(), Some(&[])).await;
+        assert!(matches!(result, Err(kube::Error::Service(_))));
+        assert_eq!(state.lock().unwrap().patches, 0);
+    }
+
+    #[tokio::test]
+    async fn pending_address_blocks_programmed_until_the_new_service_is_assigned() {
+        let old = json!([{ "type": "IPAddress", "value": "198.51.100.10" }]);
+        let current = current_gateway();
+        let gateway = gateway_result();
         let (client, state) = mock_client(current, false, false);
         write_gateway(&client, &gateway, Some(&[])).await.unwrap();
         {

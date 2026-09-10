@@ -24,6 +24,11 @@ a Gateway requires no Helm change. The original Deployment and Service continue
 serving Ingress; they remain the only writers of Ingress and GatewayClass status.
 There is no list of Gateway names. The earlier, unreleased `gatewayInstances`
 setting is rejected so it cannot silently stop isolating configured Gateways.
+The Gateway API CRDs must already be installed. Remove any manually scoped
+Gateway deployments before enabling provisioning to avoid duplicate workers for
+the same Gateway. Creating a Gateway on this class allocates workloads and,
+with the default Service type, a LoadBalancer in the release namespace; grant
+Gateway creation rights with that infrastructure cost in mind.
 
 Provisioning is disabled by default to preserve existing addresses and routing
 on upgrade. Enabling it moves all owned Gateways to new Services; disabling it
@@ -50,12 +55,18 @@ table; automatic provisioning does not add support for arbitrary HTTP binds.
 Names and ownership distinguish the installation UID and Gateway UID. Recreating
 a Gateway under the same namespace/name creates a new instance; an old worker
 cannot claim the replacement. The provisioner reconciles on Gateway/Class changes
-and retries every five seconds, checking current API identity before updating or
-removing resources. It refuses to adopt a foreign object with a colliding name.
+and checks infrastructure drift every `controller.resyncSecs` (60 by default;
+0 disables periodic checks). Failed operations retry after five seconds. It
+checks current API identity before updating or removing resources and refuses
+to adopt a foreign object with a colliding name.
 Gateway deletion or loss of class ownership removes that Gateway's generated
 resources. The Helm-managed template ConfigMap owns them within the release
 namespace, so uninstalling the release also triggers Kubernetes garbage
 collection. An absent provisioner delays Gateway cleanup until it returns.
+Recreating the template ConfigMap, including a `fullnameOverride` change,
+changes the installation UID: its old instances are collected and replacements
+receive new names and addresses. Preserve that ConfigMap's identity during
+ordinary upgrades.
 
 Each Pod has its own command socket and persisted shadow. Route status updates
 preserve the full parent references and entries from other instances. Service

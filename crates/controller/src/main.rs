@@ -603,11 +603,11 @@ async fn run_provisioner(
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-    // Retrying also repairs infrastructure edits/deletions without requiring
-    // another Gateway event. This is independent of the workers' resync knob.
-    let mut retry = resync_interval(Duration::from_secs(5));
+    // Watch events drive provisioning immediately. A slower resync repairs
+    // infrastructure drift, while failed operations get a short retry delay.
+    let mut resync = resync_period(args.resync_secs).map(resync_interval);
     loop {
-        match provisioner
+        let failed = match provisioner
             .reconcile(&gateways.state(), &classes.state(), &args.controller_name)
             .await
         {
@@ -616,9 +616,14 @@ async fn run_provisioner(
                     warn!(gateway_uid = %uid, error = %failure, "Gateway provisioning failed; will retry");
                 }
                 mark_ready(&ready);
+                !outcome.failures.is_empty()
             }
-            Err(error) => warn!(error = %error, "provisioning failed; will retry"),
-        }
+            Err(error) => {
+                ready.store(false, Ordering::Relaxed);
+                warn!(error = %error, "provisioning failed; will retry");
+                true
+            }
+        };
         tokio::select! {
             event = rx.recv() => {
                 if event.is_none() {
@@ -627,7 +632,8 @@ async fn run_provisioner(
                 tokio::time::sleep(Duration::from_millis(args.debounce_ms)).await;
                 while rx.try_recv().is_ok() {}
             }
-            _ = retry.tick() => {}
+            _ = maybe_tick(resync.as_mut()) => {}
+            _ = tokio::time::sleep(Duration::from_secs(5)), if failed => {}
             _ = sigterm.recv() => break,
             _ = sigint.recv() => break,
         }

@@ -67,6 +67,8 @@ spec:
               value: {{ .Values.ingressClass.controllerValue | quote }}
             - name: SOZU_GW_DEBOUNCE_MS
               value: {{ .Values.controller.debounceMs | quote }}
+            - name: SOZU_GW_RESYNC_SECS
+              value: {{ .Values.controller.resyncSecs | quote }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
             {{- if .Values.controller.watchTimeoutSecs }}

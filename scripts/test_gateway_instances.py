@@ -180,7 +180,7 @@ class GatewayProvisioning(unittest.TestCase):
         self.assertEqual(config(resources)["deployment"]["spec"]["template"]["spec"]["serviceAccountName"], "sozu")
         self.assertFalse(manager_spec["automountServiceAccountToken"])
         self.assertNotIn("SOZU_GW_SOCKET", env(manager, "provisioner"))
-        self.assertNotIn("SOZU_GW_RESYNC_SECS", env(manager, "provisioner"))
+        self.assertEqual(env(manager, "provisioner")["SOZU_GW_RESYNC_SECS"], "60")
         self.assertEqual(env(manager, "provisioner")["SOZU_GW_HEALTH_LISTEN"], "0.0.0.0:8081")
         self.assertEqual(manager_spec["containers"][0]["readinessProbe"]["httpGet"], {"path": "/readyz", "port": "health"})
         self.assertEqual(manager_spec["containers"][0]["livenessProbe"]["httpGet"], {"path": "/healthz", "port": "health"})

@@ -12,9 +12,9 @@ fn config() -> ProvisionConfig {
     serde_json::from_value(json!({
         "namespace":"sozu-system", "template_config_map":"release-gateway-template",
         "deployment":{
-            "apiVersion":"apps/v1", "kind":"Deployment", "metadata":{"name":"template"},
+            "apiVersion":"apps/v1", "kind":"Deployment", "metadata":{"name":"template","labels":{"app.kubernetes.io/managed-by":"Helm"}},
             "spec":{"replicas":2,"selector":{"matchLabels":{"app":"sozu","app.kubernetes.io/instance":"release"}},
-                "template":{"metadata":{"labels":{"app":"sozu","app.kubernetes.io/instance":"release"}},"spec":{
+                "template":{"metadata":{"labels":{"app":"sozu","app.kubernetes.io/instance":"release","app.kubernetes.io/managed-by":"Helm"}},"spec":{
                     "serviceAccountName":"worker", "automountServiceAccountToken":false,
                     "securityContext":{"runAsUser":1000}, "terminationGracePeriodSeconds":120,
                     "containers":[
@@ -57,6 +57,7 @@ struct Mock {
     forbidden: BTreeSet<String>,
     replace_on_patch: Option<(String, Value)>,
     conflict_all_patches: bool,
+    normalize_quantities: bool,
     next_uid: usize,
 }
 
@@ -111,6 +112,39 @@ fn omit_null_fields(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+// Model API-server Quantity canonicalisation without using a production-side
+// parser: the reconciler must accept the representation returned by a write.
+fn normalize_server_quantities(value: &mut Value) {
+    let Some(containers) = value
+        .pointer_mut("/spec/template/spec/containers")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for container in containers {
+        for field in ["requests", "limits"] {
+            let Some(resources) = container
+                .get_mut("resources")
+                .and_then(|v| v.get_mut(field))
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            for (name, quantity) in resources {
+                let canonical = match (name.as_str(), quantity.as_str()) {
+                    ("cpu", Some("0.5")) => Some("500m"),
+                    ("cpu", Some("1000m")) => Some("1"),
+                    ("memory", Some("1024Mi")) => Some("1Gi"),
+                    _ => None,
+                };
+                if let Some(canonical) = canonical {
+                    *quantity = json!(canonical);
+                }
+            }
+        }
     }
 }
 
@@ -198,6 +232,9 @@ fn mock_client(gateways: &[Arc<Gateway>]) -> (Client, Arc<Mutex<Mock>>) {
                                     }
                                 }
                                 omit_null_fields(&mut object);
+                                if state.normalize_quantities {
+                                    normalize_server_quantities(&mut object);
+                                }
                                 state.objects.insert(object_path, object.clone());
                                 (201, object)
                             }
@@ -212,6 +249,7 @@ fn mock_client(gateways: &[Arc<Gateway>]) -> (Client, Arc<Mutex<Mock>>) {
                                 state.objects.insert(path.clone(), replacement);
                             }
                             let reject = state.conflict_all_patches;
+                            let normalize = state.normalize_quantities;
                             match state.objects.get_mut(&path) {
                                 Some(live)
                                     if !reject
@@ -219,6 +257,7 @@ fn mock_client(gateways: &[Arc<Gateway>]) -> (Client, Arc<Mutex<Mock>>) {
                                         && body["metadata"]["resourceVersion"]
                                             == live["metadata"]["resourceVersion"] =>
                                 {
+                                    let before = live.clone();
                                     let next = live["metadata"]["resourceVersion"]
                                         .as_str()
                                         .unwrap()
@@ -226,7 +265,15 @@ fn mock_client(gateways: &[Arc<Gateway>]) -> (Client, Arc<Mutex<Mock>>) {
                                         .unwrap()
                                         + 1;
                                     merge(live, &body);
-                                    live["metadata"]["resourceVersion"] = json!(next.to_string());
+                                    if normalize {
+                                        normalize_server_quantities(live);
+                                    }
+                                    // A successful no-op PATCH need not produce a
+                                    // new resourceVersion on the real API server.
+                                    if *live != before {
+                                        live["metadata"]["resourceVersion"] =
+                                            json!(next.to_string());
+                                    }
                                     (200, live.clone())
                                 }
                                 Some(_) => (409, status(409)),
@@ -315,6 +362,14 @@ async fn gateways_created_after_startup_receive_isolated_resources_and_settle_wi
             assert_eq!(
                 deployment["metadata"]["ownerReferences"][0]["blockOwnerDeletion"],
                 false
+            );
+            assert_eq!(
+                deployment["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+                "sozu-gateway"
+            );
+            assert_eq!(
+                pod["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+                "sozu-gateway"
             );
             assert_eq!(pod["metadata"]["labels"][GATEWAY_UID], instance.gateway_uid);
             assert!(pod["metadata"]["labels"]["app.kubernetes.io/instance"]
@@ -748,4 +803,221 @@ async fn absent_scheduling_fields_remain_absent_and_do_not_trigger_rollouts() {
     }
     assert!(reconcile(&provisioner, &[a]).await.failures.is_empty());
     assert_eq!(state.lock().unwrap().mutations().len(), 3);
+}
+
+fn quantity_config() -> ProvisionConfig {
+    let mut template = serde_json::to_value(config()).unwrap();
+    template["deployment"]["spec"]["template"]["spec"]["containers"][0]["resources"] = json!({
+        "requests":{"cpu":"0.5","memory":"1024Mi"}, "limits":{"cpu":"1000m"}
+    });
+    serde_json::from_value(template).unwrap()
+}
+
+fn deployment_path(instance: &Instance) -> String {
+    format!(
+        "/apis/apps/v1/namespaces/sozu-system/deployments/{}",
+        instance.name
+    )
+}
+
+#[tokio::test]
+async fn server_quantity_normalization_converges_after_create_and_after_process_restart() {
+    let a = gateway(GATEWAY_A, "a");
+    let (client, state) = mock_client(std::slice::from_ref(&a));
+    let template = quantity_config();
+    anchor_config(&state, &template);
+    state.lock().unwrap().normalize_quantities = true;
+    let provisioner = Provisioner::new(client.clone(), template.clone())
+        .await
+        .unwrap();
+    let first = reconcile(&provisioner, std::slice::from_ref(&a)).await;
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    let path = deployment_path(&first.instances[GATEWAY_A]);
+    {
+        let state = state.lock().unwrap();
+        let resources =
+            &state.objects[&path]["spec"]["template"]["spec"]["containers"][0]["resources"];
+        assert_eq!(resources["requests"]["cpu"], "500m");
+        assert_eq!(resources["requests"]["memory"], "1Gi");
+        assert_eq!(resources["limits"]["cpu"], "1");
+        assert_eq!(state.mutations().len(), 3);
+    }
+    for _ in 0..3 {
+        assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+            .await
+            .failures
+            .is_empty());
+    }
+    assert_eq!(state.lock().unwrap().mutations().len(), 3);
+
+    // The cache is deliberately ephemeral. A new process may make one no-op
+    // write to establish an API-confirmed version; that version may stay equal.
+    let version = state.lock().unwrap().objects[&path]["metadata"]["resourceVersion"].clone();
+    let restarted = Provisioner::new(client, template).await.unwrap();
+    assert!(reconcile(&restarted, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    assert_eq!(state.lock().unwrap().mutations().len(), 4);
+    assert_eq!(
+        state.lock().unwrap().objects[&path]["metadata"]["resourceVersion"],
+        version
+    );
+    for _ in 0..3 {
+        assert!(reconcile(&restarted, std::slice::from_ref(&a))
+            .await
+            .failures
+            .is_empty());
+    }
+    assert_eq!(state.lock().unwrap().mutations().len(), 4);
+}
+
+#[tokio::test]
+async fn a_new_resource_version_still_repairs_drift_and_failed_writes_are_not_confirmed() {
+    let a = gateway(GATEWAY_A, "a");
+    let (client, state) = mock_client(std::slice::from_ref(&a));
+    let template = quantity_config();
+    anchor_config(&state, &template);
+    state.lock().unwrap().normalize_quantities = true;
+    let provisioner = Provisioner::new(client, template).await.unwrap();
+    let first = reconcile(&provisioner, std::slice::from_ref(&a)).await;
+    assert!(first.failures.is_empty());
+    let path = deployment_path(&first.instances[GATEWAY_A]);
+    {
+        let mut state = state.lock().unwrap();
+        let live = state.objects.get_mut(&path).unwrap();
+        live["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"]["cpu"] =
+            json!("900m");
+        live["metadata"]["resourceVersion"] = json!("2");
+        state.conflict_all_patches = true;
+    }
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .contains_key(GATEWAY_A));
+    {
+        let mut state = state.lock().unwrap();
+        assert_eq!(
+            state.objects[&path]["spec"]["template"]["spec"]["containers"][0]["resources"]
+                ["requests"]["cpu"],
+            "900m"
+        );
+        assert_eq!(state.mutations().len(), 3 + RETRIES);
+        state.conflict_all_patches = false;
+    }
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.objects[&path]["spec"]["template"]["spec"]["containers"][0]["resources"]
+                ["requests"]["cpu"],
+            "500m"
+        );
+        assert_eq!(state.objects[&path]["metadata"]["resourceVersion"], "3");
+        assert_eq!(state.mutations().len(), 4 + RETRIES);
+    }
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    assert_eq!(state.lock().unwrap().mutations().len(), 4 + RETRIES);
+
+    // Even a status-only update invalidates the old confirmation. The following
+    // no-op write confirms the new RV once, rather than repeating on every tick.
+    {
+        let mut state = state.lock().unwrap();
+        let live = state.objects.get_mut(&path).unwrap();
+        live["status"] = json!({"availableReplicas":2});
+        live["metadata"]["resourceVersion"] = json!("4");
+    }
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    assert_eq!(
+        state.lock().unwrap().objects[&path]["metadata"]["resourceVersion"],
+        "4"
+    );
+    assert!(reconcile(&provisioner, &[a]).await.failures.is_empty());
+    assert_eq!(state.lock().unwrap().mutations().len(), 5 + RETRIES);
+}
+
+#[tokio::test]
+async fn recreated_owned_resource_with_the_same_version_is_not_mistaken_for_cached_object() {
+    let a = gateway(GATEWAY_A, "a");
+    let (client, state) = mock_client(std::slice::from_ref(&a));
+    let template = quantity_config();
+    anchor_config(&state, &template);
+    state.lock().unwrap().normalize_quantities = true;
+    let provisioner = Provisioner::new(client, template).await.unwrap();
+    let first = reconcile(&provisioner, std::slice::from_ref(&a)).await;
+    assert!(first.failures.is_empty());
+    let path = deployment_path(&first.instances[GATEWAY_A]);
+    {
+        let mut state = state.lock().unwrap();
+        let live = state.objects.get_mut(&path).unwrap();
+        live["metadata"]["uid"] = json!("recreated-resource");
+        assert_eq!(live["metadata"]["resourceVersion"], "1");
+        live["spec"]["template"]["spec"]["containers"][0]["image"] = json!("wrong:image");
+    }
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.objects[&path]["spec"]["template"]["spec"]["containers"][0]["image"],
+            "clevercloud/sozu:2.2.1"
+        );
+        let (_, _, patch) = state
+            .requests
+            .iter()
+            .find(|(method, path_, _)| method == "PATCH" && *path_ == path)
+            .unwrap();
+        assert_eq!(patch["metadata"]["uid"], "recreated-resource");
+        assert_eq!(state.mutations().len(), 4);
+    }
+    assert!(reconcile(&provisioner, &[a]).await.failures.is_empty());
+    assert_eq!(state.lock().unwrap().mutations().len(), 4);
+}
+
+#[tokio::test]
+async fn changed_template_invalidates_confirmation_even_when_uid_and_version_are_unchanged() {
+    let a = gateway(GATEWAY_A, "a");
+    let (client, state) = mock_client(std::slice::from_ref(&a));
+    let template = quantity_config();
+    anchor_config(&state, &template);
+    state.lock().unwrap().normalize_quantities = true;
+    let mut provisioner = Provisioner::new(client, template).await.unwrap();
+    let first = reconcile(&provisioner, std::slice::from_ref(&a)).await;
+    assert!(first.failures.is_empty());
+    let path = deployment_path(&first.instances[GATEWAY_A]);
+    provisioner
+        .config
+        .deployment
+        .spec
+        .as_mut()
+        .unwrap()
+        .template
+        .spec
+        .as_mut()
+        .unwrap()
+        .containers[0]
+        .image = Some("sozu:updated".into());
+    anchor_config(&state, &provisioner.config);
+    assert!(reconcile(&provisioner, std::slice::from_ref(&a))
+        .await
+        .failures
+        .is_empty());
+    assert_eq!(
+        state.lock().unwrap().objects[&path]["spec"]["template"]["spec"]["containers"][0]["image"],
+        "sozu:updated"
+    );
+    assert_eq!(state.lock().unwrap().mutations().len(), 4);
+    assert!(reconcile(&provisioner, &[a]).await.failures.is_empty());
+    assert_eq!(state.lock().unwrap().mutations().len(), 4);
 }

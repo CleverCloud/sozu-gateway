@@ -5,7 +5,7 @@
 //! generated resource because a Gateway in another namespace cannot do so.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -66,9 +66,20 @@ pub struct Provisioner {
     client: Client,
     config: ProvisionConfig,
     installation_uid: String,
+    confirmed: Mutex<BTreeMap<(Kind, String), ConfirmedWrite>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A successful write establishes the API server's accepted representation of
+/// this exact template. Quantities and other fields may have been canonicalised
+/// in the response; their original spelling must not cause endless no-op writes.
+struct ConfirmedWrite {
+    uid: String,
+    resource_version: String,
+    gateway_uid: String,
+    template: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     ConfigMap,
     Service,
@@ -127,6 +138,7 @@ impl Provisioner {
             client,
             config,
             installation_uid,
+            confirmed: Mutex::default(),
         };
         provisioner.verify_anchor(&anchor)?;
         Ok(provisioner)
@@ -234,6 +246,10 @@ impl Provisioner {
                 }
             }
         }
+        self.confirmed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, entry| desired.contains(&entry.gateway_uid));
         Ok(outcome)
     }
 
@@ -459,6 +475,7 @@ impl Provisioner {
         // that same value into automatically provisioned Pods.
         metadata["labels"]["app.kubernetes.io/instance"] =
             Value::String(format!("{}_gw", instance.name));
+        metadata["labels"]["app.kubernetes.io/managed-by"] = json!("sozu-gateway");
         metadata["labels"]["sozu.io/gateway-instance"] = Value::String(instance.name.clone());
         if !metadata["annotations"].is_object() {
             metadata["annotations"] = json!({});
@@ -509,10 +526,17 @@ impl Provisioner {
         let name = template["metadata"]["name"]
             .as_str()
             .context("template name missing")?;
+        let cache_key = (kind, name.to_owned());
         for attempt in 0..RETRIES {
             let live = match request(api.get(name)).await {
                 Ok(live) => Some(live),
-                Err(error) if api_code(&error) == Some(404) => None,
+                Err(error) if api_code(&error) == Some(404) => {
+                    self.confirmed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&cache_key);
+                    None
+                }
                 Err(error) => return Err(error),
             };
             let mut desired = template.clone();
@@ -524,6 +548,21 @@ impl Provisioner {
                 if live.metadata.deletion_timestamp.is_some() {
                     bail!("{kind:?} {name} is still being deleted");
                 }
+                let confirmed = self
+                    .confirmed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&cache_key)
+                    .is_some_and(|entry| {
+                        live.metadata.uid.as_deref() == Some(&entry.uid)
+                            && live.metadata.resource_version.as_deref()
+                                == Some(&entry.resource_version)
+                            && entry.gateway_uid == gateway_uid
+                            && entry.template == encoded
+                    });
+                if confirmed {
+                    return Ok(());
+                }
                 if kind == Kind::Service {
                     preserve_service_allocations(&mut desired, &serde_json::to_value(live)?);
                 }
@@ -531,7 +570,7 @@ impl Provisioner {
             if encoded.len() > 128 * 1024 {
                 bail!("provisioning template exceeds the 128 KiB annotation budget");
             }
-            desired["metadata"]["annotations"][LAST_TEMPLATE] = Value::String(encoded);
+            desired["metadata"]["annotations"][LAST_TEMPLATE] = Value::String(encoded.clone());
             let result = if let Some(live) = &live {
                 let live_value = serde_json::to_value(live)?;
                 if subset(&desired, &live_value) {
@@ -555,7 +594,23 @@ impl Provisioner {
                 request(api.create(&PostParams::default(), &object)).await
             };
             match result {
-                Ok(_) => return Ok(()),
+                Ok(written) => {
+                    // Only the server's write response can confirm a version.
+                    // Never mark a rejected write or an arbitrary GET as applied.
+                    let entry = ConfirmedWrite {
+                        uid: written.uid().context("written object has no UID")?,
+                        resource_version: written
+                            .resource_version()
+                            .context("written object has no resourceVersion")?,
+                        gateway_uid: gateway_uid.to_owned(),
+                        template: encoded,
+                    };
+                    self.confirmed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(cache_key.clone(), entry);
+                    return Ok(());
+                }
                 Err(error) if api_code(&error) == Some(409) && attempt + 1 < RETRIES => {}
                 Err(error) => return Err(error),
             }
@@ -599,8 +654,20 @@ impl Provisioner {
         };
         self.check_installation().await?;
         match request(self.api(kind).delete(&object.name_any(), &params)).await {
-            Ok(_) => Ok(()),
-            Err(error) if api_code(&error) == Some(404) => Ok(()),
+            Ok(_) => {
+                self.confirmed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(kind, object.name_any()));
+                Ok(())
+            }
+            Err(error) if api_code(&error) == Some(404) => {
+                self.confirmed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(kind, object.name_any()));
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     }
