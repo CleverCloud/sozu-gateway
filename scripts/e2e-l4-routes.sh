@@ -19,11 +19,15 @@ UDP_PORT=9001
 # Service also covers the piece the exposure table exists for — the Service port
 # mapping onto Sōzu's in-pod bind — which a port-forward to the pod bypasses.
 l4_probe() {
-  local proto="$1" port="$2" payload="$3" target
-  target="socat -T5 - $( [ "$proto" = udp ] && echo UDP-SENDTO || echo TCP ):${RELEASE}.${NS}:${port}"
+  local proto="$1" port="$2" payload="$3" target input=-
+  # Sōzu 2.2.0/2.2.1 closes TCP sessions on a client half-close. Keep the
+  # write side open after printf finishes so the echo can return; -T5 still
+  # bounds the probe if no reply arrives.
+  if [ "$proto" = tcp ]; then input=-,ignoreeof; fi
+  target="socat -T5 $input $( [ "$proto" = udp ] && echo UDP-SENDTO || echo TCP ):${RELEASE}.${NS}:${port}"
   printf '%s\n' "$payload" | kubectl -n "$DEMO_NS" run "probe-${proto}-$RANDOM" \
     --rm -i --quiet --restart=Never --image=alpine/socat:1.8.0.0 \
-    --command -- sh -c "$target" 2>/dev/null | tr -d '\r'
+    --command -- sh -c "$target" | tr -d '\r'
 }
 
 # Release the ports this suite claims, pass or fail. The suites share the demo
