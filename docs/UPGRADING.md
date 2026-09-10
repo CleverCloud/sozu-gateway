@@ -51,6 +51,7 @@ unchanged. Native path precedence and route update limitations are tracked in
 [#80](https://github.com/CleverCloud/sozu-gateway/issues/80).
 
 ---
+
 ## UDP client identity
 
 UDP routes now use both the client IP and source port as the Sōzu flow key.
@@ -62,6 +63,20 @@ Roll out the complete gateway Pods when upgrading. A controller-only restart
 with an unchanged persisted IR does not replace an already installed cluster's
 UDP settings. A Pod rollout recreates the UDP listeners and drops existing flows.
 The persisted IR format is unchanged.
+
+---
+
+## Gateways with infrastructure parameters
+
+A Gateway that sets `spec.infrastructure.parametersRef` is now rejected with
+`Accepted: False` / `InvalidParameters`. No parameter kinds are supported by this
+controller. Earlier versions silently ignored the reference and served its routes
+without applying the requested configuration.
+
+The rejected Gateway contributes no routes or certificates to Sōzu, and its
+listeners report `Programmed: False` with no attached routes. Other Gateways
+continue to be configured. Omit `parametersRef` only when the deployment's
+existing controller and chart configuration is the configuration you intend.
 
 ---
 

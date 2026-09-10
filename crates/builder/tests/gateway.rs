@@ -1513,6 +1513,114 @@ fn standard_gateway_ports_are_accepted_on_unprivileged_binds() {
     assert!(out.routes[0].parents[0].accepted);
 }
 
+fn with_parameters(mut gateway: Gateway, reference: serde_json::Value) -> Gateway {
+    gateway.spec.infrastructure = Some(from_json(json!({ "parametersRef": reference })));
+    gateway
+}
+
+#[test]
+fn unsupported_gateway_parameters_block_routes_and_certificates() {
+    // Even an existing Secret is unsupported as infrastructure configuration;
+    // the rejection must not pretend that a referent lookup failed.
+    for reference in [
+        json!({ "group": "invalid.io", "kind": "InvalidParameters", "name": "invalid" }),
+        json!({ "group": "", "kind": "Secret", "name": "app-tls" }),
+    ] {
+        let inputs = Inputs {
+            gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+            gateways: arcs(vec![with_parameters(https_gateway(), reference)]),
+            http_routes: arcs(vec![route_to_web(false)]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            secrets: arcs(vec![tls_secret()]),
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        let gateway = &out.gateways[0];
+        assert!(!gateway.accepted);
+        assert_eq!(gateway.accepted_reason, "InvalidParameters");
+        assert!(!gateway.programmed);
+        assert!(matches!(
+            gateway.problems.as_slice(),
+            [Problem::GatewayParametersUnsupported { .. }]
+        ));
+        let message = gateway.problems[0].to_string();
+        assert!(message.contains("infrastructure.parametersRef"));
+        assert!(message.contains("not supported"));
+        assert!(!message.contains("not found"));
+        assert!(!gateway.listeners[0].accepted);
+        assert!(!gateway.listeners[0].programmed);
+        assert_eq!(gateway.listeners[0].attached_routes, 0);
+        assert!(!out.routes[0].parents[0].accepted);
+        assert_eq!(
+            out.routes[0].parents[0].accepted_reason,
+            "NotAllowedByListeners"
+        );
+        assert!(out.ir.frontends.is_empty());
+        assert!(out.ir.certificates.is_empty());
+        assert!(out.ir.clusters.is_empty());
+        assert!(out.ir.backends.is_empty());
+    }
+}
+
+#[test]
+fn rejecting_gateway_parameters_preserves_other_gateways() {
+    let mut healthy = https_gateway();
+    healthy.metadata.name = Some("healthy".to_string());
+    let mut healthy_route = route_to_web(false);
+    healthy_route.metadata.name = Some("healthy-route".to_string());
+    healthy_route.spec.parent_refs.as_mut().unwrap()[0].name = "healthy".to_string();
+    let mut inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![healthy.clone()]),
+        http_routes: arcs(vec![healthy_route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret()]),
+        ..Default::default()
+    };
+    let expected = build(&BuildConfig::default(), &inputs);
+    let rejected = with_parameters(
+        https_gateway(),
+        json!({
+            "group": "invalid.io", "kind": "InvalidParameters", "name": "invalid"
+        }),
+    );
+    inputs.http_routes.push(Arc::new(route_to_web(false)));
+    for gateways in [
+        vec![healthy.clone(), rejected.clone()],
+        vec![rejected.clone(), healthy.clone()],
+    ] {
+        inputs.gateways = arcs(gateways);
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(
+            out.ir, expected.ir,
+            "another Gateway's routes and certificates must survive"
+        );
+        let healthy = out.gateways.iter().find(|g| g.name == "healthy").unwrap();
+        assert!(healthy.accepted && healthy.programmed);
+        assert_eq!(healthy.listeners[0].attached_routes, 1);
+    }
+}
+
+#[test]
+fn infrastructure_without_parameters_does_not_reject_the_gateway() {
+    let mut gateway = http_gateway();
+    gateway.spec.infrastructure = Some(from_json(json!({
+        "labels": { "example.com/team": "networking" }
+    })));
+    let out = build(
+        &BuildConfig::default(),
+        &Inputs {
+            gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+            gateways: arcs(vec![gateway]),
+            ..Default::default()
+        },
+    );
+    assert!(out.gateways[0].accepted && out.gateways[0].programmed);
+    assert_eq!(out.gateways[0].accepted_reason, "Accepted");
+}
+
 #[test]
 fn gateway_without_accepted_listeners_is_rejected() {
     let mut gw = http_gateway();
@@ -1785,6 +1893,39 @@ fn l4_inputs(tcp: Vec<TcpRoute>, udp: Vec<UdpRoute>) -> Inputs {
         ]),
         ..Default::default()
     }
+}
+
+#[test]
+fn unsupported_gateway_parameters_block_tcp_and_udp_routes() {
+    let mut inputs = l4_inputs(
+        vec![tcp_route(
+            "db",
+            None,
+            json!([{ "name": "postgres", "port": 5432 }]),
+        )],
+        vec![udp_route("dns")],
+    );
+    inputs.gateways = arcs(vec![with_parameters(
+        l4_gateway(),
+        json!({
+            "group": "invalid.io", "kind": "InvalidParameters", "name": "invalid"
+        }),
+    )]);
+    let out = build(&l4_config(), &inputs);
+    assert!(!out.gateways[0].accepted && !out.gateways[0].programmed);
+    assert_eq!(out.gateways[0].accepted_reason, "InvalidParameters");
+    for listener in &out.gateways[0].listeners {
+        assert!(!listener.accepted && !listener.programmed);
+        assert_eq!(listener.attached_routes, 0);
+    }
+    for route in &out.routes {
+        assert!(!route.parents[0].accepted);
+        assert_eq!(route.parents[0].accepted_reason, "NotAllowedByListeners");
+    }
+    assert_eq!(out.routes.len(), 2);
+    assert!(out.ir.l4_frontends.is_empty());
+    assert!(out.ir.clusters.is_empty());
+    assert!(out.ir.backends.is_empty());
 }
 
 #[test]
