@@ -87,21 +87,25 @@ caught here rather than left to `helm install` to reject obscurely.
   {{- fail "l4.tcpServices/l4.udpServices are removed — layer-4 routing is a TCPRoute or a UDPRoute now. Helm ignores unknown values, so this check exists to stop an upgrade from silently dropping your layer-4 routes. Migration: docs/UPGRADING.md" -}}
 {{- end -}}
 {{- range $proto, $count := $l7 -}}
-  {{- if ne (int $count) 1 -}}
-    {{- fail (printf "exposure must hold exactly one %s entry, found %d: Sōzu's HTTP and HTTPS listeners are declared in config.toml and bound at boot, one per protocol — re-creating one would drop its certificate store, so there is nowhere for a second to come from. Layer-4 (TCP/UDP) entries have no such limit" $proto (int $count)) -}}
+  {{- if lt (int $count) 1 -}}
+    {{- fail (printf "exposure must hold at least one %s entry: the first HTTP and HTTPS entries serve Ingress routes; additional entries serve Gateway API listeners" $proto) -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-The exposure entry serving a given Gateway API protocol, as JSON. Used where a
-template needs one specific listener (Sōzu's static HTTP/HTTPS binds).
+The first exposure entry for a protocol, as JSON. Ingress and health probes
+use the first listener; Gateway API listeners select their advertised port.
 */}}
 {{- define "sozu-gateway.exposureFor" -}}
 {{- $proto := .proto -}}
+{{- $first := dict -}}
 {{- range .root.Values.exposure -}}
-{{- if eq .protocol $proto -}}{{ toJson . }}{{- end -}}
+{{- if and (eq .protocol $proto) (not $first) -}}
+{{- $_ := set $first "entry" . -}}
 {{- end -}}
+{{- end -}}
+{{- with $first.entry -}}{{ toJson . }}{{- end -}}
 {{- end }}
 
 {{/*

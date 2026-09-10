@@ -92,7 +92,7 @@ spec:
             {{- end }}
           readinessProbe:
             tcpSocket:
-              port: http
+              port: {{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTP"))).name }}
             initialDelaySeconds: 2
             periodSeconds: 5
           # Readiness only de-pools the Pod from the Service; a wedged-but-alive
@@ -100,7 +100,7 @@ spec:
           # in line with the controller's below).
           livenessProbe:
             tcpSocket:
-              port: http
+              port: {{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTP"))).name }}
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3

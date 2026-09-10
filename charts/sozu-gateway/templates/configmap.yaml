@@ -30,45 +30,38 @@ data:
     # controller over the command socket and carry their own values.
     {{- include "sozu-gateway.timeouts" . | nindent 4 }}
 
+    {{- range .Values.exposure }}
+    {{- if or (eq .protocol "HTTP") (eq .protocol "HTTPS") }}
     [[listeners]]
-    protocol = "http"
-    address = "0.0.0.0:{{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTP"))).bind }}"
-    {{- with .Values.sozu.hardening.sozuIdHeader }}
-    sozu_id_header = {{ . | quote }}
-    {{- end }}
-    {{- with .Values.sozu.hardening.sendXRealIp }}
-    send_x_real_ip = {{ . }}
-    {{- end }}
-    {{- with .Values.sozu.hardening.elideXRealIp }}
-    elide_x_real_ip = {{ . }}
-    {{- end }}
-
-    [[listeners]]
-    protocol = "https"
-    address = "0.0.0.0:{{ (fromJson (include "sozu-gateway.exposureFor" (dict "root" . "proto" "HTTPS"))).bind }}"
+    protocol = {{ lower .protocol | quote }}
+    address = "0.0.0.0:{{ .bind }}"
+    {{- if eq .protocol "HTTPS" }}
     tls_versions = ["TLS_V12", "TLS_V13"]
-    {{- with .Values.sozu.hardening.sozuIdHeader }}
+    {{- if not (kindIs "invalid" $.Values.sozu.hardening.strictSniBinding) }}
+    strict_sni_binding = {{ $.Values.sozu.hardening.strictSniBinding }}
+    {{- end }}
+    {{- end }}
+    {{- with $.Values.sozu.hardening.sozuIdHeader }}
     sozu_id_header = {{ . | quote }}
     {{- end }}
-    {{- if not (kindIs "invalid" .Values.sozu.hardening.strictSniBinding) }}
-    strict_sni_binding = {{ .Values.sozu.hardening.strictSniBinding }}
-    {{- end }}
-    {{- with .Values.sozu.hardening.sendXRealIp }}
+    {{- with $.Values.sozu.hardening.sendXRealIp }}
     send_x_real_ip = {{ . }}
     {{- end }}
-    {{- with .Values.sozu.hardening.elideXRealIp }}
+    {{- with $.Values.sozu.hardening.elideXRealIp }}
     elide_x_real_ip = {{ . }}
     {{- end }}
-    {{- if .Values.sozu.hardening.hsts.enabled }}
+    {{- if and (eq .protocol "HTTPS") $.Values.sozu.hardening.hsts.enabled }}
     [listeners.hsts]
     enabled = true
-    {{- with .Values.sozu.hardening.hsts.maxAge }}
+    {{- with $.Values.sozu.hardening.hsts.maxAge }}
     max_age = {{ printf "%.0f" (float64 .) }}
     {{- end }}
-    {{- with .Values.sozu.hardening.hsts.includeSubdomains }}
+    {{- with $.Values.sozu.hardening.hsts.includeSubdomains }}
     include_subdomains = {{ . }}
     {{- end }}
-    {{- with .Values.sozu.hardening.hsts.preload }}
+    {{- with $.Values.sozu.hardening.hsts.preload }}
     preload = {{ . }}
+    {{- end }}
+    {{- end }}
     {{- end }}
     {{- end }}

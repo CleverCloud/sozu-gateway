@@ -1991,10 +1991,8 @@ fn an_l4_listener_honours_the_ports_owner() {
 /// picking the first would land a Gateway's routes — and its certificate — on
 /// a port it never declared.
 ///
-/// Two HTTPS entries is more than the chart will render today (Sōzu's static
-/// listeners are one per protocol, so `validateExposure` caps it), but the
-/// builder is what defines the contract: an entry is looked up, not guessed
-/// from the protocol.
+/// The chart renders every configured HTTPS bind. The builder must select
+/// the corresponding entry rather than guessing from the protocol.
 #[test]
 fn a_listener_binds_to_the_entry_serving_its_own_port() {
     let cfg = BuildConfig {
