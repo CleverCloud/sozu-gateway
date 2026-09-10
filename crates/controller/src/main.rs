@@ -2,9 +2,10 @@
 //!
 //! A singleton controller: it maintains reflector caches for Ingress,
 //! IngressClass, Namespace, Service, EndpointSlice and Secret; any change (or a
-//! periodic resync) triggers one debounced **global** reconcile that rebuilds
+//! periodic resync) triggers one **global** reconcile that rebuilds
 //! the whole desired state from the caches, diffs it against the last-applied
 //! shadow `ConfigState`, and pushes only the minimal mutations to Sōzu.
+//! Referenced EndpointSlice changes bypass the debounce used by other watches.
 //!
 //! The pure crates do the work: `builder` (objects → IR), `translator`
 //! (IR → diff → commands), `sozu-agent` (socket I/O). This file is just the
@@ -41,6 +42,7 @@ use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
 
+mod changes;
 mod events;
 mod health;
 mod metrics;
@@ -87,7 +89,8 @@ struct Args {
         default_value = r#"[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]"#
     )]
     exposure: String,
-    /// Debounce window: coalesce bursts of watch events before reconciling.
+    /// Coalesce ordinary watch events before reconciling. Referenced
+    /// EndpointSlice changes bypass this delay.
     #[arg(long, env = "SOZU_GW_DEBOUNCE_MS", default_value = "500")]
     debounce_ms: u64,
     /// Periodic full resync interval in seconds (self-heals any drift). `0`
@@ -192,38 +195,38 @@ fn spawn_watch<K>(
     K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     K::DynamicType: Default + Eq + Hash + Clone + std::fmt::Debug + Unpin,
 {
-    spawn_watch_filtered(api, cfg, writer, tx, kind, |_: &K| true)
+    spawn_watch_notified(api, cfg, writer, kind, move |event: &watcher::Event<K>| {
+        if matches!(
+            event,
+            watcher::Event::Apply(_) | watcher::Event::Delete(_) | watcher::Event::InitDone
+        ) {
+            let _ = tx.try_send(());
+        }
+    })
 }
 
-/// [`spawn_watch`] with a ping predicate: the reflector cache is kept fresh
-/// for **every** event — the filter never touches `.reflect` — but only
-/// objects `relevant` accepts wake the reconcile loop. Used by the
-/// EndpointSlice watch, where churn from unrelated workloads dominates.
-fn spawn_watch_filtered<K, F>(
+/// Keep the reflector cache fresh for every event, then notify the reconcile
+/// loop. The EndpointSlice callback selects the wakeup priority and ignores
+/// unrelated workloads; it never filters the objects entering the cache.
+fn spawn_watch_notified<K, F>(
     api: Api<K>,
     cfg: watcher::Config,
     writer: Writer<K>,
-    tx: mpsc::Sender<()>,
     kind: &'static str,
-    relevant: F,
+    notify: F,
 ) where
     K: Resource + Clone + DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     K::DynamicType: Default + Eq + Hash + Clone + std::fmt::Debug + Unpin,
-    F: Fn(&K) -> bool + Send + 'static,
+    F: Fn(&watcher::Event<K>) + Send + 'static,
 {
-    let stream = watcher(api, cfg)
-        .default_backoff()
-        .reflect(writer)
-        .touched_objects();
+    // Keep InitDone: a relist publishes its complete cache only at that
+    // event, and an empty relist still has to withdraw the previous objects.
+    let stream = watcher(api, cfg).default_backoff().reflect(writer);
     tokio::spawn(async move {
         futures::pin_mut!(stream);
         loop {
             match stream.next().await {
-                Some(Ok(obj)) => {
-                    if relevant(&obj) {
-                        let _ = tx.try_send(());
-                    }
-                }
+                Some(Ok(obj)) => notify(&obj),
                 Some(Err(e)) => warn!(watch = kind, error = %e, "watch error (will retry)"),
                 None => {
                     // The watcher's own backoff means a healthy stream never
@@ -257,6 +260,48 @@ fn slice_pings(referenced: &BTreeSet<String>, slice: &EndpointSlice) -> bool {
         return true;
     }
     sozu_gw_builder::slice_service_key(slice).is_some_and(|key| referenced.contains(&key))
+}
+
+fn notify_slice(
+    referenced: &BTreeSet<String>,
+    slice: &EndpointSlice,
+    changes: &mpsc::Sender<()>,
+    endpoints: &mpsc::Sender<()>,
+) {
+    if slice_pings(referenced, slice) {
+        // An empty index is the conservative startup/no-routes fallback. It
+        // must not make unrelated cluster churn trigger immediate rebuilds.
+        let tx = if referenced.is_empty() {
+            changes
+        } else {
+            endpoints
+        };
+        let _ = tx.try_send(());
+    }
+}
+
+fn notify_slice_event(
+    referenced: &BTreeSet<String>,
+    event: &watcher::Event<EndpointSlice>,
+    changes: &mpsc::Sender<()>,
+    endpoints: &mpsc::Sender<()>,
+) {
+    match event {
+        watcher::Event::Apply(slice) | watcher::Event::Delete(slice) => {
+            notify_slice(referenced, slice, changes, endpoints);
+        }
+        watcher::Event::InitDone => {
+            // The relist can remove previously referenced slices, including
+            // every slice. Wake once after the new cache has been published.
+            let tx = if referenced.is_empty() {
+                changes
+            } else {
+                endpoints
+            };
+            let _ = tx.try_send(());
+        }
+        watcher::Event::Init | watcher::Event::InitApply(_) => {}
+    }
 }
 
 /// Await a store's readiness only when its watcher was actually spawned.
@@ -753,8 +798,11 @@ async fn main() -> Result<()> {
         metrics::spawn(addr, agent.clone(), self_metrics.clone());
     }
 
-    // One signal channel fed by every watcher.
+    // Ordinary changes coalesce for the debounce period. EndpointSlice
+    // changes have their own one-pending signal, so a full ordinary queue
+    // cannot delay a newly ready backend or a withdrawn endpoint.
     let (tx, mut rx) = mpsc::channel::<()>(64);
+    let (endpoint_tx, mut endpoint_rx) = mpsc::channel::<()>(1);
 
     // `namespace/name` of the Services the last build referenced, shared with
     // the EndpointSlice watcher so endpoint churn from unrelated workloads —
@@ -813,15 +861,16 @@ async fn main() -> Result<()> {
     );
     let (endpointslices, w) = reflector::store();
     let ping_set = referenced_services.clone();
-    spawn_watch_filtered::<EndpointSlice, _>(
+    let slice_tx = tx.clone();
+    let slice_endpoint_tx = endpoint_tx.clone();
+    spawn_watch_notified::<EndpointSlice, _>(
         Api::all(client.clone()),
         watch_all(),
         w,
-        tx.clone(),
         "endpointslice",
-        move |slice| {
+        move |event| {
             let set = ping_set.read().unwrap_or_else(|e| e.into_inner());
-            slice_pings(&set, slice)
+            notify_slice_event(&set, event, &slice_tx, &slice_endpoint_tx);
         },
     );
     // Only TLS Secrets are of any use to the builder; watching every Secret in
@@ -1045,15 +1094,12 @@ async fn main() -> Result<()> {
         // Wait for a change signal or the resync tick.
         let mut check_sozu = false;
         tokio::select! {
-            maybe = rx.recv() => {
+            maybe = changes::next(&mut rx, &mut endpoint_rx, debounce) => {
                 // Defensive only: this loop holds its own tx clone (for
                 // self-nudges), so the channel cannot actually close while
                 // we are here. If that invariant is ever broken, exit loudly
                 // rather than spin on a dead channel.
                 if maybe.is_none() { warn!("change channel closed (should be unreachable); exiting"); break; }
-                // Debounce: let a burst settle, then drain the queue.
-                tokio::time::sleep(debounce).await;
-                while rx.try_recv().is_ok() {}
             }
             _ = maybe_tick(resync.as_mut()) => {
                 debug!("periodic resync");
@@ -1227,6 +1273,79 @@ mod tests {
         assert!(slice_pings(&empty, &slice(Some("demo"), Some("web"))));
         assert!(slice_pings(&empty, &slice(Some("demo"), None)));
         assert!(slice_pings(&empty, &slice(None, None)));
+    }
+
+    #[test]
+    fn referenced_slices_use_the_endpoint_channel() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (endpoint_tx, mut endpoint_rx) = mpsc::channel(1);
+        let referenced = set(&["demo/web"]);
+        notify_slice(
+            &referenced,
+            &slice(Some("demo"), Some("web")),
+            &tx,
+            &endpoint_tx,
+        );
+        assert_eq!(endpoint_rx.try_recv(), Ok(()));
+        assert!(rx.try_recv().is_err());
+        notify_slice(
+            &referenced,
+            &slice(Some("other"), Some("web")),
+            &tx,
+            &endpoint_tx,
+        );
+        assert!(endpoint_rx.try_recv().is_err());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn empty_reference_index_keeps_the_ordinary_debounce() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let (endpoint_tx, mut endpoint_rx) = mpsc::channel(1);
+        notify_slice(
+            &BTreeSet::new(),
+            &slice(Some("demo"), Some("web")),
+            &tx,
+            &endpoint_tx,
+        );
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert!(endpoint_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn endpoint_relists_wake_only_after_publishing_the_complete_cache() {
+        let (store, mut writer) = reflector::store();
+        let (tx, mut rx) = mpsc::channel(64);
+        let (endpoint_tx, mut endpoint_rx) = mpsc::channel(1);
+        let referenced = set(&["demo/web"]);
+        let old = slice(Some("demo"), Some("web"));
+        writer.apply_watcher_event(&watcher::Event::Apply(old));
+        let mut replacement = slice(Some("demo"), Some("web"));
+        replacement.metadata.name = Some("slice-2".into());
+
+        for event in [watcher::Event::Init, watcher::Event::InitApply(replacement)] {
+            writer.apply_watcher_event(&event);
+            notify_slice_event(&referenced, &event, &tx, &endpoint_tx);
+            assert_eq!(store.state()[0].metadata.name.as_deref(), Some("slice-1"));
+            assert!(rx.try_recv().is_err());
+            assert!(endpoint_rx.try_recv().is_err());
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        notify_slice_event(&referenced, &watcher::Event::InitDone, &tx, &endpoint_tx);
+        assert_eq!(store.state()[0].metadata.name.as_deref(), Some("slice-2"));
+        assert_eq!(endpoint_rx.try_recv(), Ok(()));
+        assert!(rx.try_recv().is_err());
+
+        // An empty relist must also wake the loop: otherwise the old backend
+        // would remain programmed despite its absence from the fresh cache.
+        for event in [watcher::Event::Init, watcher::Event::InitDone] {
+            writer.apply_watcher_event(&event);
+            notify_slice_event(&referenced, &event, &tx, &endpoint_tx);
+        }
+        assert!(store.state().is_empty());
+        assert_eq!(endpoint_rx.try_recv(), Ok(()));
+        assert!(endpoint_rx.try_recv().is_err());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
