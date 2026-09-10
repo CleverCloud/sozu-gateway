@@ -116,6 +116,9 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   annotations for load balancing, connection limits or retry settings. A rule with one backendRef of positive
   weight keeps its existing Service cluster and annotations. UDP chooses a backend for each new flow;
   datagrams of an established flow keep that choice.
+  Initial UDP validation failed once and passed on an unchanged repeat; see the
+  [weighted backend observations](probes/gateway-weighted-backends_2026-09-10.md).
+  A successful repeat does not guarantee stable distribution during startup.
   HTTP also reuses connected backends before running the load balancer again
   ([Sōzu 2.2.1](https://github.com/sozu-proxy/sozu/blob/2.2.1/lib/src/protocol/kawa_h1/mod.rs#L1693-L1711)).
   Requests on one persistent connection can stay on one Service. The local error responders
