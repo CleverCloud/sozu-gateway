@@ -51,7 +51,8 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
 | Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
-| Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) is rejected (`ZeroWeightBackendUnsupported`): Sōzu cannot express the spec's all-zero-weight 500 |
+| Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) remains unsupported (`ZeroWeightBackendUnsupported`) |
+| Gateway API | Invalid or omitted HTTP `backendRefs` | ✅ | a missing Service/port, disallowed cross-namespace ref or unsupported kind returns HTTP 500 while preserving the match. Invalid refs report `ResolvedRefs: False`; omitted/empty refs report `True`. A resolved Service without ready endpoints retains HTTP 503. Redirects remain independent of backends; multi-backend rules remain unsupported |
 | Gateway API | Weighted multi-`backendRef` split | ❌ | not supported by Sōzu |
 | Gateway API | Header/query matches | ❌ | not supported by Sōzu |
 | Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
@@ -71,6 +72,13 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 
 ## Notes
 
+- **HTTP error responses.** The controller serves a fixed HTTP 500 on loopback,
+  and Sōzu forwards matching rejected rules to it. The port is reserved from TCP
+  exposure (`controller.httpErrorPort`, default `8082`). During a controller
+  restart those requests can return 503 until the responder and Sōzu's backend
+  retries recover; they retain their match instead of falling through to another
+  route. Complete request bodies are discarded within a five-second connection
+  deadline, so malformed, stalled or oversized headers may be closed earlier.
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR

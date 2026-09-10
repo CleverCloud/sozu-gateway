@@ -67,6 +67,20 @@ chart-lint:
     # Both sides of the metrics switch, asserted rather than merely rendered.
     helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN
     ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false | grep -q SOZU_GW_METRICS_LISTEN
+    # The loopback error backend reserves TCP only, including custom ports.
+    helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=18082 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=null > /dev/null
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=0 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=8081 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=9100 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=1024 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=65536 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=1.5 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=8080 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.httpErrorPort=8443 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"reserved","port":18082,"bind":8082,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
+    helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"dns","port":18082,"bind":8082,"protocol":"UDP","transport":"UDP"}]' > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false --set controller.httpErrorPort=9100 > /dev/null
     # The Pod's own ports are not up for grabs by an exposure entry.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1

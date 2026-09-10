@@ -43,6 +43,7 @@ use sozu_gw_translator as tr;
 
 mod events;
 mod health;
+mod http_error;
 mod metrics;
 mod shadow;
 mod status;
@@ -107,6 +108,13 @@ struct Args {
     /// metrics over the command socket on each scrape). Unset disables it.
     #[arg(long, env = "SOZU_GW_METRICS_LISTEN")]
     metrics_listen: Option<SocketAddr>,
+    /// Loopback HTTP 500 backend for HTTPRoute rules with invalid references.
+    #[arg(
+        long,
+        env = "SOZU_GW_HTTP_ERROR_LISTEN",
+        default_value = "127.0.0.1:8082"
+    )]
+    http_error_listen: SocketAddr,
     /// File on the shared volume where the last-applied state is persisted, so a
     /// controller-only restart resumes from it (and prunes orphaned Sōzu state)
     /// instead of re-applying everything. Empty disables persistence.
@@ -532,6 +540,7 @@ async fn reconcile(
         class_is_default: class_is_default(stores, &args.class_name),
         controller_name: args.controller_name.clone(),
         exposure: exposure.to_vec(),
+        http_error_backend: args.http_error_listen,
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
@@ -696,6 +705,41 @@ async fn main() -> Result<()> {
             );
         }
     }
+    validate_http_error_listener(&args, &exposure)?;
+    let mut responder = http_error::ErrorResponder::start(args.http_error_listen)?;
+    info!(address = %responder.address(), "HTTP error backend listening");
+    tokio::select! {
+        result = run(args, exposure) => result,
+        result = responder.wait() => result,
+    }
+}
+
+fn validate_http_error_listener(args: &Args, exposure: &[ExposedPort]) -> Result<()> {
+    let address = args.http_error_listen;
+    let port = address.port();
+    if !address.ip().is_loopback() || port <= 1024 {
+        anyhow::bail!("--http-error-listen must use a loopback address and a port above 1024");
+    }
+    if args.health_listen.port() == port
+        || args
+            .metrics_listen
+            .is_some_and(|address| address.port() == port)
+    {
+        anyhow::bail!("--http-error-listen port {port} is reserved by health or metrics");
+    }
+    if let Some(entry) = exposure
+        .iter()
+        .find(|entry| entry.bind == port && entry.protocol != sozu_gw_builder::ExposedProtocol::Udp)
+    {
+        anyhow::bail!(
+            "exposure entry {:?} binds HTTP error backend port {port}/TCP",
+            entry.name
+        );
+    }
+    Ok(())
+}
+
+async fn run(args: Args, exposure: Vec<ExposedPort>) -> Result<()> {
     info!(
         ports = ?exposure.iter().map(|e| format!("{}={}->{}", e.name, e.port, e.bind)).collect::<Vec<_>>(),
         "exposed ports"
@@ -1192,6 +1236,43 @@ mod tests {
 
     fn set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn http_error_backend_is_loopback_and_cannot_reuse_reserved_tcp_ports() {
+        let defaults = Args::try_parse_from(["controller"]).unwrap();
+        let exposure: Vec<ExposedPort> = serde_json::from_str(&defaults.exposure).unwrap();
+        assert!(validate_http_error_listener(&defaults, &exposure).is_ok());
+        for address in [
+            "0.0.0.0:8082",
+            "10.0.0.1:8082",
+            "127.0.0.1:0",
+            "127.0.0.1:1024",
+        ] {
+            let mut args = defaults.clone();
+            args.http_error_listen = address.parse().unwrap();
+            assert!(
+                validate_http_error_listener(&args, &exposure).is_err(),
+                "{address}"
+            );
+        }
+        let mut args = defaults.clone();
+        args.http_error_listen.set_port(args.health_listen.port());
+        assert!(validate_http_error_listener(&args, &exposure).is_err());
+        args = defaults.clone();
+        args.metrics_listen = Some(args.http_error_listen);
+        assert!(validate_http_error_listener(&args, &exposure).is_err());
+        for protocol in ["HTTP", "HTTPS", "TCP", "UDP"] {
+            let entry: ExposedPort = serde_json::from_value(serde_json::json!({
+                "name": "other", "port": 18082, "bind": 8082, "protocol": protocol
+            }))
+            .unwrap();
+            assert_eq!(
+                validate_http_error_listener(&defaults, &[entry]).is_ok(),
+                protocol == "UDP",
+                "{protocol}"
+            );
+        }
     }
 
     #[test]

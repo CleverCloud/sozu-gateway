@@ -25,6 +25,10 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = "0.3"
+# The loopback error backend handles complete HTTP requests from Sōzu.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 # `start_paused` tests for the resync interval (virtual time, instant runs).
