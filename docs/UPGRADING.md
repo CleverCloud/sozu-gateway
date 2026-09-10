@@ -146,18 +146,26 @@ weights apply when a new flow selects its backend.
 
 ## HTTPRoute collision precedence
 
-HTTPRoutes sharing the same listener, hostname, path and method now select the
-oldest route, then the first alphabetical `namespace/name` on a timestamp tie.
+For HTTPRoute rules that emit frontends on the same listener, hostname, path
+and method, the oldest route wins, then the first alphabetical `namespace/name`
+on a timestamp tie.
 Within one route, the first matching rule wins without marking that route as
 rejected for its own overlap. Backend names and redirects do not influence
 which HTTPRoute wins. Prefixes such as `/api` and `/api/` share one collision
 key, as their trailing slash is insignificant.
 
 A previously colliding route may therefore change backend at the first
-reconcile. The existing Ingress policy remains: Ingress candidates and the
-selected HTTPRoute compete in cluster-id order. Collisions between different
-objects still report the final winner on the losing object's own parent or
-Ingress result. The IR and persisted shadow format are unchanged.
+reconcile. Ingress candidates compete in cluster-id order against the selected
+HTTPRoute. This can change a mixed Ingress/HTTPRoute winner too: an Ingress on
+`demo.m.80`, an older HTTPRoute on `demo.z.80` and a newer one on `demo.a.80`
+now select the Ingress; previously the newer HTTPRoute won.
+
+Rules skipped because of unsupported or unresolved configuration do not reserve
+a route key. A rejection frontend, when emitted, follows the same arbitration
+as a forwarding frontend. Collisions between different objects still report
+the final winner on the losing object's own parent or Ingress result; prefix
+paths in those reports use their canonical spelling. The IR and persisted
+shadow format are unchanged.
 
 ---
 
