@@ -1,9 +1,9 @@
 //! Translator: pure IR → Sōzu protobuf commands.
 //!
-//! Side-effect free and golden-file tested. Two diff strategies, deliberately
-//! split:
-//!  - **Routing graph** (clusters / backends / frontends): we reuse Sōzu's own
-//!    `ConfigState::diff`, so the semantics match the data plane exactly.
+//! Side-effect free and golden-file tested. Routing changes reuse Sōzu's own
+//! `ConfigState::diff`, with two deliberately separate paths:
+//!  - **HTTP/HTTPS frontends**: preserve path precedence in Sōzu's ordered
+//!    lists when adding, removing or repointing routes.
 //!  - **Certificates**: we diff them ourselves, by fingerprint. This (a) lets us
 //!    emit `ReplaceCertificate` for zero-gap rotation, and (b) avoids a
 //!    debug-assert in sozu-command-lib 2.1.0 that fires when `ConfigState::diff`
@@ -19,6 +19,7 @@
 //! the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 
@@ -92,17 +93,20 @@ fn rule(kind: PathRuleKind, value: String) -> PathRule {
 /// also matches `/xx/foo`, so the `^` is load-bearing. `PROTOCOL.md` left this
 /// as an open question; both halves are now measured.
 ///
-/// Two cases stay a plain rule:
-///  - the root `/`, which every target starts with, so `Prefix("/")` is already
-///    exactly right and cheaper than a regex;
-///  - `Exact`/`Regex`, which map one-to-one.
+/// The root `/` stays a plain prefix. Exact paths use a regex too: matching
+/// must ignore the query string, and Sōzu 2.2.1 cannot remove `Equals` rules
+/// because its worker-side `PathRule::eq` has no `Equals` arm. The exact regex
+/// deliberately differs from a prefix regex at the same path, keeping both
+/// routes on separate Sōzu keys. Raw regexes pass through unchanged.
 ///
 /// Kubernetes treats a trailing slash as insignificant (`/foo/` ≡ `/foo`), so it
 /// is trimmed first — otherwise the two spellings of one route would diff
 /// forever.
 fn path_rule(path: &ir::PathMatch) -> PathRule {
     match path {
-        ir::PathMatch::Exact(v) => rule(PathRuleKind::Equals, v.clone()),
+        ir::PathMatch::Exact(v) => {
+            rule(PathRuleKind::Regex, format!("^{}(\\?|$)", regex_escape(v)))
+        }
         ir::PathMatch::Regex(v) => rule(PathRuleKind::Regex, v.clone()),
         ir::PathMatch::Prefix(v) => {
             let trimmed = v.trim_end_matches('/');
@@ -237,6 +241,31 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
         .collect()
 }
 
+type FrontendGroup = (bool, SocketAddr, String);
+type FrontendKey = (FrontendGroup, i32, String, Option<String>);
+
+fn http_frontend(req: &Request) -> Option<(bool, &RequestHttpFrontend)> {
+    match &req.request_type {
+        Some(RequestType::AddHttpFrontend(f)) => Some((false, f)),
+        Some(RequestType::AddHttpsFrontend(f)) => Some((true, f)),
+        _ => None,
+    }
+}
+
+fn frontend_group(tls: bool, f: &RequestHttpFrontend) -> FrontendGroup {
+    // Match the existing HTTPS-before-HTTP command order across independent groups.
+    (!tls, f.address.into(), f.hostname.clone())
+}
+
+fn frontend_key(tls: bool, f: &RequestHttpFrontend) -> FrontendKey {
+    (
+        frontend_group(tls, f),
+        f.path.kind,
+        f.path.value.clone(),
+        f.method.clone(),
+    )
+}
+
 /// HTTP/HTTPS frontend requests, deduplicated a second time on the *emitted*
 /// route key.
 ///
@@ -249,23 +278,53 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
 /// IR, however it was produced, be able to do that. First occurrence wins, as
 /// everywhere else.
 fn http_frontend_requests(ir: &ir::Ir) -> Vec<Request> {
-    let mut seen: BTreeSet<(bool, SocketAddr, String, i32, String, Option<String>)> =
-        BTreeSet::new();
-    unique_frontends(ir)
+    let mut seen = BTreeSet::new();
+    let mut requests: Vec<_> = unique_frontends(ir)
         .into_iter()
-        .filter(|f| {
-            let path = path_rule(&f.path);
-            seen.insert((
-                f.tls,
-                f.listener,
-                f.hostname.clone(),
-                path.kind,
-                path.value,
-                f.method.clone(),
-            ))
-        })
         .map(frontend_request)
-        .collect()
+        .filter(|req| {
+            let (tls, f) = http_frontend(req).expect("a frontend request");
+            seen.insert(frontend_key(tls, f))
+        })
+        .collect();
+
+    // TREE returns immediately for an explicit method on a regex/exact path,
+    // but only remembers a methodless match. Give each methodless path a
+    // variant for the methods used on this host: otherwise GET / can beat a
+    // longer methodless /api even when /api was inserted first. Existing
+    // explicit matches win over these variants on the same route key.
+    let mut methods: BTreeMap<FrontendGroup, BTreeSet<String>> = BTreeMap::new();
+    for req in &requests {
+        let (tls, f) = http_frontend(req).expect("a frontend request");
+        if f.position == RulePosition::Tree as i32 {
+            if let Some(method) = &f.method {
+                methods
+                    .entry(frontend_group(tls, f))
+                    .or_default()
+                    .insert(method.clone());
+            }
+        }
+    }
+    let mut variants = Vec::new();
+    for req in &requests {
+        let (tls, f) = http_frontend(req).expect("a frontend request");
+        if f.method.is_some() || f.position != RulePosition::Tree as i32 {
+            continue;
+        }
+        for method in methods.get(&frontend_group(tls, f)).into_iter().flatten() {
+            let mut variant = f.clone();
+            variant.method = Some(method.clone());
+            if seen.insert(frontend_key(tls, &variant)) {
+                variants.push(if tls {
+                    RequestType::AddHttpsFrontend(variant).into()
+                } else {
+                    RequestType::AddHttpFrontend(variant).into()
+                });
+            }
+        }
+    }
+    requests.extend(variants);
+    canonicalize(requests)
 }
 
 fn certificate_and_key(c: &ir::Certificate) -> CertificateAndKey {
@@ -539,11 +598,43 @@ fn tier(req: &Request) -> u8 {
     }
 }
 
+// A TREE methodless match is remembered until a later matching regex/exact
+// rule replaces it. POST and explicit TREE methods take the first match.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum FrontendPriority {
+    LastMatch((u8, usize)),
+    FirstMatch(Reverse<(u8, usize)>),
+}
+
+fn frontend_order(req: &Request) -> Option<(FrontendGroup, FrontendPriority, bool)> {
+    let (tls, f) = http_frontend(req)?;
+    let kind = match f.path.kind() {
+        PathRuleKind::Equals => 2,
+        // Exact paths compile to a query-or-end boundary, whereas prefixes
+        // also allow a slash. Preserve exact-before-prefix priority after
+        // both have become regexes on the wire.
+        PathRuleKind::Regex if f.path.value.ends_with(r"(\?|$)") => 2,
+        PathRuleKind::Regex => 1,
+        PathRuleKind::Prefix => 0,
+    };
+    // Non-root Kubernetes prefixes are anchored regexes. A nested literal
+    // prefix always has a longer escaped expression, including metacharacters.
+    // Arbitrary implementation-specific regexes get deterministic ordering;
+    // there is no general notion of specificity between those expressions.
+    let specificity = (kind, f.path.value.len());
+    let priority = if f.position == RulePosition::Tree as i32 && f.method.is_none() {
+        FrontendPriority::LastMatch(specificity)
+    } else {
+        FrontendPriority::FirstMatch(Reverse(specificity))
+    };
+    Some((frontend_group(tls, f), priority, f.method.is_none()))
+}
+
 /// Reorder into dependency-safe tiers with a deterministic secondary key.
 fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
     requests.sort_by_cached_key(|req| {
         let key = serde_json::to_string(req).unwrap_or_default();
-        (tier(req), key)
+        (tier(req), frontend_order(req), key)
     });
     requests
 }
@@ -614,6 +705,57 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
             .map_err(|e| TranslatorError::Dispatch(format!("{e}; request was {req:?}")))?;
     }
     Ok(state)
+}
+
+/// Keep the longest desired prefix already present, in order, in each
+/// host/listener group. Sōzu appends frontends, so the remaining suffix must be
+/// removed and re-added: sorting a new /api alone cannot place it before an
+/// existing catch-all /. Pure removals need no re-adds; unchanged groups and
+/// backend-only updates stay put.
+fn ordered_frontend_diff(previous: &ir::Ir, desired: &ir::Ir) -> Vec<Request> {
+    fn groups(ir: &ir::Ir) -> BTreeMap<FrontendGroup, Vec<Request>> {
+        let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for req in http_frontend_requests(ir) {
+            let (tls, f) = http_frontend(&req).expect("a frontend request");
+            groups.entry(frontend_group(tls, f)).or_default().push(req);
+        }
+        groups
+    }
+    let previous = groups(previous);
+    let mut desired = groups(desired);
+    let mut requests = Vec::new();
+    for (key, old) in previous {
+        let new = desired.remove(&key).unwrap_or_default();
+        if old == new {
+            continue;
+        }
+        let mut retained = vec![false; old.len()];
+        let mut cursor = 0;
+        let mut append_from = 0;
+        for wanted in &new {
+            let Some(offset) = old[cursor..].iter().position(|req| req == wanted) else {
+                break;
+            };
+            cursor += offset;
+            retained[cursor] = true;
+            cursor += 1;
+            append_from += 1;
+        }
+        for (req, keep) in old.into_iter().zip(retained) {
+            if keep {
+                continue;
+            }
+            let remove = match req.request_type {
+                Some(RequestType::AddHttpFrontend(f)) => RequestType::RemoveHttpFrontend(f),
+                Some(RequestType::AddHttpsFrontend(f)) => RequestType::RemoveHttpsFrontend(f),
+                _ => unreachable!("only HTTP/HTTPS frontend groups"),
+            };
+            requests.push(remove.into());
+        }
+        requests.extend(new.into_iter().skip(append_from));
+    }
+    requests.extend(desired.into_values().flatten());
+    requests
 }
 
 /// Minimal certificate requests to converge `previous` → `desired`. Identity is
@@ -714,12 +856,22 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
     canonicalize(requests)
 }
 
-/// Minimal, dependency-safe requests to converge a `previous` applied IR towards
+/// Dependency-safe requests to converge a `previous` applied IR towards
 /// the `desired` IR. Idempotent: `reconcile(&ir, &ir)` is empty. The controller
 /// keeps `previous` as its shadow and swaps it to `desired` only after a
 /// successful apply.
 pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, TranslatorError> {
     let mut requests = routing_state(previous)?.diff(&routing_state(desired)?);
+    requests.retain(|req| {
+        !matches!(
+            req.request_type,
+            Some(RequestType::AddHttpFrontend(_))
+                | Some(RequestType::AddHttpsFrontend(_))
+                | Some(RequestType::RemoveHttpFrontend(_))
+                | Some(RequestType::RemoveHttpsFrontend(_))
+        )
+    });
+    requests.extend(ordered_frontend_diff(previous, desired));
     requests.extend(certificate_requests(
         &previous.certificates,
         &desired.certificates,

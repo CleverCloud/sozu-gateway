@@ -4,6 +4,31 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## HTTP path precedence
+
+Exact paths now take precedence over prefixes, and longer prefixes over shorter
+ones, including hostname-less routes. Method matches break ties only after path
+specificity. This applies to both initial programming and later route changes.
+
+Roll the gateway Pods when adopting this controller. The normal controller-image
+rollout restarts both containers and installs the ordered routes from scratch.
+Restarting only the controller can preserve the old order in Sōzu: the persisted
+shadow has no routing-order version. The shadow's JSON format is unchanged.
+Exact paths now use an anchored regex so queries do not prevent a match and
+routes can be removed: Sōzu 2.2.1 cannot remove its old `Equals` rules. Rolling
+the Pods also purges those rules. Roll both containers when downgrading too,
+since an older controller cannot infer the new regex keys from the saved IR.
+
+When adding or repointing a route would change precedence, the controller
+replaces the affected suffix of that host/listener's ordered frontends. Pure
+removals, other hosts/listeners and backend-only updates avoid these re-adds.
+Sōzu has no atomic list replacement, so the replaced routes have a routing gap
+during the remove/add sequence. Named-host rules can also gain method-specific variants
+to preserve path precedence under Sōzu's TREE lookup semantics. Arbitrary regex
+paths retain deterministic ordering, without a promised specificity relation.
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's
