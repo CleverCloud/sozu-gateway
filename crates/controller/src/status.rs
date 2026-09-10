@@ -418,6 +418,17 @@ async fn write_gateway(
     Ok(())
 }
 
+/// Only address-bearing Service types can make publication a readiness gate.
+/// NodePort deployments retain listener-only status until node address
+/// publication is supported.
+pub(crate) fn published_gateway_addresses(svc: &Service) -> Option<Vec<GatewayStatusAddresses>> {
+    matches!(
+        svc.spec.as_ref().and_then(|s| s.type_.as_deref()),
+        Some("LoadBalancer" | "ClusterIP")
+    )
+    .then(|| gateway_addresses(svc))
+}
+
 /// Map the publish Service's load-balancer address(es) to Gateway status
 /// addresses (`IPAddress` for an IP, `Hostname` otherwise).
 pub(crate) fn gateway_addresses(svc: &Service) -> Vec<GatewayStatusAddresses> {
@@ -1196,6 +1207,23 @@ mod tests {
         assert!(addrs
             .iter()
             .any(|a| a.r#type.as_deref() == Some("Hostname") && a.value == "lb.example.com"));
+    }
+
+    #[test]
+    fn only_supported_service_types_wait_for_an_address() {
+        for (kind, expected) in [
+            ("LoadBalancer", Some(0)),
+            ("ClusterIP", Some(0)),
+            ("NodePort", None),
+            ("ExternalName", None),
+        ] {
+            let service: Service = serde_json::from_value(json!({"spec": {"type": kind}})).unwrap();
+            assert_eq!(
+                published_gateway_addresses(&service).map(|a| a.len()),
+                expected,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
