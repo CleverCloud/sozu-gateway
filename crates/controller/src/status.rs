@@ -418,10 +418,20 @@ async fn write_gateway(
     Ok(())
 }
 
-/// Only address-bearing Service types can make publication a readiness gate.
-/// NodePort deployments retain listener-only status until node address
-/// publication is supported.
-pub(crate) fn published_gateway_addresses(svc: &Service) -> Option<Vec<GatewayStatusAddresses>> {
+/// A configured publish Service must reach the cache before the Gateway can
+/// claim its address is ready. Once observed, only address-bearing Service
+/// types make publication a readiness gate; NodePort keeps listener-only status
+/// until node address publication is supported.
+pub(crate) fn published_gateway_addresses(
+    configured: bool,
+    svc: Option<&Service>,
+) -> Option<Vec<GatewayStatusAddresses>> {
+    if !configured {
+        return None;
+    }
+    let Some(svc) = svc else {
+        return Some(vec![]);
+    };
     matches!(
         svc.spec.as_ref().and_then(|s| s.type_.as_deref()),
         Some("LoadBalancer" | "ClusterIP")
@@ -1210,18 +1220,42 @@ mod tests {
     }
 
     #[test]
-    fn only_supported_service_types_wait_for_an_address() {
-        for (kind, expected) in [
-            ("LoadBalancer", Some(0)),
-            ("ClusterIP", Some(0)),
-            ("NodePort", None),
-            ("ExternalName", None),
+    fn configured_publication_waits_for_its_service_and_address() {
+        for (configured, service, expected) in [
+            (false, None, None),
+            (true, None, Some(vec![])),
+            (
+                true,
+                Some(json!({"spec": {"type": "LoadBalancer"}})),
+                Some(vec![]),
+            ),
+            (
+                true,
+                Some(json!({"spec": {"type": "ClusterIP"}})),
+                Some(vec![]),
+            ),
+            (true, Some(json!({"spec": {"type": "NodePort"}})), None),
+            (true, Some(json!({"spec": {"type": "ExternalName"}})), None),
+            (
+                true,
+                Some(json!({"spec": {"type": "ClusterIP", "clusterIP": "10.0.0.4"}})),
+                Some(vec!["10.0.0.4".to_string()]),
+            ),
+            (
+                true,
+                Some(
+                    json!({"spec": {"type": "LoadBalancer"}, "status": {"loadBalancer": {"ingress": [{"ip": "198.51.100.4"}]}}}),
+                ),
+                Some(vec!["198.51.100.4".to_string()]),
+            ),
         ] {
-            let service: Service = serde_json::from_value(json!({"spec": {"type": kind}})).unwrap();
+            let service: Option<Service> =
+                service.map(|value| serde_json::from_value(value).unwrap());
             assert_eq!(
-                published_gateway_addresses(&service).map(|a| a.len()),
+                published_gateway_addresses(configured, service.as_ref())
+                    .map(|addresses| addresses.into_iter().map(|a| a.value).collect::<Vec<_>>()),
                 expected,
-                "{kind}"
+                "configured={configured}, service={service:?}"
             );
         }
     }
