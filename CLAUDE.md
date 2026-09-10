@@ -158,10 +158,12 @@ header/query matches, TLS passthrough) is reported as a `Problem` and skipped, n
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
 `RequestRedirect` (scheme + status) compile into per-frontend `ir::FrontendFilters`, which the
-translator maps onto Sōzu's frontend fields. Two honesty rules hold: Sōzu has no header *append* so
-a Gateway `add` is applied as a set; and unsupported sub-fields (redirect host/path/port,
-`RequestMirror`) are reported, never half-applied. A `RequestRedirect` rule has no `backendRef` (the
-API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
+translator maps onto Sōzu's frontend fields. A non-empty header value appends; an empty value
+deletes. Gateway `set` therefore emits a deletion followed by an append on the same frontend,
+while `add` appends and `remove` deletes. Empty Gateway `set`/`add` values are refused with
+`Accepted=False`, `UnsupportedValue`, because they would otherwise become deletions. Unsupported
+sub-fields (`RequestMirror`, for example) are reported, never half-applied. A `RequestRedirect`
+rule has no `backendRef` (the API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
 `Option<String>`. **`URLRewrite` and redirect host/path/port targets are reported, not wired** — and
 that is a *choice*, not a Sōzu limit. Both were measured working on Sōzu 2.2.0
 ([PROTOCOL.md §13](PROTOCOL.md), [docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also
