@@ -31,9 +31,17 @@ provided Service field replaces that field from the release, including maps:
 Use a LoadBalancer Service for a public Gateway address. ClusterIP Services can
 publish their internal addresses for in-cluster clients; a pending LoadBalancer
 never publishes its ClusterIP as an external address. A configured publish
-Service without an assigned address keeps the Gateway `Programmed=False` with
-`AddressNotAssigned`, even if the local listeners are ready. Deployments without
-a publish Service retain their existing listener-based programming status.
+LoadBalancer or ClusterIP Service without an assigned address keeps the Gateway
+`Programmed=False` with `AddressNotAssigned`, even if the local listeners are
+ready. NodePort and ExternalName Services, missing publish Services and
+deployments without a publish Service retain listener-based programming status;
+node address publication is not implemented.
+
+Instance Pods use `app.kubernetes.io/instance: <release>_gateway` together with
+`sozu.io/gateway-instance: <instance>`. User-managed NetworkPolicies and monitors
+that select only the default release label need selectors for these Pods too.
+Route status parents owned by this controller are sorted consistently across
+instances, which can cause a one-time reorder when upgrading.
 
 Creating, removing or retargeting an entry moves the Gateway to a different
 address. Allow for LoadBalancer provisioning and update DNS or clients; this

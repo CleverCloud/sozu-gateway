@@ -628,9 +628,7 @@ async fn reconcile(
                     && s.metadata.name.as_deref() == Some(name)
             })
         });
-    let gw_addresses = publish_svc
-        .map(|s| status::gateway_addresses(s))
-        .unwrap_or_default();
+    let gw_addresses = publish_svc.and_then(|s| status::published_gateway_addresses(s));
 
     // Skippable for least-privilege deployments running without the
     // gateways/status RBAC grants, where every write would 403.
@@ -647,9 +645,7 @@ async fn reconcile(
             &out.gateway_classes,
             &out.gateways,
             &route_updates,
-            args.publish_service
-                .as_ref()
-                .map(|_| gw_addresses.as_slice()),
+            gw_addresses.as_deref(),
             &args.gateway_scope,
         )
         .await;
