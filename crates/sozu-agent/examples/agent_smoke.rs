@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
         frontends: vec![
             ir::Frontend {
                 hostname: host.clone(),
+                multi_label_wildcard: false,
                 path: ir::PathMatch::Prefix("/".into()),
                 method: None,
                 cluster_id: Some(cluster_id.clone()),
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
             },
             ir::Frontend {
                 hostname: host.clone(),
+                multi_label_wildcard: false,
                 path: ir::PathMatch::Prefix("/".into()),
                 method: None,
                 cluster_id: Some(cluster_id.clone()),

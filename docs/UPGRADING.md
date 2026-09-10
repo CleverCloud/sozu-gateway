@@ -4,6 +4,28 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Gateway wildcard hostnames
+
+Gateway listener and HTTPRoute wildcards now match one or more labels:
+`*.example.com` covers both `a.example.com` and `a.b.example.com`, never the
+bare `example.com`. Route/listener intersection keeps the narrower hostname.
+Exact hosts take precedence over wildcards, and longer wildcard suffixes over
+shorter ones, before path and method selection. Ingress wildcards and TLS
+certificate names still match a single label; a routing wildcard does not
+make a certificate valid for additional hostnames.
+
+The shadow gains a defaulted `multi_label_wildcard` frontend field. Existing
+shadows retain the old single-label meaning, allowing the first reconcile to
+remove the old Gateway wildcard keys and install their replacements. These
+routing rules move to Sōzu's POST list, where an update can require re-adding
+later wildcards or the catch-all on the same listener. There is a brief routing
+gap during that remove/add sequence; certificate names are unchanged.
+
+Roll both the controller and Sōzu when downgrading. Older controllers ignore
+the new field and cannot reconstruct the regex hostname keys to prune them.
+
+---
+
 ## HTTP path precedence
 
 Exact paths now take precedence over prefixes, and longer prefixes over shorter

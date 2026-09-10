@@ -2244,3 +2244,111 @@ fn a_redirect_combined_with_url_rewrite_is_refused() {
         .any(|p| matches!(p, Problem::FilterUnsupported { kind }
             if kind.contains("combined with RequestRedirect"))));
 }
+
+#[test]
+fn gateway_wildcards_intersect_across_multiple_labels() {
+    // The multilevel cases from HTTPRouteHostnameIntersection and
+    // HTTPRouteListenerHostnameMatching must survive both intersection and IR.
+    for (listener, route, expected, wildcard) in [
+        (
+            "*.wildcard.io",
+            Some("foo.bar.wildcard.io"),
+            "foo.bar.wildcard.io",
+            false,
+        ),
+        (
+            "foo.bar.wildcard.io",
+            Some("*.wildcard.io"),
+            "foo.bar.wildcard.io",
+            false,
+        ),
+        (
+            "*.wildcard.io",
+            Some("*.bar.wildcard.io"),
+            "*.bar.wildcard.io",
+            true,
+        ),
+        (
+            "*.bar.wildcard.io",
+            Some("*.wildcard.io"),
+            "*.bar.wildcard.io",
+            true,
+        ),
+        (
+            "*.anotherwildcard.io",
+            Some("*.anotherwildcard.io"),
+            "*.anotherwildcard.io",
+            true,
+        ),
+        ("*.foo.com", None, "*.foo.com", true),
+    ] {
+        let gw: Gateway = from_json(json!({
+            "metadata": { "name": "gw", "namespace": "demo" },
+            "spec": { "gatewayClassName": "sozu", "listeners": [
+                { "name": "http", "protocol": "HTTP", "port": 80, "hostname": listener }
+            ]}
+        }));
+        let route: HttpRoute = from_json(json!({
+            "metadata": { "name": "route", "namespace": "demo" },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": route.map(|h| vec![h]),
+                "rules": [{ "backendRefs": [{ "name": "web", "port": 80 }] }]
+            }
+        }));
+        let inputs = Inputs {
+            gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+            gateways: arcs(vec![gw]),
+            http_routes: arcs(vec![route]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1, "{expected}: {:?}", out.routes);
+        assert_eq!(out.ir.frontends[0].hostname, expected);
+        assert_eq!(out.ir.frontends[0].multi_label_wildcard, wildcard);
+        assert!(out.routes[0].parents[0].accepted);
+        assert!(out.routes[0].parents[0].problems.is_empty());
+        assert_eq!(out.gateways[0].listeners[0].attached_routes, 1);
+    }
+}
+
+#[test]
+fn gateway_and_ingress_wildcards_do_not_collapse_into_one_route() {
+    let ingress: Ingress = from_json(json!({
+        "metadata": { "name": "web", "namespace": "demo" },
+        "spec": { "ingressClassName": "sozu", "rules": [{
+            "host": "*.example.com",
+            "http": { "paths": [{ "path": "/", "pathType": "Prefix",
+                "backend": { "service": { "name": "web", "port": { "number": 80 } } } }] }
+        }]}
+    }));
+    let mut route = route_to_web(false);
+    route.spec.hostnames = Some(vec!["*.example.com".into()]);
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress]),
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![http_gateway()]),
+        http_routes: arcs(vec![route]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.frontends.len(), 2);
+    assert_eq!(
+        out.ir
+            .frontends
+            .iter()
+            .filter(|f| f.multi_label_wildcard)
+            .count(),
+        1
+    );
+    assert!(out
+        .ir
+        .frontends
+        .iter()
+        .all(|f| f.hostname == "*.example.com"));
+    assert!(out.routes[0].parents[0].accepted);
+}
