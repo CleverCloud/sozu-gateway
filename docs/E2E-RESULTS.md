@@ -355,8 +355,10 @@ a conditions-only guard would compute the new list and never write it.
 - **No HTTP 500.** Sōzu's answers are 301/400/401/404/408/413/421/429/502/503/504/507; an invalid
   `backendRef` yields 503, but the spec/tests want exactly 500 → the `HTTPRouteInvalid*BackendRef` /
   `*ReferenceGrant` / `…PartiallyInvalid…` traffic checks.
-- **No weighted split** (`HTTPRouteWeight`) and **no header/query-value matching**
-  (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+- **No header/query-value matching** (`HTTPRouteHeaderMatching`, parts of `HTTPRouteMatching`).
+  The weighted-split failures in the historical runs predate the current compiler's normalized
+  Random clusters. Those reports remain unchanged; exact proportional HTTP 500 responses for
+  invalid weighted references are still unsupported (see [features](features.md)).
 - **Header `set` appends instead of replacing.** Gateway `set` must overwrite an existing header,
   but the deployed `clevercloud/sozu:2.2.0` data plane appends — a client sending `X-Env: staging`
   into a route that sets `X-Env: prod` reaches the backend with both — so

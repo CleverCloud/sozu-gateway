@@ -153,8 +153,14 @@ index (a cluster-wide Namespace watch, labels only); a selector this build *cann
 fails closed and is reported. Gateway listeners map to the static listeners by protocol and must
 declare the **advertised** ports (default `80`/`443`, `--gateway-http(s)-port` — the Service's
 client-facing ports, wired by the chart; a mismatch is rejected with `PortUnavailable`); cross-ns
-refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
-header/query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated.
+refs are gated on ReferenceGrant. Weighted backendRefs use a content-identified Random cluster,
+normalizing Service shares across ready endpoints and merging identical addresses. Zero-weight
+references are validated but never programmed. Invalid or unavailable targets redistribute their
+share to valid ready endpoints; exact proportional HTTP 500 responses remain unsupported.
+An all-zero rule retains an isolated empty cluster so it never forwards to a drained backend
+(HTTP 503 for now). A rule with one backendRef of positive weight retains its Service cluster
+and annotations.
+Anything Sōzu cannot represent (header/query matches, TLS passthrough) is reported as a `Problem`.
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
 `RequestRedirect` (scheme + status) compile into per-frontend `ir::FrontendFilters`, which the
@@ -204,7 +210,7 @@ reproduction in [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6, reports in
 the `Selector` implementation, when the suite **aborted in setup** because
 `NamespacesMustBeReady` demands every base Gateway be `Programmed: True` and one of them uses
 `from: Selector`; those rows are conditioned and must never be quoted bare. The profile **cannot
-fully pass** on Sōzu (no weighted splits or header/query matching), so don't chase
+fully pass** on Sōzu (no header/query matching), so don't chase
 the "Conformant" badge — and don't read the recorded failures as regressions.
 `GatewayClass.status.supportedFeatures` is published **empty** on purpose: an entry goes in only
 when a recorded run shows its tests passing. [docs/features.md](docs/features.md) is the

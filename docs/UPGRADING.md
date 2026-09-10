@@ -4,6 +4,32 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Weighted Gateway backendRefs
+
+HTTPRoute, TCPRoute and UDPRoute rules with multiple backendRefs now route according to their
+Service weights. Previously those rules were rejected. Audit existing objects that were left in
+that rejected state: upgrading the controller can start serving them without a manifest change.
+A rule with one backendRef of positive weight keeps its existing Service cluster and policy.
+
+Composite rules use separate Random clusters, with stable identities derived from their reference
+sets, source namespace and route kind rather than rule positions or endpoint counts. They do not inherit individual Service
+annotations for sticky sessions, load balancing, connection limits or retry settings. Endpoint
+changes reweight the existing backend addresses without changing the cluster. Identical endpoint
+addresses shared by references become one backend.
+
+Weight-zero references remain validated, including ReferenceGrant, but their endpoints are never
+programmed. An entirely drained rule still matches an isolated empty cluster: HTTP returns 503
+rather than Gateway API's required 500, and layer-4 traffic is not forwarded. Invalid references
+or missing ready endpoints redistribute their share to the remaining usable targets; proportional
+HTTP 500 behavior is not implemented. See [the support matrix](features.md) for the full limits.
+
+The IR schema is unchanged. No persisted-shadow migration or Sōzu upgrade is required. An older
+controller still reads the shadow and removes composite clusters on its next reconcile, reverting
+to its former refusal of weighted rules. Existing connections may outlive a weight change; UDP
+weights apply when a new flow selects its backend.
+
+---
+
 ## HTTPRoute backend errors return HTTP 500
 
 Rules with missing, forbidden or unsupported backend references now keep their

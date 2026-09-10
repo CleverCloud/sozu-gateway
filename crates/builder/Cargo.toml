@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Reuse Sōzu's PEM chain splitter for TLS Secret handling (no socket I/O).
 sozu-command-lib = { workspace = true }
+sha2 = "0.11"
 
 [dependencies.k8s-openapi]
 version = "0.28"

@@ -12,15 +12,14 @@
 //!    its `certificateRefs` (Terminate only);
 //!  - `HTTPRoute` attached by `parentRef` (optional `sectionName`), with path
 //!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
-//!    one Service `backendRef` or a redirect-only rule (no backend);
+//!    weighted Service `backendRefs` or a redirect-only rule (no backend);
 //!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
 //!    RequestRedirect (scheme + status);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
-//! Not yet: header/query matches, weighted multi-backend split (incl. a
-//! single weight-0 drain), rule timeouts, per-backendRef filters, TLS
+//! Not yet: header/query matches, rule timeouts, per-backendRef filters, TLS
 //! Passthrough, RequestMirror, redirect host/path/port, and URLRewrite.
-//! Header/query match and weighted split are Sōzu hard limits; the last two are
+//! Header/query matches are a Sōzu limit; the last two are
 //! merely unwired — both were measured working on Sōzu 2.2.0 (PROTOCOL.md §13),
 //! with two conditions any wiring owes first: a literal `$` in a rewrite value
 //! makes Sōzu reject the frontend outright (and translation is all-or-nothing),
@@ -41,10 +40,12 @@ use sozu_gw_gateway_api::httproute::{
 use sozu_gw_gateway_api::{TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
 
+mod weighted;
+
 use crate::selector::NamespaceSelector;
 use crate::{
-    add_service_route, extract_cert, meta_nn, BuildConfig, ExposedProtocol, FingerprintedCert,
-    FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
+    extract_cert, meta_nn, BuildConfig, ExposedProtocol, FingerprintedCert, FrontendSource, Index,
+    Inputs, Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -916,7 +917,6 @@ fn attach_rule(
     resolved_refs_reason: &mut &'static str,
     accepted_override: &mut Option<&'static str>,
 ) {
-    // backendRefs: exactly one Service backend (Sōzu cannot weight-split).
     // Parse the route filters into IR filters (Phase 3). Unsupported filters /
     // sub-fields are reported and skipped, never silently mis-applied.
     let ParsedFilters {
@@ -943,104 +943,49 @@ fn attach_rule(
         problems.push(Problem::TimeoutsUnsupported);
     }
 
-    // Resolve the backend. A redirect-only rule has no backendRefs (the Gateway
-    // API even forbids combining RequestRedirect with backendRefs), so it yields
-    // a frontend with no cluster; otherwise exactly one Service backendRef is
-    // required (Sōzu cannot weight-split across clusters).
-    let refs: Vec<_> = rule.backend_refs.iter().flatten().collect();
-    let cluster_id: Option<String> = if refs.is_empty() {
-        if filters.redirect.is_some() {
-            None
-        } else {
-            // No references means none failed to resolve. Matching requests
-            // still require a 500, rather than falling through to another rule.
-            Some(HTTP_ERROR_CLUSTER.to_string())
-        }
-    } else if refs.len() > 1 {
-        problems.push(Problem::WeightedBackendsUnsupported);
-        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-        return;
-    } else {
-        let br = refs[0];
-        // Weight-based draining remains unsupported. Skip it rather than
-        // serving a drained backend; a positive weight on one ref is 100%.
-        // Keep the unsupported weight visible in status as well as Problems.
-        if br.weight == Some(0) {
-            problems.push(Problem::ZeroWeightBackendUnsupported {
-                service: br.name.clone(),
-            });
-            fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-            return;
-        }
-        let cluster = (|| {
-            let is_service = br.group.as_deref().unwrap_or("").is_empty()
-                && br.kind.as_deref().unwrap_or("Service") == "Service";
-            if !is_service {
-                problems.push(Problem::NonServiceBackend);
-                fail_ref(resolved_refs, resolved_refs_reason, "InvalidKind");
-                return None;
-            }
-            // Per-backendRef filters have no Sōzu equivalent (filters wire onto
-            // the frontend, at rule level). RequestMirror precedent: report the
-            // unsupported piece and route without it, never half-apply it.
+    // Redirect-only rules have no cluster. Other rules share the same backend
+    // resolver as TCPRoute and UDPRoute, including per-Service weighted splits.
+    let refs: Vec<_> = rule
+        .backend_refs
+        .iter()
+        .flatten()
+        .map(|br| {
             if br.filters.as_ref().is_some_and(|f| !f.is_empty()) {
                 problems.push(Problem::FilterUnsupported {
                     kind: format!("filters on backendRef {}", br.name),
                 });
             }
-            let backend_ns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
-            if backend_ns != route_ns
-                && !reference_granted(
-                    inputs,
-                    &backend_ns,
-                    "",
-                    "Service",
-                    &br.name,
-                    route_ns,
-                    GW_GROUP,
-                    "HTTPRoute",
-                )
-            {
-                problems.push(Problem::BackendRefNotPermitted {
-                    reference: format!("Service {backend_ns}/{}", br.name),
-                });
-                fail_ref(resolved_refs, resolved_refs_reason, "RefNotPermitted");
-                return None;
+            BackendRefView {
+                group: br.group.clone(),
+                kind: br.kind.clone(),
+                name: br.name.clone(),
+                namespace: br.namespace.clone(),
+                port: br.port,
+                weight: br.weight,
             }
-            let Some(port) = br.port else {
-                problems.push(Problem::ServicePortNotFound {
-                    service: br.name.clone(),
-                    port: "<unspecified>".to_string(),
-                });
-                fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-                return None;
-            };
-            match add_service_route(
-                index,
-                clusters,
-                backends,
-                referenced,
-                &backend_ns,
-                &br.name,
-                &PortRef::Number(port),
-                problems,
-            ) {
-                Err(problem) => {
-                    problems.push(problem);
-                    fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-                    None
-                }
-                Ok((cid, has_endpoints)) => {
-                    if !has_endpoints {
-                        problems.push(Problem::NoReadyEndpoints {
-                            service: br.name.clone(),
-                        });
-                    }
-                    Some(cid)
-                }
-            }
-        })();
-        Some(cluster.unwrap_or_else(|| HTTP_ERROR_CLUSTER.to_string()))
+        })
+        .collect();
+    let cluster_id = if refs.is_empty() {
+        if filters.redirect.is_some() {
+            None
+        } else {
+            Some(HTTP_ERROR_CLUSTER.to_string())
+        }
+    } else {
+        let id = weighted::resolve_backend_refs(
+            inputs,
+            index,
+            clusters,
+            backends,
+            referenced,
+            route_ns,
+            "HTTPRoute",
+            &refs,
+            problems,
+            resolved_refs,
+            resolved_refs_reason,
+        );
+        Some(id.unwrap_or_else(|| HTTP_ERROR_CLUSTER.to_string()))
     };
 
     // Reduce the rule's matches to (path, method) pairs. No `matches` means
@@ -1460,7 +1405,7 @@ struct L4RouteView {
     /// should not lose its port to one whose age we cannot establish.
     creation: Option<String>,
     parent_refs: Vec<L4ParentRefView>,
-    backend_refs: Vec<L4BackendRefView>,
+    backend_refs: Vec<BackendRefView>,
 }
 
 struct L4ParentRefView {
@@ -1472,7 +1417,7 @@ struct L4ParentRefView {
     section_name: Option<String>,
 }
 
-struct L4BackendRefView {
+struct BackendRefView {
     group: Option<String>,
     kind: Option<String>,
     name: String,
@@ -1518,7 +1463,7 @@ impl L4RouteView {
                 .rules
                 .iter()
                 .flat_map(|r| r.backend_refs.iter())
-                .map(|b| L4BackendRefView {
+                .map(|b| BackendRefView {
                     group: b.group.clone(),
                     kind: b.kind.clone(),
                     name: b.name.clone(),
@@ -1558,7 +1503,7 @@ impl L4RouteView {
                 .rules
                 .iter()
                 .flat_map(|r| r.backend_refs.iter())
-                .map(|b| L4BackendRefView {
+                .map(|b| BackendRefView {
                     group: b.group.clone(),
                     kind: b.kind.clone(),
                     name: b.name.clone(),
@@ -1596,109 +1541,6 @@ struct L4Claim {
     /// Tie-break: oldest `creationTimestamp` first (absent last), then
     /// `namespace/name`.
     order: (bool, String, String),
-}
-
-/// Resolve one layer-4 route's backendRef down to a cluster id.
-///
-/// Every rejection here is one HTTPRoute already knows: Sōzu cannot weight a
-/// split, cannot drain by weight, and dials Services only. They apply
-/// unchanged at layer 4 — `weight: 0` especially, which is easy to forget
-/// because there is no traffic-shaping story down here to remind you of it.
-#[allow(clippy::too_many_arguments)]
-fn resolve_l4_backend(
-    inputs: &Inputs,
-    index: &Index,
-    clusters: &mut BTreeMap<String, ir::Cluster>,
-    backends: &mut BTreeMap<String, ir::Backend>,
-    referenced: &mut BTreeSet<String>,
-    view: &L4RouteView,
-    problems: &mut Vec<Problem>,
-    resolved_refs: &mut bool,
-    resolved_refs_reason: &mut &'static str,
-) -> Option<String> {
-    if view.backend_refs.len() > 1 {
-        problems.push(Problem::WeightedBackendsUnsupported);
-        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-        return None;
-    }
-    // The CRD requires at least one backendRef; an empty list means the object
-    // predates that validation or reached us some other way. There is no
-    // redirect-style backend-less rule at layer 4, so there is nothing to route.
-    let Some(br) = view.backend_refs.first() else {
-        problems.push(Problem::NoReadyEndpoints {
-            service: "<none>".to_string(),
-        });
-        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-        return None;
-    };
-    let is_service = br.group.as_deref().unwrap_or("").is_empty()
-        && br.kind.as_deref().unwrap_or("Service") == "Service";
-    if !is_service {
-        problems.push(Problem::NonServiceBackend);
-        fail_ref(resolved_refs, resolved_refs_reason, "InvalidKind");
-        return None;
-    }
-    if br.weight == Some(0) {
-        problems.push(Problem::ZeroWeightBackendUnsupported {
-            service: br.name.clone(),
-        });
-        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-        return None;
-    }
-    let backend_ns = br
-        .namespace
-        .clone()
-        .unwrap_or_else(|| view.namespace.clone());
-    if backend_ns != view.namespace
-        && !reference_granted(
-            inputs,
-            &backend_ns,
-            "",
-            "Service",
-            &br.name,
-            &view.namespace,
-            GW_GROUP,
-            view.kind.as_str(),
-        )
-    {
-        problems.push(Problem::BackendRefNotPermitted {
-            reference: format!("Service {backend_ns}/{}", br.name),
-        });
-        fail_ref(resolved_refs, resolved_refs_reason, "RefNotPermitted");
-        return None;
-    }
-    let Some(port) = br.port else {
-        problems.push(Problem::ServicePortNotFound {
-            service: br.name.clone(),
-            port: "<unspecified>".to_string(),
-        });
-        fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-        return None;
-    };
-    match add_service_route(
-        index,
-        clusters,
-        backends,
-        referenced,
-        &backend_ns,
-        &br.name,
-        &PortRef::Number(port),
-        problems,
-    ) {
-        Err(problem) => {
-            problems.push(problem);
-            fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
-            None
-        }
-        Ok((cid, has_endpoints)) => {
-            if !has_endpoints {
-                problems.push(Problem::NoReadyEndpoints {
-                    service: br.name.clone(),
-                });
-            }
-            Some(cid)
-        }
-    }
 }
 
 /// Attach the layer-4 routes to our Gateways' TCP/UDP listeners, resolve the
@@ -1771,13 +1613,15 @@ fn attach_l4_routes(
             } else if candidates.is_empty() {
                 (false, "NotAllowedByListeners")
             } else {
-                let cluster_id = resolve_l4_backend(
+                let cluster_id = weighted::resolve_backend_refs(
                     inputs,
                     index,
                     clusters,
                     backends,
                     referenced,
-                    view,
+                    &view.namespace,
+                    view.kind.as_str(),
+                    &view.backend_refs,
                     &mut problems,
                     &mut resolved_refs,
                     &mut resolved_refs_reason,
