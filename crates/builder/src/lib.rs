@@ -1023,30 +1023,41 @@ fn path_value(p: &ir::PathMatch) -> &str {
     }
 }
 
+fn route_key(frontend: &ir::Frontend) -> RouteKey {
+    (
+        frontend.tls,
+        frontend.listener,
+        frontend.hostname.clone(),
+        frontend.path.clone(),
+        frontend.method.clone(),
+    )
+}
+
 /// Keep exactly one frontend per Sōzu route key and report the losers.
 ///
-/// Sōzu keys a route by `address;hostname;<kind><path>[;method]` — the kind is
-/// part of the key (an `Exact` and a `Prefix` on one path are two routes), the
-/// cluster is not — so two frontends sharing a key cannot coexist. The
-/// translator already dedups on that key, first occurrence wins, over the
-/// builder's `(tls, hostname, cluster_id)` ordering; the winner kept here
-/// replicates exactly that (smallest by the sort, a cluster-less redirect —
-/// `None` — ordering before any cluster id), so reporting the collision does
-/// not change observable routing.
+/// The Gateway builder emits HTTPRoutes by creation time, namespace/name and
+/// rule order. Only the first HTTPRoute candidate for a key remains eligible;
+/// backend names, redirects and rejection backends cannot change that winner.
+/// Ingress candidates keep their existing cluster-id ordering, including when
+/// competing with the chosen HTTPRoute. Mixing those two policies in one
+/// comparator would be non-transitive, so selection has two explicit stages.
 ///
-/// This mirror only holds because [`path_match`] canonicalises a prefix's
-/// insignificant trailing slash: `/foo` and `/foo/` are one Kubernetes path and
-/// compile to one Sōzu rule, so they must be one `RouteKey` here too, or a
-/// collision would go unreported and reach the translator as a duplicate. A future improvement could prefer
-/// oldest-object-wins instead. Byte-identical duplicates (same target
-/// cluster, same filters) are benign overlaps — Sōzu would apply either one
-/// with the same effect — and stay unreported; a loser with a *different*
-/// effect gets a [`Problem::RouteCollision`] attributed to its source.
+/// Sōzu keys include protocol, listener, hostname, path kind/value and method,
+/// never the target cluster. Prefixes must already have their trailing slash
+/// canonicalised. Identical effects stay benign; a different effect produces
+/// a collision on the losing object's own source and parentRef.
 fn resolve_frontend_collisions(
-    mut frontends: Vec<SourcedFrontend>,
+    frontends: Vec<SourcedFrontend>,
 ) -> (Vec<ir::Frontend>, Vec<(FrontendSource, Problem)>) {
-    // Stable sort: ties keep emission order, like the previous IR ordering.
-    frontends.sort_by(|a, b| {
+    let mut first_http = BTreeMap::new();
+    for (order, sf) in frontends.iter().enumerate() {
+        if matches!(sf.source, FrontendSource::HttpRoute { .. }) {
+            first_http.entry(route_key(&sf.frontend)).or_insert(order);
+        }
+    }
+    let mut frontends: Vec<_> = frontends.into_iter().enumerate().collect();
+    // Retain the existing IR ordering and the Ingress tie-break policy.
+    frontends.sort_by(|(_, a), (_, b)| {
         (a.frontend.tls, &a.frontend.hostname, &a.frontend.cluster_id).cmp(&(
             b.frontend.tls,
             &b.frontend.hostname,
@@ -1055,41 +1066,51 @@ fn resolve_frontend_collisions(
     });
 
     let mut kept: Vec<ir::Frontend> = Vec::new();
+    let mut sources = Vec::new();
     let mut winners: BTreeMap<RouteKey, usize> = BTreeMap::new();
-    let mut collisions: Vec<(FrontendSource, Problem)> = Vec::new();
-    for sf in frontends {
-        let key: RouteKey = (
-            sf.frontend.tls,
-            sf.frontend.listener,
-            sf.frontend.hostname.clone(),
-            sf.frontend.path.clone(),
-            sf.frontend.method.clone(),
-        );
-        match winners.get(&key) {
-            None => {
-                winners.insert(key, kept.len());
-                kept.push(sf.frontend);
-            }
-            Some(&i) => {
-                let winner = &kept[i];
-                if winner.cluster_id == sf.frontend.cluster_id
-                    && winner.filters == sf.frontend.filters
-                {
-                    continue; // benign duplicate: same route, same effect
-                }
-                collisions.push((
-                    sf.source,
-                    Problem::RouteCollision {
-                        hostname: sf.frontend.hostname.clone(),
-                        path: path_value(&sf.frontend.path).to_string(),
-                        winner: winner
-                            .cluster_id
-                            .clone()
-                            .unwrap_or_else(|| "<redirect>".to_string()),
-                    },
-                ));
-            }
+    for (order, sf) in &frontends {
+        let key = route_key(&sf.frontend);
+        if matches!(sf.source, FrontendSource::HttpRoute { .. })
+            && first_http.get(&key) != Some(order)
+        {
+            continue;
         }
+        if let std::collections::btree_map::Entry::Vacant(entry) = winners.entry(key) {
+            entry.insert(kept.len());
+            kept.push(sf.frontend.clone());
+            sources.push(sf.source.clone());
+        }
+    }
+
+    // Resolve all candidates against the final winner, including an HTTPRoute
+    // eliminated before an Ingress won. Events must name the actual backend.
+    let mut collisions = Vec::new();
+    for (_, sf) in frontends {
+        let index = winners[&route_key(&sf.frontend)];
+        let winner = &kept[index];
+        // Repeated matches within one HTTPRoute are resolved by rule order,
+        // not a rejection of the route itself. They are legal API input.
+        if matches!((&sources[index], &sf.source),
+            (FrontendSource::HttpRoute { namespace: a_ns, name: a_name, .. },
+             FrontendSource::HttpRoute { namespace: b_ns, name: b_name, .. })
+            if a_ns == b_ns && a_name == b_name
+        ) {
+            continue;
+        }
+        if winner.cluster_id == sf.frontend.cluster_id && winner.filters == sf.frontend.filters {
+            continue;
+        }
+        collisions.push((
+            sf.source,
+            Problem::RouteCollision {
+                hostname: sf.frontend.hostname.clone(),
+                path: path_value(&sf.frontend.path).to_string(),
+                winner: winner
+                    .cluster_id
+                    .clone()
+                    .unwrap_or_else(|| "<redirect>".to_string()),
+            },
+        ));
     }
     (kept, collisions)
 }
@@ -1435,5 +1456,97 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         gateways: gw.gateways,
         routes: gw.routes,
         referenced_services: referenced,
+    }
+}
+
+#[cfg(test)]
+mod http_route_collisions {
+    use super::*;
+
+    fn route(name: &str, cluster: &str) -> SourcedFrontend {
+        SourcedFrontend {
+            frontend: ir::Frontend {
+                hostname: "app.example.com".into(),
+                path: ir::PathMatch::Prefix("/".into()),
+                method: None,
+                cluster_id: Some(cluster.into()),
+                tls: false,
+                listener: "0.0.0.0:8080".parse().unwrap(),
+                filters: Default::default(),
+            },
+            source: FrontendSource::HttpRoute {
+                namespace: "demo".into(),
+                name: name.into(),
+                gateway_namespace: "demo".into(),
+                gateway_name: "gw".into(),
+                section_name: Some("http".into()),
+                port: Some(80),
+            },
+        }
+    }
+
+    #[test]
+    fn a_rejection_backend_has_no_special_collision_priority() {
+        // Gateway emission order already encodes route/rule precedence. A
+        // future invalid-backend frontend must obey exactly the same order.
+        for (older, newer) in [
+            ("zzzz", "sozu-gateway/http-error"),
+            ("sozu-gateway/http-error", "aaaa"),
+        ] {
+            let first = route("older", older);
+            let second = route("newer", newer);
+            let loser = second.source.clone();
+            let (kept, collisions) = resolve_frontend_collisions(vec![first, second]);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].cluster_id.as_deref(), Some(older));
+            assert_eq!(collisions.len(), 1);
+            assert_eq!(collisions[0].0, loser);
+            assert!(
+                matches!(&collisions[0].1, Problem::RouteCollision { winner, .. } if winner == older)
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_competes_with_the_selected_http_route_and_events_name_the_final_winner() {
+        let mut ingress = route("unused", "middle");
+        ingress.source = FrontendSource::Ingress {
+            namespace: "demo".into(),
+            name: "ingress".into(),
+        };
+        let (kept, collisions) = resolve_frontend_collisions(vec![
+            ingress,
+            route("older", "zzzz"),
+            route("newer", "aaaa"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].cluster_id.as_deref(), Some("middle"));
+        assert_eq!(collisions.len(), 2);
+        assert!(collisions.iter().all(|(source, problem)| {
+            matches!(source, FrontendSource::HttpRoute { .. })
+                && matches!(problem, Problem::RouteCollision { winner, .. } if winner == "middle")
+        }));
+    }
+
+    #[test]
+    fn independent_protocol_address_method_and_path_matches_remain_programmed() {
+        let mut frontends = vec![route("root", "root")];
+        let mut tls = route("tls", "tls");
+        tls.frontend.tls = true;
+        frontends.push(tls);
+        let mut address = route("address", "address");
+        address.frontend.listener = "127.0.0.1:8080".parse().unwrap();
+        frontends.push(address);
+        for method in ["GET", "POST"] {
+            let mut frontend = route(method, method);
+            frontend.frontend.method = Some(method.into());
+            frontends.push(frontend);
+        }
+        let mut exact = route("exact", "exact");
+        exact.frontend.path = ir::PathMatch::Exact("/".into());
+        frontends.push(exact);
+        let (kept, collisions) = resolve_frontend_collisions(frontends);
+        assert_eq!(kept.len(), 6);
+        assert!(collisions.is_empty());
     }
 }

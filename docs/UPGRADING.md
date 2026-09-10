@@ -4,6 +4,35 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## HTTPRoute collision precedence
+
+For HTTPRoute rules that emit frontends with the same protocol, listener,
+hostname, path kind/value and method, the oldest route wins, then the first
+alphabetical `namespace/name` on a timestamp tie. For these identical matches
+within one route, the first rule wins without rejecting that route for its
+own overlap. Backend names and redirects do not influence which HTTPRoute
+wins. Prefixes such as `/api` and `/api/` share one collision key, as their
+trailing slash is insignificant; exact paths retain that distinction.
+
+A previously colliding route may therefore change backend at the first
+reconcile. Ingress candidates compete in cluster-id order against the selected
+HTTPRoute. This can change a mixed Ingress/HTTPRoute winner too: an Ingress on
+`demo.m.80`, an older HTTPRoute on `demo.z.80` and a newer one on `demo.a.80`
+now select the Ingress; previously the newer HTTPRoute won.
+
+Rules skipped because of unsupported or unresolved configuration do not reserve
+a route key. Collisions between different objects still report the final winner
+on the losing object's own parent or Ingress result; prefix paths in those
+reports use their canonical spelling. The IR and persisted shadow format are
+unchanged.
+
+This correction selects between frontends sharing one key. Matching precedence
+between different keys and the translator's incremental update strategy remain
+unchanged. Native path precedence and route update limitations are tracked in
+[#80](https://github.com/CleverCloud/sozu-gateway/issues/80).
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's
