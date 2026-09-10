@@ -27,6 +27,12 @@ the Service ClusterIP), and reconciliation is **idempotent** (a single global re
 desired state and applies only the delta). Everything goes through the Kubernetes API and the local
 command socket — there is no external dependency and no API token.
 
+EndpointSlice changes for referenced Services bypass the ordinary watch debounce
+(`controller.debounceMs`, 500 ms by default), so ready or withdrawn backends do not
+wait for that timer. Events during an apply remain pending for the next rebuild.
+Kubernetes endpoint publication, watch delivery and an apply already in progress
+still contribute to convergence time.
+
 ---
 
 ## Features
