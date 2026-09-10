@@ -230,12 +230,12 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
         (PathRuleKind::Prefix as i32, "/".to_string())
     );
 
-    // Exact and ImplementationSpecific still map one-to-one.
+    // Exact also ignores the query and uses a removable worker-side rule.
     let mut exact = one_prefix_route("/foo");
     exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
     assert_eq!(
         emitted_path(&exact),
-        (PathRuleKind::Equals as i32, "/foo".to_string())
+        (PathRuleKind::Regex as i32, r"^/foo(\?|$)".to_string())
     );
 
     // One rule per frontend, so the diff round-trips as it always did.
@@ -253,10 +253,9 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
 
 #[test]
 fn a_prefix_route_never_takes_an_exact_route_key() {
-    // The boundary rule must not be expressible as an `Equals`, or a `Prefix`
-    // and an `Exact` route on the same path would fight for one Sōzu route key
-    // — and since translation is all-or-nothing, that clash would fail every
-    // reconcile, not just this route. Distinct kinds keep both programmable.
+    // Prefix and Exact at the same path must have different regex values.
+    // Sōzu keys include the regex text, so both routes remain programmable
+    // even though they now share a kind.
     let model = ir::Ir {
         clusters: vec![
             cluster("pfx", ir::LbAlgorithm::RoundRobin, false),
