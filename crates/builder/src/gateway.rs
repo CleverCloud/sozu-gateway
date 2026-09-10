@@ -1649,8 +1649,6 @@ struct L4Claim {
     /// result's parents.
     route: usize,
     parent: usize,
-    /// The listener this claim attaches to, for `attachedRoutes`.
-    listener_name: (String, String, String),
     /// Tie-break: oldest `creationTimestamp` first (absent last), then
     /// `namespace/name`.
     order: (bool, String, String),
@@ -1766,8 +1764,10 @@ fn resolve_l4_backend(
 /// `check_l4_conflicts` returns an error that `reconcile` propagates with `?`,
 /// which fails the *entire* reconcile — every HTTP route in the cluster
 /// included. One tenant's second TCPRoute must not be able to stop routing for
-/// everyone else, so the loser is dropped with a Problem on its own status and
-/// the translator's guard is left as a net that should never fire.
+/// everyone else, so only the winning frontend is emitted, with a Problem on
+/// the losing route. Both routes remain accepted and count as attached: route
+/// attachment describes the parent relationship, not which backend gets traffic.
+/// The translator's guard is left as a net that should never fire.
 ///
 /// The tie-break is oldest `creationTimestamp`, then `namespace/name`. The
 /// second key is not decoration: `creationTimestamp` has one-second
@@ -1791,6 +1791,7 @@ fn attach_l4_routes(
     let mut claims: Vec<L4Claim> = Vec::new();
     for view in &views {
         let mut parents = Vec::new();
+        let mut route_listeners = BTreeSet::new();
         for pref in &view.parent_refs {
             let is_gateway = pref.group.as_deref().unwrap_or(GW_GROUP) == GW_GROUP
                 && pref.kind.as_deref().unwrap_or("Gateway") == "Gateway";
@@ -1829,6 +1830,13 @@ fn attach_l4_routes(
             } else if candidates.is_empty() {
                 (false, "NotAllowedByListeners")
             } else {
+                // Count each route once per listener, even when several
+                // parentRefs select it or its backend cannot be resolved.
+                route_listeners.extend(
+                    candidates
+                        .iter()
+                        .map(|l| (gw_ns.clone(), pref.name.clone(), l.name.clone())),
+                );
                 let cluster_id = resolve_l4_backend(
                     inputs,
                     index,
@@ -1853,7 +1861,6 @@ fn attach_l4_routes(
                             cluster_id: cluster_id.clone(),
                             route: routes.len(),
                             parent: parents.len(),
-                            listener_name: (gw_ns.clone(), pref.name.clone(), l.name.clone()),
                             order: (
                                 view.creation.is_none(),
                                 view.creation.clone().unwrap_or_default(),
@@ -1879,6 +1886,9 @@ fn attach_l4_routes(
                 resolved_refs_reason,
                 problems,
             });
+        }
+        for listener in route_listeners {
+            *attached.entry(listener).or_insert(0) += 1;
         }
         if !parents.is_empty() {
             routes.push(RouteResult {
@@ -1910,14 +1920,11 @@ fn attach_l4_routes(
                     listener: claim.listener,
                     cluster_id: claim.cluster_id.clone(),
                 });
-                *attached.entry(claim.listener_name.clone()).or_insert(0) += 1;
             }
             // Same socket, same cluster: two routes (or two parentRefs of one
             // route) asking for the identical thing. Sōzu would apply either
             // with the same effect, so this is a benign overlap, not a clash.
-            Some((cluster, _)) if *cluster == claim.cluster_id => {
-                *attached.entry(claim.listener_name.clone()).or_insert(0) += 1;
-            }
+            Some((cluster, _)) if *cluster == claim.cluster_id => {}
             Some((_, winner)) => {
                 let problem = Problem::L4RouteConflict {
                     port: claim.advertised,
@@ -1928,8 +1935,6 @@ fn attach_l4_routes(
                     winner: winner.clone(),
                 };
                 let parent = &mut routes[claim.route].parents[claim.parent];
-                parent.accepted = false;
-                parent.accepted_reason = "RouteConflict";
                 if !parent.problems.contains(&problem) {
                     parent.problems.push(problem);
                 }
