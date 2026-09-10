@@ -188,19 +188,25 @@ fn removing_the_hostname_less_listener_restores_explicit_name_restrictions() {
             "second-example.org"
         ]
     );
-    let replacements: Vec<_> = reconcile(&before, &after)
-        .unwrap()
-        .into_iter()
-        .filter_map(|r| match r.request_type {
-            Some(RequestType::ReplaceCertificate(c)) => Some(c),
+    let requests = reconcile(&before, &after).unwrap();
+    let certificate_requests: Vec<_> = requests
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(
+                request @ (RequestType::RemoveCertificate(_)
+                | RequestType::AddCertificate(_)
+                | RequestType::ReplaceCertificate(_)),
+            ) => Some(request),
             _ => None,
         })
         .collect();
-    assert_eq!(replacements.len(), 1);
-    assert_eq!(
-        replacements[0].new_certificate.names,
-        after.certificates[0].names
-    );
+    let [RequestType::RemoveCertificate(remove), RequestType::AddCertificate(add)] =
+        certificate_requests.as_slice()
+    else {
+        panic!("restricting SNI names requires removal before re-adding the certificate");
+    };
+    assert_eq!(remove.address, add.address);
+    assert_eq!(add.certificate.names, after.certificates[0].names);
 }
 
 #[test]
@@ -307,8 +313,9 @@ fn shared_certificate_rotation_keeps_names_in_a_single_replace() {
 fn an_existing_shadow_is_repaired_without_a_schema_change() {
     let desired = build(&BuildConfig::default(), &inputs()).ir;
     // The previous compiler lost the inferred names when it merged the four
-    // listeners. Its persisted bare Ir must still load and replace that same
-    // fingerprint once, restoring the names on the running proxy.
+    // listeners. Its persisted bare Ir must still load and request a reload
+    // of that same fingerprint. Remove then Add updates worker SNI names;
+    // Replace with the same fingerprint would be a worker no-op.
     let mut old_shadow = serde_json::to_value(&desired).unwrap();
     old_shadow["certificates"][0]["names"] = json!([
         "*.wildcard.org",
@@ -317,10 +324,14 @@ fn an_existing_shadow_is_repaired_without_a_schema_change() {
     ]);
     let previous: ir::Ir = serde_json::from_value(old_shadow).unwrap();
     let requests = reconcile(&previous, &desired).unwrap();
-    assert_eq!(requests.len(), 1);
-    let Some(RequestType::ReplaceCertificate(replacement)) = &requests[0].request_type else {
-        panic!("the old shadow must converge through a certificate replacement");
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        requests[0].request_type,
+        Some(RequestType::RemoveCertificate(_))
+    ));
+    let Some(RequestType::AddCertificate(add)) = &requests[1].request_type else {
+        panic!("the old shadow must converge through a certificate reload");
     };
-    assert_eq!(replacement.new_certificate.names, expected_names());
+    assert_eq!(add.certificate.names, expected_names());
     assert!(reconcile(&desired, &desired).unwrap().is_empty());
 }
