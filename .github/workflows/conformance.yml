@@ -1,0 +1,78 @@
+name: Gateway API conformance
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Focused baseline or complete HTTP/TCP/UDP campaign
+        type: choice
+        options: [focused, full]
+        default: focused
+      run_test:
+        description: Comma-separated exact upstream ShortNames (overrides focused selection)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      KIND_NAME: conformance-${{ github.run_id }}-${{ github.run_attempt }}
+      MODE: ${{ inputs.mode || 'focused' }}
+      RUN_TEST: ${{ inputs.run_test }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.36.1
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.21.4
+      - name: Install pinned Kind
+        run: |
+          curl --fail --location --retry 3 https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64 -o "$RUNNER_TEMP/kind"
+          chmod +x "$RUNNER_TEMP/kind"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Test orchestration
+        run: python3 -m unittest discover -s tests/conformance -p 'test_*.py' -v
+      - name: Build and provision the test gateway
+        id: provision
+        run: bash tests/conformance/kind.sh "$KIND_NAME"
+      - name: Run upstream assertions
+        run: |
+          tests="$RUN_TEST"
+          if [[ "$MODE" == full && -n "$tests" ]]; then
+            echo 'Full mode cannot be combined with a test selection.' >&2
+            exit 2
+          fi
+          if [[ -z "$tests" && "$MODE" == focused ]]; then
+            tests='HTTPRouteSimpleSameNamespace,HTTPRouteExactPathMatching,HTTPRouteCrossNamespace,TCPRouteParentRefPortAndSectionName,UDPRoute'
+          fi
+          python3 tests/conformance/run.py \
+            --context "kind-$KIND_NAME" --gateway-class sozu \
+            --gateway-service sozu-system/sozu-gateway \
+            --runner-image sozu-gateway-conformance:local --skip-build \
+            --version "$GITHUB_SHA-sozu-2.2.1" --tests "$tests" --output conformance-results
+      - name: Collect controller diagnostics
+        if: always() && steps.provision.outputs.created == 'true'
+        run: |
+          mkdir -p conformance-results
+          kubectl --context "kind-$KIND_NAME" -n sozu-system logs deployment/sozu-gateway -c controller > conformance-results/controller.log 2>&1 || true
+          kubectl --context "kind-$KIND_NAME" get pods -A -o wide > conformance-results/pods.txt 2>&1 || true
+      - name: Archive results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: conformance-results/
+          if-no-files-found: error
+      - name: Delete the owned Kind cluster
+        if: always() && steps.provision.outputs.created == 'true'
+        run: kind delete cluster --name "$KIND_NAME"
