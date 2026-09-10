@@ -25,14 +25,22 @@ gatewayInstances:
 Each entry provisions a separate Deployment, Service, ConfigMap, disruption
 budget and enabled metrics resources. Images, exposure, resource settings and
 the ServiceAccount are shared settings; each Pod has its own command socket
-and persisted shadow. `service` overrides and `replicaCount` are optional.
+and persisted shadow. `service` overrides and `replicaCount` are optional. Each
+provided Service field replaces that field from the release, including maps:
+`service.annotations: {}` explicitly removes inherited annotations.
 Use a LoadBalancer Service for a public Gateway address. ClusterIP Services can
 publish their internal addresses for in-cluster clients; a pending LoadBalancer
-never publishes its ClusterIP as an external address.
+never publishes its ClusterIP as an external address. A configured publish
+Service without an assigned address keeps the Gateway `Programmed=False` with
+`AddressNotAssigned`, even if the local listeners are ready. Deployments without
+a publish Service retain their existing listener-based programming status.
 
 Creating, removing or retargeting an entry moves the Gateway to a different
 address. Allow for LoadBalancer provisioning and update DNS or clients; this
-handoff is not atomic. Gateway and instance names must be unique within the
+handoff is not atomic. Until the new address is assigned, existing status
+addresses remain visible: ownership scope alone cannot identify which prior
+Service published them. Consumers must check `Programmed` during migration.
+The assigned address replaces the previous list. Gateway and instance names must be unique within the
 release. Overlong names fail rendering instead of being truncated into another
 instance's resource or selector. Service names also reserve the `-metrics`
 suffix, so an instance cannot claim another instance's metrics Service.
@@ -41,7 +49,8 @@ Outside Helm, `--gateway-scope namespace/name` owns one Gateway and ignores
 Ingress; the default controller must receive matching `--exclude-gateway`
 arguments. Keep that ownership partition disjoint. All instances may use the
 same `controllerName`: route status retains other instances' parent entries,
-including their complete references, and retries conflicting updates against
+including their complete references, preserves the relative order of entries
+from other controllers, and retries conflicting updates against
 the latest resourceVersion. A route losing its last local parent also has its
 stale status removed. The shadow format is unchanged.
 

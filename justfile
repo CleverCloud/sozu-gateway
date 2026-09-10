@@ -100,6 +100,8 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"https2","port":9443,"bind":9444,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
 
+    python3 scripts/test_gateway_instances.py
+
 # Package the Helm chart into dist/ (use TAG=v<semver>).
 chart-package:
     mkdir -p dist

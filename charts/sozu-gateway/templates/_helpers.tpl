@@ -20,7 +20,9 @@
 
 {{- define "sozu-gateway.instanceLabel" -}}
 {{- if .gatewayInstance -}}
-{{- printf "%s-%s" .Release.Name .gatewayInstance.name -}}
+{{- /* Helm release names cannot contain underscores. Keep instance Pods out
+     of every historical default selector, including a release named x-y. */ -}}
+{{- printf "%s_gateway" .Release.Name -}}
 {{- else -}}
 {{- .Release.Name -}}
 {{- end -}}
@@ -29,6 +31,9 @@
 {{- define "sozu-gateway.labels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
 app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
+{{- if .gatewayInstance }}
+sozu.io/gateway-instance: {{ .gatewayInstance.name }}
+{{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: sozu-gateway
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
@@ -37,6 +42,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- define "sozu-gateway.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
 app.kubernetes.io/instance: {{ include "sozu-gateway.instanceLabel" . }}
+{{- if .gatewayInstance }}
+sozu.io/gateway-instance: {{ .gatewayInstance.name }}
+{{- end }}
 {{- end -}}
 
 {{- define "sozu-gateway.serviceAccountName" -}}
@@ -265,7 +273,7 @@ number the user never wrote.
   {{- if hasKey $names $name -}}{{- fail (printf "gatewayInstances repeats instance name %q" $name) -}}{{- end -}}
   {{- $_ := set $names $name true -}}
   {{- $full := printf "%s-%s" (include "sozu-gateway.baseFullname" $) $name -}}
-  {{- if or (gt (len $full) 55) (gt (len (printf "%s-%s" $.Release.Name $name)) 63) -}}
+  {{- if gt (len $full) 55 -}}
     {{- fail (printf "gatewayInstances name %q is too long with this release: use a shorter name or fullnameOverride (the -metrics suffix must fit 63 characters)" $name) -}}
   {{- end -}}
   {{- range $serviceName := list $full (printf "%s-metrics" $full) -}}
@@ -307,11 +315,17 @@ number the user never wrote.
 {{- include $template $root -}}
 {{- range $instance := $root.Values.gatewayInstances | default list -}}
   {{- $values := deepCopy $root.Values -}}
-  {{- if $instance.service -}}
-    {{- $_ := set $values "service" (mergeOverwrite (deepCopy $root.Values.service) $instance.service) -}}
+  {{- if hasKey $instance "service" -}}
+    {{- $service := deepCopy $root.Values.service -}}
+    {{- range $key, $value := $instance.service -}}
+      {{- $_ := set $service $key $value -}}
+    {{- end -}}
+    {{- $_ := set $values "service" $service -}}
   {{- end -}}
   {{- if hasKey $instance "replicaCount" -}}{{- $_ := set $values "replicaCount" $instance.replicaCount -}}{{- end -}}
-  {{- $context := merge (dict "gatewayInstance" $instance "Values" $values) $root -}}
+  {{- $context := deepCopy $root -}}
+  {{- $_ := set $context "gatewayInstance" $instance -}}
+  {{- $_ := set $context "Values" $values -}}
   {{- $rendered := include $template $context -}}
   {{- if trim $rendered -}}{{ printf "\n---\n%s" $rendered }}{{- end -}}
 {{- end -}}

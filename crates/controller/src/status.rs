@@ -76,7 +76,7 @@ pub async fn write_status(
     gateway_classes: &[GatewayClassResult],
     gateways: &[GatewayResult],
     routes: &[RouteStatusUpdate],
-    gateway_addresses: &[GatewayStatusAddresses],
+    gateway_addresses: Option<&[GatewayStatusAddresses]>,
     scope: &GatewayScope,
 ) {
     for gc in gateway_classes
@@ -325,8 +325,10 @@ fn build_listeners_status(
 async fn write_gateway(
     client: &Client,
     gw: &GatewayResult,
-    addresses: &[GatewayStatusAddresses],
+    addresses: Option<&[GatewayStatusAddresses]>,
 ) -> Result<(), kube::Error> {
+    let awaiting_address = addresses.is_some_and(|a| a.is_empty());
+    let addresses = addresses.unwrap_or_default();
     let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
     let current = api.get(&gw.name).await?;
     let cur = current
@@ -348,16 +350,20 @@ async fn write_gateway(
             },
             Desired {
                 type_: "Programmed",
-                status: gw.programmed,
-                reason: if gw.programmed {
-                    "Programmed"
-                } else {
+                status: gw.programmed && !awaiting_address,
+                reason: if !gw.programmed {
                     "Invalid"
-                },
-                message: if gw.programmed {
-                    "Listeners programmed into Sōzu".to_string()
+                } else if awaiting_address {
+                    "AddressNotAssigned"
                 } else {
+                    "Programmed"
+                },
+                message: if !gw.programmed {
                     problems_message(&all_problems, "No listeners could be programmed")
+                } else if awaiting_address {
+                    "Waiting for the publish Service to receive an address".to_string()
+                } else {
+                    "Listeners programmed into Sōzu".to_string()
                 },
             },
         ],
@@ -367,7 +373,8 @@ async fn write_gateway(
     let listeners = build_listeners_status(gw, &current, current.metadata.generation);
     // Publish the LoadBalancer address into the Gateway's status (what
     // external-dns's gateway-httproute source reads). Skipped when there is no
-    // address yet, so a pending LB never clears it.
+    // address yet. Scope alone cannot attribute an old address to a previous
+    // instance; preserve it while Programmed=False signals the pending state.
     let cur_addresses = current
         .status
         .as_ref()
@@ -526,7 +533,8 @@ impl_route_parents!(UdpRoute);
 
 /// The `status.parents[]` we want on a route: every entry owned by another
 /// controller or Gateway instance kept verbatim, plus our resolved parents.
-/// All writers use the same ordering so instances never rotate the list.
+/// Our instances sort only their own controller's entries. Foreign controllers
+/// retain their relative order, avoiding competing list-order conventions.
 ///
 /// Pure, so the loop-safety property is testable without an apiserver: feeding
 /// this function its own output must be a fixed point, or the controller
@@ -603,10 +611,12 @@ fn route_parents(
             parent_ref,
         });
     }
-    parents.sort_by(|a, b| {
-        (&a.controller_name, &a.parent_ref).cmp(&(&b.controller_name, &b.parent_ref))
-    });
-    parents
+    let (mut foreign, mut ours): (Vec<_>, Vec<_>) = parents
+        .into_iter()
+        .partition(|p| p.controller_name != controller_name);
+    ours.sort_by(|a, b| a.parent_ref.cmp(&b.parent_ref));
+    foreign.extend(ours);
+    foreign
 }
 
 fn owned_parent(scope: &GatewayScope, namespace: &str, parent: &RouteParentStatus) -> bool {
@@ -1106,6 +1116,40 @@ mod tests {
     }
 
     #[test]
+    fn foreign_controller_order_is_preserved_across_instance_writers() {
+        let controller = "sozu.io/gateway-controller";
+        let a = GatewayScope {
+            gateway_scope: Some("sozu-system/gw".parse().unwrap()),
+            ..Default::default()
+        };
+        let b = GatewayScope {
+            exclude_gateway: vec!["sozu-system/gw".parse().unwrap()],
+            ..Default::default()
+        };
+        let ours = route(vec![parent(Some("http"), true)]);
+        let mut other = parent(Some("https"), true);
+        other.gateway_name = "other".into();
+        let other = route(vec![other]);
+        let first = route_parents(controller, &ours, &[], Some(1), &a);
+        let mut foreign_z = first[0].clone();
+        foreign_z.controller_name = "zzz.example/controller".into();
+        let mut foreign_a = first[0].clone();
+        foreign_a.controller_name = "aaa.example/controller".into();
+        let mixed = vec![foreign_z.clone(), first[0].clone(), foreign_a.clone()];
+        let updated = route_parents(controller, &other, &mixed, Some(1), &b);
+        assert_eq!(&updated[..2], &[foreign_z, foreign_a]);
+        assert_eq!(updated.len(), 4);
+        assert_eq!(
+            updated,
+            route_parents(controller, &ours, &updated, Some(1), &a)
+        );
+        assert_eq!(
+            updated,
+            route_parents(controller, &other, &updated, Some(1), &b)
+        );
+    }
+
+    #[test]
     fn routes_losing_their_last_parent_still_get_a_status_update() {
         let controller = "sozu.io/gateway-controller";
         let scope = GatewayScope {
@@ -1219,7 +1263,12 @@ mod tests {
                             .unwrap();
                         state.object["metadata"]["resourceVersion"] =
                             json!((version + 1).to_string());
-                        state.object["status"] = patch["status"].clone();
+                        if !state.object["status"].is_object() {
+                            state.object["status"] = json!({});
+                        }
+                        for (key, value) in patch["status"].as_object().unwrap() {
+                            state.object["status"][key] = value.clone();
+                        }
                         (200, state.object.clone())
                     }
                 };
@@ -1323,6 +1372,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_address_blocks_programmed_until_the_new_service_is_assigned() {
+        let old = json!([{ "type": "IPAddress", "value": "198.51.100.10" }]);
+        let current = json!({
+            "apiVersion":"gateway.networking.k8s.io/v1", "kind":"Gateway",
+            "metadata":{"namespace":"demo", "name":"gw", "generation":1, "resourceVersion":"1"},
+            "spec":{"gatewayClassName":"sozu", "listeners":[]},
+            "status":{"addresses":old}
+        });
+        let gateway = GatewayResult {
+            namespace: "demo".into(),
+            name: "gw".into(),
+            uid: None,
+            accepted: true,
+            programmed: true,
+            problems: vec![],
+            listeners: vec![],
+        };
+        let (client, state) = mock_client(current, false, false);
+        write_gateway(&client, &gateway, Some(&[])).await.unwrap();
+        {
+            let state = state.lock().unwrap();
+            let condition = state.object["status"]["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["type"] == "Programmed")
+                .unwrap();
+            assert_eq!(condition["status"], "False");
+            assert_eq!(condition["reason"], "AddressNotAssigned");
+            assert_eq!(
+                state.object["status"]["addresses"], old,
+                "unattributed previous addresses are not blindly removed"
+            );
+            assert_eq!(state.patches, 1);
+        }
+        write_gateway(&client, &gateway, Some(&[])).await.unwrap();
+        assert_eq!(state.lock().unwrap().patches, 1, "waiting is a fixed point");
+        let assigned = vec![GatewayStatusAddresses {
+            r#type: Some("IPAddress".into()),
+            value: "198.51.100.20".into(),
+        }];
+        write_gateway(&client, &gateway, Some(&assigned))
+            .await
+            .unwrap();
+        {
+            let state = state.lock().unwrap();
+            let condition = state.object["status"]["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["type"] == "Programmed")
+                .unwrap();
+            assert_eq!(condition["status"], "True");
+            assert_eq!(condition["reason"], "Programmed");
+            assert_eq!(state.object["status"]["addresses"], json!(assigned));
+            assert_eq!(state.patches, 2);
+        }
+        write_gateway(&client, &gateway, Some(&assigned))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().unwrap().patches,
+            2,
+            "assigned is a fixed point"
+        );
+        write_gateway(&client, &gateway, None).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().patches,
+            2,
+            "deployments without a publish Service retain the programming status"
+        );
+    }
+
+    #[tokio::test]
     async fn only_the_default_instance_writes_gatewayclass_status() {
         let (client, state) = mock_client(
             json!({
@@ -1347,7 +1470,7 @@ mod tests {
             &classes,
             &[],
             &[],
-            &[],
+            None,
             &scoped,
         )
         .await;
@@ -1358,7 +1481,7 @@ mod tests {
             &classes,
             &[],
             &[],
-            &[],
+            None,
             &GatewayScope::default(),
         )
         .await;
