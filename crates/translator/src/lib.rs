@@ -692,7 +692,12 @@ fn canonicalize(
             _ => false,
         };
         let key = serde_json::to_string(req).unwrap_or_default();
-        (if reload { 4 } else { tier(req) }, !reload, frontend_order(req), key)
+        (
+            if reload { 4 } else { tier(req) },
+            !reload,
+            frontend_order(req),
+            key,
+        )
     });
     requests
 }
