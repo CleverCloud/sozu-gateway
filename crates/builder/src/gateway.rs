@@ -64,6 +64,8 @@ pub struct GatewayResult {
     /// `metadata.uid` of the source Gateway (see `IngressResult::uid`).
     pub uid: Option<String>,
     pub accepted: bool,
+    /// Gateway API `Accepted` condition reason, including partial listener acceptance.
+    pub accepted_reason: &'static str,
     pub programmed: bool,
     pub problems: Vec<Problem>,
     /// Per-listener status (one entry per declared listener, in spec order).
@@ -546,13 +548,20 @@ pub(crate) fn build_gateway(
             .map(|l| build_listener(cfg, inputs, index, &ns, l, certificates, &mut problems))
             .collect();
 
+        let accepted = listeners.iter().any(|l| l.accepted);
+        let accepted_reason = if accepted && listeners.iter().all(|l| l.accepted) {
+            "Accepted"
+        } else {
+            "ListenersNotValid"
+        };
         let programmed = listeners.iter().any(|l| l.programmed);
         gw_listeners.insert((ns.clone(), name.clone()), listeners);
         gateways.push(GatewayResult {
             namespace: ns,
             name,
             uid: crate::obj_uid(&gw.metadata),
-            accepted: true,
+            accepted,
+            accepted_reason,
             programmed,
             problems,
             // Filled after route attachment, once attachedRoutes is known.
