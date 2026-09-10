@@ -132,6 +132,11 @@ The UDP round-trip is worth calling out separately: nothing in this repo had eve
 UDP proxy before, so "UDPRoute programs a UDP frontend" and "a datagram comes back" were two
 different claims. Both are now measured.
 
+The [2026-09-10 TCP probe check](probes/tcp-half-close_2026-09-10.md) reproduced
+an empty reply after a client half-close on both Sōzu 2.2.0 and 2.2.1. Keeping
+the probe's write side open restored TCP echo; its five-second inactivity
+timeout and the UDP probe are preserved.
+
 ## 5c. Rewrite and redirect targets — a measurement, not a feature
 
 Two things this project reported as unsupported rested on the proto's doc comments plus one
