@@ -1,84 +1,13 @@
 //! Replay commands against Sōzu's append-only routing lists. ConfigState itself
 //! is unordered, so replaying only into ConfigState cannot detect precedence.
 //! Selection follows sozu-proxy/sozu 2.2.1 lib/src/router/mod.rs:138–220.
-use sozu_command_lib::proto::command::{
-    request::RequestType, PathRuleKind, Request, RequestHttpFrontend, RulePosition,
-};
+use sozu_command_lib::proto::command::request::RequestType;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
 
-#[derive(Default)]
-struct RoutingTable(Vec<RequestHttpFrontend>);
-
-impl RoutingTable {
-    fn apply(&mut self, requests: Vec<Request>) {
-        for request in requests {
-            match request.request_type {
-                Some(RequestType::AddHttpFrontend(f) | RequestType::AddHttpsFrontend(f)) => {
-                    assert!(
-                        !self.0.iter().any(|old| same_key(old, &f)),
-                        "duplicate frontend"
-                    );
-                    self.0.push(f);
-                }
-                Some(RequestType::RemoveHttpFrontend(f) | RequestType::RemoveHttpsFrontend(f)) => {
-                    let index = self
-                        .0
-                        .iter()
-                        .position(|old| same_key(old, &f))
-                        .expect("existing frontend");
-                    self.0.remove(index);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn backend(&self, path: &str, method: &str) -> &str {
-        let mut matched = None;
-        let mut prefix_length = 0;
-        for f in &self.0 {
-            if f.method.as_deref().is_some_and(|m| m != method) {
-                continue;
-            }
-            let matches = match f.path.kind() {
-                PathRuleKind::Equals => path == f.path.value,
-                PathRuleKind::Prefix => path.starts_with(&f.path.value),
-                PathRuleKind::Regex => regex::Regex::new(&f.path.value).unwrap().is_match(path),
-            };
-            if !matches {
-                continue;
-            }
-            if f.position == RulePosition::Post as i32 {
-                return f.cluster_id.as_deref().unwrap();
-            }
-            match f.path.kind() {
-                PathRuleKind::Equals | PathRuleKind::Regex => {
-                    if f.method.is_some() {
-                        return f.cluster_id.as_deref().unwrap();
-                    }
-                    prefix_length = path.len();
-                    matched = f.cluster_id.as_deref();
-                }
-                PathRuleKind::Prefix if f.path.value.len() >= prefix_length => {
-                    prefix_length = f.path.value.len();
-                    matched = f.cluster_id.as_deref();
-                }
-                _ => {}
-            }
-        }
-        matched.expect("matching frontend")
-    }
-}
-
-fn same_key(a: &RequestHttpFrontend, b: &RequestHttpFrontend) -> bool {
-    // Sōzu 2.2.1 PathRule::eq omits Equals: a worker can never remove it.
-    a.path.kind() != PathRuleKind::Equals
-        && a.address == b.address
-        && a.hostname == b.hostname
-        && a.path == b.path
-        && a.method == b.method
-}
+#[path = "common/routing.rs"]
+mod routing;
+use routing::RoutingTable;
 
 fn front(
     host: &str,
@@ -89,6 +18,7 @@ fn front(
 ) -> ir::Frontend {
     ir::Frontend {
         hostname: host.into(),
+        multi_label_wildcard: false,
         path,
         cluster_id: Some(backend.into()),
         method: method.map(str::to_string),

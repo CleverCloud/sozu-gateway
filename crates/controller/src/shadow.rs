@@ -501,6 +501,7 @@ mod tests {
         assert!(ir.l4_frontends.is_empty());
         assert!(ir.clusters[0].max_connections_per_ip.is_none());
         assert!(ir.frontends[0].filters.redirect.is_none());
+        assert!(!ir.frontends[0].multi_label_wildcard);
     }
 
     #[test]

@@ -1,0 +1,102 @@
+---
+source: crates/translator/tests/hostname_matching.rs
+expression: requests
+---
+[
+  {
+    "request_type": {
+      "REMOVE_HTTP_FRONTEND": {
+        "cluster_id": "fallback",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 8080
+        },
+        "hostname": "*",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 1,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND": {
+        "cluster_id": "wildcard",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 8080
+        },
+        "hostname": "/[^.]+(?:\\.[^.]+)*\\.example\\.com/",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 1,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND": {
+        "cluster_id": "fallback",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 8080
+        },
+        "hostname": "*",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 1,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null
+      }
+    }
+  }
+]

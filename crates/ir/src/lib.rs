@@ -73,6 +73,11 @@ pub struct Backend {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frontend {
     pub hostname: String,
+    /// A `*.example.com` hostname covers one or more labels (Gateway API).
+    /// False retains the single-label Ingress wildcard. This affects HTTP
+    /// routing only; certificate names keep their own TLS matching semantics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi_label_wildcard: bool,
     pub path: PathMatch,
     pub method: Option<String>,
     /// Target cluster, or `None` for a redirect-only frontend (no backend).

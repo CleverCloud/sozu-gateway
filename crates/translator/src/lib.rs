@@ -171,9 +171,19 @@ fn backend_request(b: &ir::Backend) -> Request {
 }
 
 fn frontend_request(f: &ir::Frontend) -> Request {
-    // A bare "*" catch-all goes in POST so it is a fallback and never shadows
-    // specific-host (TREE) frontends. Sōzu parses "*" as DomainRule::Any.
-    let position = if f.hostname == "*" {
+    // The trie wildcard covers one label only. Gateway wildcards use a full
+    // DomainRule regex in POST, after exact-host TREE rules. TLS certificate
+    // names never pass through this conversion.
+    let hostname = if f.multi_label_wildcard {
+        f.hostname
+            .strip_prefix("*.")
+            .map(|suffix| format!(r"/[^.]+(?:\.[^.]+)*\.{}/", regex_escape(suffix)))
+            .unwrap_or_else(|| f.hostname.clone())
+    } else {
+        f.hostname.clone()
+    };
+    // A bare "*" catch-all is also a POST fallback.
+    let position = if f.hostname == "*" || hostname != f.hostname {
         RulePosition::Post
     } else {
         RulePosition::Tree
@@ -181,7 +191,7 @@ fn frontend_request(f: &ir::Frontend) -> Request {
     let mut payload = RequestHttpFrontend {
         cluster_id: f.cluster_id.clone(),
         address: f.listener.into(),
-        hostname: f.hostname.clone(),
+        hostname,
         path: path_rule(&f.path),
         method: f.method.clone(),
         position,
@@ -247,8 +257,7 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
 /// duplicate produced by overlapping Ingresses must not become a hard reconcile
 /// failure. First occurrence wins, matching the builder's collision reporting.
 fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
-    let mut seen: BTreeSet<(bool, SocketAddr, &str, &ir::PathMatch, Option<&str>)> =
-        BTreeSet::new();
+    let mut seen = BTreeSet::new();
     ir.frontends
         .iter()
         .filter(|f| {
@@ -256,6 +265,7 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
                 f.tls,
                 f.listener,
                 f.hostname.as_str(),
+                f.multi_label_wildcard,
                 &f.path,
                 f.method.as_deref(),
             ))
@@ -263,8 +273,8 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
         .collect()
 }
 
-type FrontendGroup = (bool, SocketAddr, String);
-type FrontendKey = (FrontendGroup, i32, String, Option<String>);
+type FrontendGroup = (bool, SocketAddr, Option<String>);
+type FrontendKey = (FrontendGroup, String, i32, String, Option<String>);
 
 fn http_frontend(req: &Request) -> Option<(bool, &RequestHttpFrontend)> {
     match &req.request_type {
@@ -276,12 +286,16 @@ fn http_frontend(req: &Request) -> Option<(bool, &RequestHttpFrontend)> {
 
 fn frontend_group(tls: bool, f: &RequestHttpFrontend) -> FrontendGroup {
     // Match the existing HTTPS-before-HTTP command order across independent groups.
-    (!tls, f.address.into(), f.hostname.clone())
+    // All POST hostnames share one append-only list. Keep their ordering
+    // together so a wildcard added later can precede an existing catch-all.
+    let host = (f.position == RulePosition::Tree as i32).then(|| f.hostname.clone());
+    (!tls, f.address.into(), host)
 }
 
 fn frontend_key(tls: bool, f: &RequestHttpFrontend) -> FrontendKey {
     (
         frontend_group(tls, f),
+        f.hostname.clone(),
         f.path.kind,
         f.path.value.clone(),
         f.method.clone(),
@@ -628,7 +642,9 @@ enum FrontendPriority {
     FirstMatch(Reverse<(u8, usize)>),
 }
 
-fn frontend_order(req: &Request) -> Option<(FrontendGroup, FrontendPriority, bool)> {
+type FrontendOrder = (FrontendGroup, Reverse<usize>, FrontendPriority, bool);
+
+fn frontend_order(req: &Request) -> Option<FrontendOrder> {
     let (tls, f) = http_frontend(req)?;
     let kind = match f.path.kind() {
         PathRuleKind::Equals => 2,
@@ -649,7 +665,15 @@ fn frontend_order(req: &Request) -> Option<(FrontendGroup, FrontendPriority, boo
     } else {
         FrontendPriority::FirstMatch(Reverse(specificity))
     };
-    Some((frontend_group(tls, f), priority, f.method.is_none()))
+    // Overlapping Gateway wildcards are nested suffixes: the longer suffix
+    // wins before path or method specificity. All emitted wildcard patterns
+    // have the same wrapper, and the bare catch-all is shorter than any.
+    Some((
+        frontend_group(tls, f),
+        Reverse(f.hostname.len()),
+        priority,
+        f.method.is_none(),
+    ))
 }
 
 /// Reorder into dependency-safe tiers with a deterministic secondary key.
@@ -742,10 +766,11 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
 }
 
 /// Keep the longest desired prefix already present, in order, in each
-/// host/listener group. Sōzu appends frontends, so the remaining suffix must be
+/// routing-list group. Sōzu appends frontends, so the remaining suffix must be
 /// removed and re-added: sorting a new /api alone cannot place it before an
-/// existing catch-all /. Pure removals need no re-adds; unchanged groups and
-/// backend-only updates stay put.
+/// existing catch-all /. A POST group includes every hostname on the bind,
+/// whereas TREE keeps a separate list per hostname. Pure removals need no
+/// re-adds; unchanged groups and backend-only updates stay put.
 fn ordered_frontend_diff(previous: &ir::Ir, desired: &ir::Ir) -> Vec<Request> {
     fn groups(ir: &ir::Ir) -> BTreeMap<FrontendGroup, Vec<Request>> {
         let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();

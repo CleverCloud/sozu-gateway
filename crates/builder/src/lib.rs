@@ -1037,9 +1037,16 @@ pub(crate) struct SourcedFrontend {
 }
 
 /// Mirror of Sōzu's route key: the listener a frontend binds to (`tls` picks
-/// the HTTPS vs HTTP listener), hostname, path match, optional method. The
-/// target cluster is *not* part of the key.
-type RouteKey = (bool, SocketAddr, String, ir::PathMatch, Option<String>);
+/// the HTTPS vs HTTP listener), hostname and wildcard depth, path match,
+/// optional method. The target cluster is *not* part of the key.
+type RouteKey = (
+    bool,
+    SocketAddr,
+    String,
+    bool,
+    ir::PathMatch,
+    Option<String>,
+);
 
 /// The raw path value of a match, for problem context.
 fn path_value(p: &ir::PathMatch) -> &str {
@@ -1087,6 +1094,7 @@ fn resolve_frontend_collisions(
             sf.frontend.tls,
             sf.frontend.listener,
             sf.frontend.hostname.clone(),
+            sf.frontend.multi_label_wildcard,
             sf.frontend.path.clone(),
             sf.frontend.method.clone(),
         );
@@ -1321,6 +1329,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         frontends.push(SourcedFrontend {
                             frontend: ir::Frontend {
                                 hostname: host.clone(),
+                                multi_label_wildcard: false,
                                 path: pm.clone(),
                                 method: None,
                                 cluster_id: Some(cluster_id.clone()),
@@ -1336,6 +1345,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                             frontends.push(SourcedFrontend {
                                 frontend: ir::Frontend {
                                     hostname: host.clone(),
+                                    multi_label_wildcard: false,
                                     path: pm,
                                     method: None,
                                     cluster_id: Some(cluster_id),
@@ -1455,5 +1465,18 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         gateways: gw.gateways,
         routes: gw.routes,
         referenced_services: referenced,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tls_covers;
+
+    #[test]
+    fn tls_wildcards_still_cover_only_one_label() {
+        let names = ["*.example.com".to_string()].into_iter().collect();
+        assert!(tls_covers(&names, "a.example.com"));
+        assert!(!tls_covers(&names, "a.b.example.com"));
+        assert!(!tls_covers(&names, "example.com"));
     }
 }

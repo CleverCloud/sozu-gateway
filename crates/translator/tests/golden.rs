@@ -79,6 +79,7 @@ fn backend(cluster_id: &str, addr_s: &str, weight: Option<i32>) -> ir::Backend {
 fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir::Frontend {
     ir::Frontend {
         hostname: host.to_string(),
+        multi_label_wildcard: false,
         path,
         method: None,
         cluster_id: Some(cluster_id.to_string()),

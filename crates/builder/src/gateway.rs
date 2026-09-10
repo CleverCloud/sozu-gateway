@@ -1094,6 +1094,7 @@ fn attach_rule(
             for hostname in hosts {
                 frontends.push(SourcedFrontend {
                     frontend: ir::Frontend {
+                        multi_label_wildcard: hostname.starts_with("*."),
                         hostname,
                         path: path.clone(),
                         method: method.clone(),
@@ -1454,12 +1455,12 @@ fn method_string(method: &HttpRouteRulesMatchesMethod) -> Option<String> {
         .and_then(|v| v.as_str().map(str::to_string))
 }
 
-/// A `*.example.com` wildcard covers exactly one extra label.
+/// Gateway hostnames match one or more extra labels, unlike TLS and Ingress.
 fn wildcard_covers(wildcard: &str, host: &str) -> bool {
     wildcard.strip_prefix("*.").is_some_and(|suffix| {
         host.strip_suffix(suffix)
             .and_then(|prefix| prefix.strip_suffix('.'))
-            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+            .is_some_and(|prefix| prefix.split('.').all(|label| !label.is_empty()))
     })
 }
 
@@ -1973,9 +1974,11 @@ mod tests {
     use super::{host_intersection, wildcard_covers};
 
     #[test]
-    fn wildcard_covers_exactly_one_extra_label() {
+    fn wildcard_covers_one_or_more_extra_labels() {
         assert!(wildcard_covers("*.example.com", "a.example.com"));
-        assert!(!wildcard_covers("*.example.com", "a.b.example.com"));
+        assert!(wildcard_covers("*.example.com", "a.b.example.com"));
+        assert!(!wildcard_covers("*.example.com", ".example.com"));
+        assert!(!wildcard_covers("*.example.com", "a..example.com"));
         assert!(!wildcard_covers("*.example.com", "example.com"));
         // Not a suffix-string match: `notexample.com` must not count.
         assert!(!wildcard_covers("*.example.com", "a.notexample.com"));
