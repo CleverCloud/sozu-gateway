@@ -87,7 +87,9 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pass","port":443,"bind":9443,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"pg","port":5432,"bind":8080,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":80,"protocol":"HTTP","transport":"TCP"}]' > /dev/null 2>&1
-    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"https2","port":9443,"bind":9444,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"}]' > /dev/null 2>&1
+    helm template {{HELM_RELEASE}} {{CHART}} -f {{CHART}}/ci/multiple-listeners.yaml --show-only templates/configmap.yaml | python3 scripts/check-listener-config.py
     helm template {{HELM_RELEASE}} {{CHART}} --set image.controller.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
 
 # Package the Helm chart into dist/ (use TAG=v<semver>).
