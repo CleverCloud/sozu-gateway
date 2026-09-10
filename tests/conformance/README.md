@@ -19,7 +19,9 @@ the suite. Review those values before applying them to an existing deployment.
 Use a dedicated test cluster. The official suite deletes entire fixture namespaces, including
 its base namespaces. The script refuses any existing `gateway-conformance-*` namespace and
 uses a separate `sozu-gateway-conformance` namespace as its runner and concurrency guard.
-It checks again immediately before starting the suite. It does not alter an existing gateway
+The suite also deletes its cluster-scoped `gatewayclass-observed-generation-bump` fixture;
+the script refuses that name when it already exists. Both guards are checked again immediately
+before starting the suite. It does not alter an existing gateway
 Deployment, Service, exposure configuration or CRDs.
 
 ```sh
@@ -27,7 +29,7 @@ python3 tests/conformance/run.py \
   --context my-test-cluster --gateway-class sozu \
   --gateway-service sozu-system/sozu-gateway \
   --runner-image my-registry/gateway-conformance:v1.6.2 \
-  --version <controller-revision>-sozu-2.2.1 \
+  --controller-revision <full-sha-of-built-controller-checkout> \
   --tests HTTPRouteSimpleSameNamespace,HTTPRouteExactPathMatching \
   --output results/focused-2026-09-10
 ```
@@ -35,6 +37,10 @@ python3 tests/conformance/run.py \
 By default the script builds and pushes the runner image. Use `--kind-name NAME` to load the
 built image into Kind instead, or `--skip-build --runner-image registry/image@sha256:...` for
 an image already built from this Dockerfile. The latter also works without local Docker.
+`--controller-revision` identifies the checkout used to build the deployed controller, which may
+differ from the harness checkout. The report combines that SHA with the Sōzu image actually
+selected by the publish Service. A Service without a Pod selector, or Pods with mixed Sōzu image
+versions, is rejected. Image references and runtime image IDs are retained in metadata.
 The output directory must not exist; a second run cannot overwrite evidence from the first.
 
 Omit `--tests` to run the complete HTTP/TCP/UDP campaign. The declared extensions are the same
@@ -48,14 +54,18 @@ ShortNames are rejected. Targeted runs are regression checks, not full conforman
 Each output directory contains:
 
 - `suite.log`: unfiltered Go output, including final subtest verdicts;
-- `report.yaml`: the unmodified upstream report, when the suite reached report generation;
+- `report.yaml` for full campaigns or `focused-report.yaml` for selected tests: the unmodified
+  upstream report, when the suite reached report generation;
 - `metadata.json`: suite SHA, exact command, selected tests, timestamps, Kubernetes version,
-  published Service addresses/ports, controller and runner image identities, exit and cleanup status;
+  published Service addresses/ports, controller and runner image identities, built controller SHA,
+  optional PR head SHA, report scope, exit and cleanup status;
 - `catalog.json`: names and feature requirements compiled from the pinned upstream suite;
 - `runner-resources.json` and `exit-code`: the runner/RBAC manifest and final process status.
 
-A selected FAIL remains a failure. A selected SKIP, missing final verdict, missing report or
-missing successful wrapper verdict cannot produce a successful exit. A full campaign currently
+Exit 1 means a selected assertion failed. Exit 2 means an orchestration or incomplete-execution
+error with no recorded selected failure; the original suite process status is retained separately.
+An interrupted run exits 130. A selected FAIL remains a failure. A selected SKIP, missing final
+verdict, missing report or missing successful wrapper verdict cannot produce a successful exit. A full campaign currently
 has known failures; this script does not waive them or convert an expected partial result into
 CI success. Compare individual final Go verdicts with the
 [recorded baseline](../../docs/conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.md)
@@ -66,7 +76,13 @@ The suite's standard `namespace-annotations` option records an execution UUID wi
 namespace selector labels. Normal fixture cleanup remains upstream. After interruption the
 script stops its runner, then deletes only fixture namespaces bearing that UUID; deletion uses
 UID preconditions so a replacement object cannot be removed. It also deletes only the runner
-namespace and cluster RBAC objects it created. Artifact collection does not request Secrets or kubeconfig credentials. Review `cleanup_errors` after an aborted or disconnected run; cleanup
+namespace and cluster RBAC objects it created. The namespace annotation does **not** establish
+ownership of the GatewayClass fixture: only upstream normal cleanup removes it. If execution
+stops before upstream cleanup, that class may remain. The script records its name and UID in
+`retained_fixture_gateway_classes`, reports a cleanup error and leaves it for manual inspection;
+it never adopts or deletes an unowned class. The next run refuses the remaining fixture.
+Artifact collection does not request Secrets or kubeconfig credentials.
+Review `cleanup_errors` after an aborted or disconnected run; cleanup
 requires API access and cannot be guaranteed after a hard kill or machine loss.
 
 ## CI and local Kind
@@ -77,7 +93,15 @@ The workflow runs these baseline checks on every PR and master push:
 master 431017f in the recorded v1.6.2 campaign. This harness PR does not depend on the separate
 controller fixes. Workflow dispatch accepts exact `run_test` names, or `mode=full` with no test
 selection. Full mode retains its real failing exit until the implementation meets every selected
-assertion. Artifacts are uploaded even on failure.
+assertion. Artifacts are uploaded even on failure. CI records the merge checkout SHA actually
+used for the controller image and records the PR head SHA separately for traceability. It never substitutes the
+PR head for a merge revision that was built. `kind.sh` requires a clean checkout before creating
+the cluster so a SHA cannot silently describe a build with local modifications. The controller
+image also carries that SHA in `org.opencontainers.image.revision`.
+
+The initial Docker/Kind focused path passed in
+[CI run 34479229109](https://github.com/CleverCloud/sozu-gateway/actions/runs/34479229109).
+This records the five-test baseline run, not a full-profile pass.
 
 [Kind 0.32.0](https://github.com/kubernetes-sigs/kind/releases/tag/v0.32.0) runs
 Kubernetes 1.36.1 using the release's pinned node-image digest. The workflow installs
@@ -94,7 +118,7 @@ python3 tests/conformance/run.py \
   --context kind-conformance-local --gateway-class sozu \
   --gateway-service sozu-system/sozu-gateway \
   --runner-image sozu-gateway-conformance:local --skip-build \
-  --version <controller-revision>-sozu-2.2.1 \
+  --controller-revision <full-sha-of-built-controller-checkout> \
   --tests HTTPRouteSimpleSameNamespace --output results/local
 kind delete cluster --name conformance-local
 ```

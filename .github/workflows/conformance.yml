@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: gateway-conformance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   conformance:
     runs-on: ubuntu-latest
@@ -46,6 +50,9 @@ jobs:
         id: provision
         run: bash tests/conformance/kind.sh "$KIND_NAME"
       - name: Run upstream assertions
+        env:
+          CONTROLLER_REVISION: ${{ steps.provision.outputs.controller_revision }}
+          PR_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
         run: |
           tests="$RUN_TEST"
           if [[ "$MODE" == full && -n "$tests" ]]; then
@@ -59,7 +66,8 @@ jobs:
             --context "kind-$KIND_NAME" --gateway-class sozu \
             --gateway-service sozu-system/sozu-gateway \
             --runner-image sozu-gateway-conformance:local --skip-build \
-            --version "$GITHUB_SHA-sozu-2.2.1" --tests "$tests" --output conformance-results
+            --controller-revision "$CONTROLLER_REVISION" --pr-head-revision "$PR_HEAD_REVISION" \
+            --tests "$tests" --output conformance-results
       - name: Collect controller diagnostics
         if: always() && steps.provision.outputs.created == 'true'
         run: |
@@ -72,7 +80,7 @@ jobs:
         with:
           name: gateway-conformance-${{ github.run_id }}-${{ github.run_attempt }}
           path: conformance-results/
-          if-no-files-found: error
+          if-no-files-found: warn
       - name: Delete the owned Kind cluster
         if: always() && steps.provision.outputs.created == 'true'
         run: kind delete cluster --name "$KIND_NAME"

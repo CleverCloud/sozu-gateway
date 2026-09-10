@@ -349,7 +349,9 @@ For the current v1.6.2 wrapper and combined profiles, use the
 The commands above retain the historical v1.6.1 procedure.
 
 The gateway must be deployed with `rbac.allowStatusWrites=true` and a `sozu` GatewayClass present.
-Name the resulting file `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml` and add a row above.
+For the historical HTTP-only command, name the report `gateway-http_crd-<bundle>_<YYYY-MM-DD>.yaml`;
+combined HTTP/TCP/UDP campaigns use `gateway-http-tcp-udp_crd-<bundle>_<YYYY-MM-DD>.yaml`.
+Add a row above for each complete campaign.
 
 It runs unconditioned now. Rows 2–4 predate the `Selector` implementation, when the suite aborted
 in setup; the workaround they used was to keep the base Gateway out of the readiness gate while the

@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = "ca6c2a65454737236fb7a937bd9b17e42b07e9de"
 RUN_NAMESPACE = "sozu-gateway-conformance"
 OWNER = "conformance.sozu.io/run-id"
+# The only cluster-scoped fixture in the pinned suite. Namespace annotations
+# do not establish ownership of it, so outer cleanup must never delete it.
+FIXTURE_GATEWAY_CLASSES = {"gatewayclass-observed-generation-bump"}
 PROFILES = "GATEWAY-HTTP,GATEWAY-TCP,GATEWAY-UDP"
 EXTENDED = ["HTTPRouteResponseHeaderModification", "HTTPRouteSchemeRedirect", "HTTPRouteMethodMatching"]
 CORE = {"Gateway", "HTTPRoute", "ReferenceGrant", "TCPRoute", "UDPRoute"}
@@ -58,9 +61,32 @@ def check_results(exit_code, log, expected, report_exists):
     wrapper_pass = bool(re.search(r"^--- PASS: TestGatewayConformance \(", log, re.MULTILINE))
     complete = not missing and report_exists
     # A zero exit without the selected assertions/report is never a green run.
-    code = exit_code or (1 if failed else 2 if missing or skipped or not report_exists or not wrapper_pass else 0)
+    code = 1 if failed else 2 if exit_code or missing or skipped or not report_exists or not wrapper_pass else 0
     return code, {"complete": complete, "verdicts": actual, "missing": missing,
                   "selected_skipped": skipped, "failed": failed, "wrapper_pass": wrapper_pass}
+
+
+def implementation_identity(controller_revision, pods):
+    images = []
+    for pod in pods:
+        statuses = {c["name"]: c for c in pod.get("status", {}).get("containerStatuses", [])}
+        images.append({"pod": pod["metadata"]["name"], "containers": [
+            {"name": c["name"], "image": c["image"], "imageID": statuses.get(c["name"], {}).get("imageID")}
+            for c in pod["spec"]["containers"]]})
+    sozu_images = {c["image"] for pod in images for c in pod["containers"] if c["name"] == "sozu"}
+    if len(sozu_images) != 1:
+        raise RuntimeError("the publish Service must select Pods with exactly one Sōzu image version")
+    sozu_image = sozu_images.pop()
+    return {"controller_revision": controller_revision, "sozu_image": sozu_image,
+            "implementation_version": f"{controller_revision} ({sozu_image})", "gateway_images": images}
+
+
+def fixture_gateway_classes(classes):
+    return [obj for obj in classes if obj["metadata"]["name"] in FIXTURE_GATEWAY_CLASSES]
+
+
+def report_name(selected):
+    return "focused-report.yaml" if selected else "report.yaml"
 
 
 def owned(obj, run_id):
@@ -116,16 +142,23 @@ def main():
     parser.add_argument("--skip-build", action="store_true", help="use an image built from tests/conformance/Dockerfile")
     parser.add_argument("--kind-name", help="load the built image into this Kind cluster instead of pushing it")
     parser.add_argument("--output", required=True, type=Path, help="new directory for immutable run artifacts")
-    parser.add_argument("--version", required=True, help="controller revision and Sōzu version under test")
+    parser.add_argument("--controller-revision", required=True, help="Git SHA of the checkout used to build the deployed controller")
+    parser.add_argument("--pr-head-revision", default="", help="PR head SHA for traceability; does not replace the built checkout SHA")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9.-]*", args.gateway_service):
         parser.error("--gateway-service must be namespace/name")
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", args.controller_revision):
+        parser.error("--controller-revision must be the full Git SHA of the built checkout")
+    if args.pr_head_revision and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", args.pr_head_revision):
+        parser.error("--pr-head-revision must be a full Git SHA")
     args.output.mkdir(parents=True, exist_ok=False)
     run_id = uuid.uuid4().hex
     kube = ["kubectl", "--context", args.context]
     metadata = {"started_at": now(), "run_id": run_id, "upstream_revision": UPSTREAM,
                 "suite_version": "v1.6.2", "context": args.context, "gateway_class": args.gateway_class,
-                "gateway_service": args.gateway_service, "implementation_version": args.version,
+                "gateway_service": args.gateway_service, "controller_revision": args.controller_revision,
+                "pr_head_revision": args.pr_head_revision or None,
+                "report_scope": "focused" if args.tests else "full", "report_file": report_name(args.tests),
                 "runner_image": args.runner_image, "tests": args.tests, "qps": 100, "burst": 200,
                 "profiles": PROFILES.split(","), "extended_features": EXTENDED, "exit_code": 2}
     created = []
@@ -146,6 +179,11 @@ def main():
             path = "/apis/rbac.authorization.k8s.io/v1/" + resource + "/" + name
         body = json.dumps({"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": uid}})
         command(kube + ["delete", "--raw", path, "-f", "-"], input=body)
+    def check_fixture_classes():
+        existing = fixture_gateway_classes(get("get", "gatewayclasses")["items"])
+        if existing:
+            raise RuntimeError("suite cleanup deletes its GatewayClass fixture; refusing existing GatewayClasses: "
+                               + ", ".join(obj["metadata"]["name"] for obj in existing))
     save()
     try:
         existing = get("get", "namespaces")["items"]
@@ -154,6 +192,7 @@ def main():
                      or n["metadata"]["name"] == RUN_NAMESPACE]
         if conflicts:
             raise RuntimeError("suite cleanup deletes whole namespaces; refusing existing namespaces: " + ", ".join(conflicts))
+        check_fixture_classes()
         metadata["gateway_class_status"] = get("get", "gatewayclass", args.gateway_class).get("status", {})
         ns, name = args.gateway_service.split("/")
         svc = get("get", "service", name, "-n", ns)
@@ -167,10 +206,10 @@ def main():
         metadata["kubernetes"] = json.loads(command(kube + ["version", "-o", "json"]))
         metadata["repository_revision"] = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
         selector = ",".join(f"{k}={v}" for k, v in sorted(svc["spec"].get("selector", {}).items()))
-        if selector:
-            pods = get("get", "pods", "-n", ns, "-l", selector)["items"]
-            metadata["gateway_images"] = [{"pod": p["metadata"]["name"],
-                "containers": [{"name": c["name"], "image": c["image"], "imageID": c.get("imageID")} for c in p.get("status", {}).get("containerStatuses", [])]} for p in pods]
+        if not selector:
+            raise RuntimeError("the publish Service must have a Pod selector to identify the Sōzu image")
+        pods = get("get", "pods", "-n", ns, "-l", selector)["items"]
+        metadata.update(implementation_identity(args.controller_revision, pods))
         if not args.skip_build:
             subprocess.run(["docker", "build", "--tag", args.runner_image, str(ROOT / "tests/conformance")], check=True)
             if args.kind_name:
@@ -198,6 +237,7 @@ def main():
                      if n["metadata"]["name"].startswith("gateway-conformance-")]
         if conflicts:
             raise RuntimeError("fixture namespaces appeared before execution: " + ", ".join(conflicts))
+        check_fixture_classes()
         expected = expected_names(names, catalog)
         metadata["selected_tests"] = sorted(expected)
         (args.output / "catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
@@ -208,7 +248,7 @@ def main():
             "--namespace-annotations=" + OWNER + "=" + run_id, "--selected-tests=" + args.tests,
             "--probe-addresses=" + ",".join(addresses), "--organization=clevercloud", "--project=sozu-gateway",
             "--url=https://github.com/CleverCloud/sozu-gateway", "--contact=https://github.com/CleverCloud/sozu-gateway/issues",
-            "--version=" + args.version, "--report-output=/results/report.yaml"]
+            "--version=" + metadata["implementation_version"], "--report-output=/results/report.yaml"]
         metadata["command"] = invocation
         save()
         with (args.output / "suite.log").open("w") as log:
@@ -222,12 +262,13 @@ def main():
         metadata["suite_exit_code"] = code
         try:
             report = command(remote + ["cat", "/results/report.yaml"])
-            (args.output / "report.yaml").write_text(report)
+            (args.output / metadata["report_file"]).write_text(report)
         except subprocess.CalledProcessError:
             pass
         code, metadata["results"] = check_results(code, (args.output / "suite.log").read_text(), expected,
-                                                  (args.output / "report.yaml").exists())
+                                                  (args.output / metadata["report_file"]).exists())
     except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        code = 2
         metadata["error"] = str(error)
         print(str(error), file=sys.stderr)
     except KeyboardInterrupt:
@@ -262,6 +303,15 @@ def main():
                     command(kube + ["wait", "--for=delete", "namespace/" + namespace["metadata"]["name"], "--timeout=120s"])
         except subprocess.CalledProcessError as error:
             cleanup_errors.append(str(error))
+        if created and runner_stopped:
+            try:
+                remaining = fixture_gateway_classes(get("get", "gatewayclasses")["items"])
+                metadata["retained_fixture_gateway_classes"] = [
+                    {"name": obj["metadata"]["name"], "uid": obj["metadata"]["uid"]} for obj in remaining]
+                if remaining:
+                    cleanup_errors.append("GatewayClass fixtures remain; inspect their recorded UIDs before manual cleanup")
+            except subprocess.CalledProcessError as error:
+                cleanup_errors.append(str(error))
         for resource in reversed(created):
             if resource["kind"] == "Namespace":
                 continue
