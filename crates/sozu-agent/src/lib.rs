@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -188,6 +189,52 @@ pub enum SozuError {
     WorkerGone,
 }
 
+/// Identity of the command socket in the shared filesystem. Container restarts
+/// recreate this socket even when their new PID namespace reuses worker PIDs.
+/// The change timestamp also distinguishes a reused device/inode pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub changed_secs: i64,
+    pub changed_nanos: i64,
+}
+
+impl SocketIdentity {
+    fn read(path: &str) -> Result<Self, SozuError> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| SozuError::Channel(format!("stat command socket: {e}")))?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            changed_secs: metadata.ctime(),
+            changed_nanos: metadata.ctime_nsec(),
+        })
+    }
+
+    fn verify(&self, path: &str) -> Result<(), SozuError> {
+        if *self != Self::read(path)? {
+            return Err(SozuError::Channel(
+                "command socket changed while connecting".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Restart identity: the command socket detects a container restart with reused
+/// PIDs, while the live worker set also detects individual worker replacements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SozuGeneration {
+    pub socket: SocketIdentity,
+    pub worker_pids: BTreeSet<i32>,
+}
+
+struct ConnectedChannel {
+    channel: Channel<Request, Response>,
+    socket: SocketIdentity,
+}
+
 /// Synchronous client for the Sōzu command socket. Reconnects lazily.
 pub struct SozuAgent {
     path: String,
@@ -195,7 +242,7 @@ pub struct SozuAgent {
     max_buffer_size: u64,
     read_timeout: Duration,
     write_timeout: Duration,
-    channel: Option<Channel<Request, Response>>,
+    channel: Option<ConnectedChannel>,
     /// Monotone count of reconnect attempts: bumped whenever an *established*
     /// channel broke and a reconnect-and-retry was attempted — a signal that
     /// the peer may have restarted and lost its state. Shared with
@@ -247,11 +294,17 @@ impl SozuAgent {
             .map_err(|e| SozuError::Channel(format!("set write timeout: {e:?}")))?;
         let address = socket2::SockAddr::unix(&self.path)
             .map_err(|e| SozuError::Channel(format!("socket address: {e:?}")))?;
+        let identity = SocketIdentity::read(&self.path)?;
         // A connect that times out surfaces as the same `Channel` error kind
         // as any other connect failure, so the reconnect path handles it.
         socket
             .connect(&address)
             .map_err(|e| SozuError::Channel(format!("connect: {e:?}")))?;
+        // Bind the identity to this connection, not to a later Status probe:
+        // the path could then name a new socket while the old peer still answers.
+        // A replacement during connect is ambiguous, so discard the stream and
+        // let the caller retry instead of acknowledging the wrong generation.
+        identity.verify(&self.path)?;
         // socket2's direct Socket→UnixStream conversion is gated behind its
         // `all` feature; the io-safety OwnedFd round-trip is ungated, safe
         // and equivalent (both just move the fd).
@@ -272,7 +325,10 @@ impl SozuAgent {
         channel
             .blocking()
             .map_err(|e| SozuError::Channel(format!("set blocking: {e:?}")))?;
-        self.channel = Some(channel);
+        self.channel = Some(ConnectedChannel {
+            channel,
+            socket: identity,
+        });
         Ok(())
     }
 
@@ -282,6 +338,7 @@ impl SozuAgent {
         }
         self.channel
             .as_mut()
+            .map(|connected| &mut connected.channel)
             .ok_or_else(|| SozuError::Channel("not connected".to_string()))
     }
 
@@ -434,13 +491,13 @@ impl SozuAgent {
         self.apply_one(&RequestType::Status(Status {}).into())
     }
 
-    /// The PIDs of Sōzu's live workers — its *restart generation*. A `Status`
+    /// The PIDs of Sōzu's live workers. A `Status`
     /// round-trip: the response carries `ContentType::Workers(WorkerInfos)`
     /// (per-worker id, pid, run_state; verified live, see PROTOCOL.md). Any
-    /// restart of the Sōzu main process (which forks fresh workers) or bounce
-    /// of a single worker changes this set, so comparing it against a baseline
-    /// detects a restart even when Sōzu already holds *some* state again —
-    /// unlike an emptiness probe. `Stopped` workers are excluded: they no
+    /// bounce of a worker changes this set, but a container restart can reuse
+    /// the same PIDs in its new namespace. Use [`Self::generation`] to detect
+    /// both cases, even when Sōzu already holds some state again. `Stopped`
+    /// workers are excluded: they no
     /// longer serve, and Sōzu prunes them from the list on its own schedule,
     /// which would otherwise read as a second spurious generation change.
     pub fn worker_pids(&mut self) -> Result<BTreeSet<i32>, SozuError> {
@@ -457,6 +514,21 @@ impl SozuAgent {
                 .collect()),
             _ => Err(SozuError::UnexpectedResponse),
         }
+    }
+
+    /// Query the workers and the identity of the socket that answered. A retry
+    /// may reconnect, so obtain the connection's identity after the Status
+    /// succeeds. Never re-stat the path here: it may already name another peer.
+    pub fn generation(&mut self) -> Result<SozuGeneration, SozuError> {
+        let worker_pids = self.worker_pids()?;
+        let connected = self
+            .channel
+            .as_ref()
+            .ok_or_else(|| SozuError::Channel("not connected".into()))?;
+        Ok(SozuGeneration {
+            socket: connected.socket,
+            worker_pids,
+        })
     }
 
     /// Ask Sōzu to load its routing state from a file path (visible to Sōzu).
@@ -499,6 +571,7 @@ enum Job {
         oneshot::Sender<Result<AggregatedMetrics, SozuError>>,
     ),
     WorkerPids(oneshot::Sender<Result<BTreeSet<i32>, SozuError>>),
+    Generation(oneshot::Sender<Result<SozuGeneration, SozuError>>),
 }
 
 impl Job {
@@ -511,6 +584,7 @@ impl Job {
             Job::SaveState(_, reply) => reply.is_closed(),
             Job::QueryMetrics(_, reply) => reply.is_closed(),
             Job::WorkerPids(reply) => reply.is_closed(),
+            Job::Generation(reply) => reply.is_closed(),
         }
     }
 }
@@ -560,6 +634,9 @@ impl SozuAgentHandle {
                         }
                         Job::WorkerPids(reply) => {
                             let _ = reply.send(agent.worker_pids());
+                        }
+                        Job::Generation(reply) => {
+                            let _ = reply.send(agent.generation());
                         }
                     }
                 }
@@ -611,12 +688,21 @@ impl SozuAgentHandle {
         reply_rx.await.map_err(|_| SozuError::WorkerGone)?
     }
 
-    /// Fetch the PIDs of Sōzu's live workers — its restart generation (see
+    /// Fetch the PIDs of Sōzu's live workers (see
     /// [`SozuAgent::worker_pids`]).
     pub async fn worker_pids(&self) -> Result<BTreeSet<i32>, SozuError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Job::WorkerPids(reply_tx))
+            .map_err(|_| SozuError::WorkerGone)?;
+        reply_rx.await.map_err(|_| SozuError::WorkerGone)?
+    }
+
+    /// Fetch Sōzu's socket identity and live workers in one serialised job.
+    pub async fn generation(&self) -> Result<SozuGeneration, SozuError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Job::Generation(reply_tx))
             .map_err(|_| SozuError::WorkerGone)?;
         reply_rx.await.map_err(|_| SozuError::WorkerGone)?
     }
@@ -1193,6 +1279,129 @@ mod tests {
 
         server.join().expect("fake sozu thread");
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn worker_response() -> Response {
+        Response {
+            status: ResponseStatus::Ok as i32,
+            message: String::new(),
+            content: Some(ResponseContent {
+                content_type: Some(ContentType::Workers(WorkerInfos {
+                    vec: [7, 8]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(id, pid)| WorkerInfo {
+                            id: id as u32,
+                            pid,
+                            run_state: RunState::Running as i32,
+                        })
+                        .collect(),
+                })),
+            }),
+        }
+    }
+
+    /// Reply once, then close the established connection. The caller can keep
+    /// the listener alive for a transient reconnect, or replace the socket.
+    fn serve_one_status(listener: std::os::unix::net::UnixListener) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            stream.set_nonblocking(true).expect("set nonblocking");
+            let mut channel: Channel<Response, Request> =
+                Channel::new(mio::net::UnixStream::from_std(stream), 16_384, 65_536);
+            channel.blocking().expect("set blocking");
+            let request = channel
+                .read_message_blocking_timeout(Some(Duration::from_secs(5)))
+                .expect("read Status");
+            assert_eq!(request, RequestType::Status(Status {}).into());
+            channel
+                .write_message(&worker_response())
+                .expect("write workers");
+        })
+    }
+
+    #[test]
+    fn generation_changes_on_socket_replacement_with_identical_worker_pids() {
+        let path = temp_socket_path("generation-replaced");
+        let old_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind old socket");
+        let first = serve_one_status(old_listener.try_clone().expect("clone listener"));
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let before = agent.generation().expect("initial generation");
+        first.join().expect("old peer disconnected");
+
+        std::fs::remove_file(&path).expect("unlink old socket");
+        let new_listener = std::os::unix::net::UnixListener::bind(&path).expect("bind new socket");
+        let second = serve_one_status(new_listener);
+        let after = agent.generation().expect("generation after reconnect");
+        assert_eq!(before.worker_pids, after.worker_pids);
+        assert_ne!(before.socket, after.socket);
+        assert_eq!(agent.reconnects.load(Ordering::Relaxed), 1);
+
+        drop(agent);
+        drop(old_listener);
+        second.join().expect("new peer");
+        std::fs::remove_file(path).expect("remove socket");
+    }
+
+    #[test]
+    fn generation_survives_reconnect_to_the_same_socket() {
+        let path = temp_socket_path("generation-reconnect");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind socket");
+        let first = serve_one_status(listener.try_clone().expect("clone listener"));
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let before = agent.generation().expect("initial generation");
+        first.join().expect("first connection closed");
+
+        let second = serve_one_status(listener);
+        let after = agent.generation().expect("generation after reconnect");
+        assert_eq!(before, after);
+        assert_eq!(agent.reconnects.load(Ordering::Relaxed), 1);
+
+        drop(agent);
+        second.join().expect("second connection");
+        std::fs::remove_file(path).expect("remove socket");
+    }
+
+    #[test]
+    fn generation_belongs_to_the_answering_connection_not_the_current_path() {
+        let path = temp_socket_path("generation-bound");
+        let server = spawn_scripted_fake_sozu(&path, vec![worker_response(), worker_response()]);
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let before = agent.generation().expect("initial generation");
+
+        // The old connection remains live after another listener takes its path.
+        // A path stat after Status would wrongly label its reply as the new peer.
+        std::fs::remove_file(&path).expect("unlink old socket");
+        let replacement = std::os::unix::net::UnixListener::bind(&path).expect("replace socket");
+        assert!(before
+            .socket
+            .verify(path.to_str().expect("utf-8 path"))
+            .is_err());
+        let after = agent.generation().expect("old peer still answers");
+        assert_eq!(before, after);
+        assert_eq!(agent.reconnects.load(Ordering::Relaxed), 0);
+
+        drop(agent);
+        assert_eq!(server.join().expect("old peer").len(), 2);
+        drop(replacement);
+        std::fs::remove_file(path).expect("remove socket");
+    }
+
+    #[test]
+    fn generation_requires_a_socket_and_a_valid_status_reply() {
+        let path = temp_socket_path("generation-missing");
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        assert!(matches!(agent.generation(), Err(SozuError::Channel(_))));
+        assert!(agent.channel.is_none());
+
+        let server = spawn_scripted_fake_sozu(&path, vec![ok_response()]);
+        assert!(matches!(
+            agent.generation(),
+            Err(SozuError::UnexpectedResponse)
+        ));
+        drop(agent);
+        server.join().expect("fake peer");
+        std::fs::remove_file(path).expect("remove socket");
     }
 
     #[test]
