@@ -682,9 +682,9 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
 const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"];
 
 /// Extract **and validate** leaf + chain + key PEM from a TLS Secret
-/// (`tls.crt` / `tls.key`). Returns `(leaf, chain, key, leaf_fingerprint)`;
-/// the fingerprint is the SHA-256 of the leaf's DER — Sōzu's identity for the
-/// certificate.
+/// (`tls.crt` / `tls.key`). An empty name override uses Sōzu's CN/SAN inference
+/// before certificates are merged, so an explicit override on another listener
+/// cannot discard the inferred names of a listener without a hostname.
 ///
 /// `split_certificate_chain` is purely textual (it scans for the BEGIN/END
 /// markers) and never decodes the base64 body, so everything is parsed here,
@@ -694,7 +694,9 @@ const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE
 /// certificates tier before frontends, so that blocks every frontend add.
 pub(crate) fn extract_cert(
     secret: &Secret,
-) -> Result<(String, Vec<String>, String, Vec<u8>), String> {
+    listener: SocketAddr,
+    mut names: Vec<String>,
+) -> Result<FingerprintedCert, String> {
     let data = secret
         .data
         .as_ref()
@@ -722,8 +724,11 @@ pub(crate) fn extract_cert(
     // fingerprint is the SHA-256 of the DER, the translator's identity.
     let leaf_pem = sozu_command_lib::certificate::parse_pem(leaf.as_bytes())
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
-    sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
+    let x509 = sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
+    if names.is_empty() {
+        names = sozu_command_lib::certificate::get_cn_and_san_attributes(&x509);
+    }
     let fingerprint =
         sozu_command_lib::certificate::calculate_fingerprint_from_der(&leaf_pem.contents);
     // The intermediates ride in the same AddCertificate, so a corrupt one
@@ -745,7 +750,16 @@ pub(crate) fn extract_cert(
         ));
     }
 
-    Ok((leaf, chain, key, fingerprint))
+    Ok(FingerprintedCert {
+        fingerprint,
+        cert: ir::Certificate {
+            listener,
+            certificate: leaf,
+            chain,
+            key,
+            names,
+        },
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -1124,7 +1138,8 @@ pub(crate) struct FingerprintedCert {
 /// the fingerprint (not the PEM text) matters: two Secrets holding the same
 /// DER re-encoded with different line wrapping (cert-manager vs hand-made)
 /// are still one certificate to Sōzu. The first occurrence fixes the entry's
-/// position and PEM bytes (the DER is identical anyway).
+/// position and PEM bytes (the DER is identical anyway). Empty overrides are
+/// resolved from CN/SAN by [`extract_cert`] before reaching this union.
 fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
     let mut merged: Vec<FingerprintedCert> = Vec::new();
     for c in certs {
@@ -1217,23 +1232,17 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 None => problems.push(Problem::SecretNotFound {
                     secret: secret_name.clone(),
                 }),
-                Some(secret) => match extract_cert(secret) {
-                    Ok((leaf, chain, key, fingerprint)) => {
+                Some(secret) => match extract_cert(
+                    secret,
+                    cfg.bind_for(ExposedProtocol::Https)
+                        .expect("HTTPS is always exposed"),
+                    hosts.clone(),
+                ) {
+                    Ok(cert) => {
                         for h in &hosts {
                             tls_ready_hosts.insert(h.clone());
                         }
-                        certificates.push(FingerprintedCert {
-                            fingerprint,
-                            cert: ir::Certificate {
-                                listener: cfg
-                                    .bind_for(ExposedProtocol::Https)
-                                    .expect("HTTPS is always exposed"),
-                                certificate: leaf,
-                                chain,
-                                key,
-                                names: hosts,
-                            },
-                        });
+                        certificates.push(cert);
                     }
                     Err(reason) => problems.push(Problem::InvalidCertificate {
                         secret: secret_name.clone(),
