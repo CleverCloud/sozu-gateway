@@ -541,18 +541,63 @@ pub(crate) fn build_gateway(
         }
         // Every declared listener gets a status entry, even unsupported / cert-less
         // ones (a route can still attach to them; they just aren't programmed).
-        let listeners: Vec<ListenerInfo> = gw
+        let mut gateway_certificates = Vec::new();
+        let mut listeners: Vec<ListenerInfo> = gw
             .spec
             .listeners
             .iter()
-            .map(|l| build_listener(cfg, inputs, index, &ns, l, certificates, &mut problems))
+            .map(|l| {
+                build_listener(
+                    cfg,
+                    inputs,
+                    index,
+                    &ns,
+                    l,
+                    &mut gateway_certificates,
+                    &mut problems,
+                )
+            })
             .collect();
 
-        let accepted = listeners.iter().any(|l| l.accepted);
-        let accepted_reason = if accepted && listeners.iter().all(|l| l.accepted) {
-            "Accepted"
+        let parameters = gw
+            .spec
+            .infrastructure
+            .as_ref()
+            .and_then(|infrastructure| infrastructure.parameters_ref.as_ref());
+        let (accepted, accepted_reason) = if let Some(parameters) = parameters {
+            problems.push(Problem::GatewayParametersUnsupported {
+                reference: format!(
+                    "{}/{} {}/{}",
+                    if parameters.group.is_empty() {
+                        "core"
+                    } else {
+                        &parameters.group
+                    },
+                    parameters.kind,
+                    ns,
+                    parameters.name
+                ),
+            });
+            // A rejected Gateway cannot contribute routes or certificates to
+            // the shared proxy, even when its listeners validate on their own.
+            for listener in &mut listeners {
+                if listener.accepted {
+                    listener.accepted = false;
+                    listener.accepted_reason = "Invalid";
+                }
+                listener.programmed = false;
+                listener.programmed_reason = "Invalid";
+            }
+            (false, "InvalidParameters")
         } else {
-            "ListenersNotValid"
+            certificates.extend(gateway_certificates);
+            let accepted = listeners.iter().any(|l| l.accepted);
+            let reason = if accepted && listeners.iter().all(|l| l.accepted) {
+                "Accepted"
+            } else {
+                "ListenersNotValid"
+            };
+            (accepted, reason)
         };
         let programmed = listeners.iter().any(|l| l.programmed);
         gw_listeners.insert((ns.clone(), name.clone()), listeners);

@@ -4,6 +4,20 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Gateways with infrastructure parameters
+
+A Gateway that sets `spec.infrastructure.parametersRef` is now rejected with
+`Accepted: False` / `InvalidParameters`. No parameter kinds are supported by this
+controller. Earlier versions silently ignored the reference and served its routes
+without applying the requested configuration.
+
+The rejected Gateway contributes no routes or certificates to Sōzu, and its
+listeners report `Programmed: False` with no attached routes. Other Gateways
+continue to be configured. Omit `parametersRef` only when the deployment's
+existing controller and chart configuration is the configuration you intend.
+
+---
+
 ## Sōzu 2.2.1
 
 The chart now defaults to `clevercloud/sozu:2.2.1` (was `2.2.0`). The controller's
