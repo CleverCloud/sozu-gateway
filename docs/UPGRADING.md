@@ -20,8 +20,9 @@ with HTTP, HTTPS, TCP, health and enabled metrics listeners. UDP may reuse the
 number. A bind failure or unexpected responder exit stops the controller.
 
 The chart keeps the controller alive for `sozu.drain.delaySeconds` during Pod
-withdrawal. If the controller nevertheless stops while Sōzu is serving, rejected
-requests can receive 503 until the local backend and its retry backoff recover.
+withdrawal. It can stop before Sōzu finishes its remaining drain period; rejected
+requests in that tail can receive 503. Controller-only restarts also yield 503
+until the local backend and its retry backoff recover.
 Ordinary Service backends remain independent of this responder. Changing the
 port hot retargets the backend; the saved IR format is unchanged.
 

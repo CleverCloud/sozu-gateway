@@ -5,6 +5,7 @@
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
@@ -17,13 +18,14 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::health::READ_TIMEOUT;
 
 const BODY: &[u8] = b"Internal Server Error\n";
 const MAX_CONNECTIONS: usize = 256;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(25);
 
 pub struct ErrorResponder {
     address: SocketAddr,
@@ -97,11 +99,21 @@ async fn serve(listener: TcpListener) -> Result<()> {
     loop {
         tokio::select! {
             accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
-                let (stream, _) = accepted.context("accepting HTTP error backend connection")?;
-                connections.spawn(serve_one(stream));
+                match accepted {
+                    Ok((stream, _)) => { connections.spawn(serve_one(stream)); }
+                    Err(error) => {
+                        // Resource exhaustion can be temporary and affects the
+                        // entire process. Avoid turning a failed accept into a
+                        // restart of otherwise healthy Kubernetes watches.
+                        warn!(%error, "accepting HTTP error backend connection failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
-                result.context("HTTP error backend connection task failed")?;
+                if let Err(error) = result {
+                    warn!(%error, "HTTP error backend connection task failed");
+                }
             }
         }
     }
@@ -115,10 +127,11 @@ async fn serve_one(stream: TcpStream) {
         .timer(TokioTimer::new())
         .header_read_timeout(READ_TIMEOUT);
     // Bound the entire connection, including fragmented headers, streaming
-    // bodies and a client that stops reading the response. Five seconds is
-    // below Sōzu's default 30-second backend timeout.
+    // bodies and a client that stops reading the response. The body budget is
+    // separate from the short header timeout and remains below Sōzu's default
+    // 30-second backend timeout.
     let connection = builder.serve_connection(TokioIo::new(stream), service_fn(respond));
-    match tokio::time::timeout(READ_TIMEOUT, connection).await {
+    match tokio::time::timeout(CONNECTION_TIMEOUT, connection).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => debug!(%error, "HTTP error backend connection rejected"),
         Err(_) => debug!("HTTP error backend connection timed out"),
@@ -147,7 +160,6 @@ async fn respond(mut request: Request<Incoming>) -> Result<Response<Full<Bytes>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn responder() -> ErrorResponder {
@@ -281,6 +293,19 @@ mod tests {
         assert_500(&response(&mut stream).await, false);
     }
 
+    #[tokio::test]
+    async fn body_drain_can_outlive_the_header_deadline() {
+        let server = responder();
+        let mut stream = TcpStream::connect(server.address()).await.unwrap();
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nHost: example.org\r\nContent-Length: 4\r\n\r\nbo")
+            .await
+            .unwrap();
+        tokio::time::sleep(READ_TIMEOUT + Duration::from_secs(1)).await;
+        stream.write_all(b"dy").await.unwrap();
+        assert_500(&response(&mut stream).await, false);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn incomplete_requests_cannot_hold_a_connection_forever() {
         for request in [
@@ -295,7 +320,7 @@ mod tests {
             let task = tokio::spawn(serve_one(stream));
             client.write_all(request).await.unwrap();
             tokio::task::yield_now().await;
-            tokio::time::advance(READ_TIMEOUT).await;
+            tokio::time::advance(CONNECTION_TIMEOUT).await;
             task.await.unwrap();
             let mut bytes = Vec::new();
             let _ = client.read_to_end(&mut bytes).await;

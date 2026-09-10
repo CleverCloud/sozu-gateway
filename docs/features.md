@@ -77,8 +77,10 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   exposure (`controller.httpErrorPort`, default `8082`). During a controller
   restart those requests can return 503 until the responder and Sōzu's backend
   retries recover; they retain their match instead of falling through to another
-  route. Complete request bodies are discarded within a five-second connection
-  deadline, so malformed, stalled or oversized headers may be closed earlier.
+  route. Request headers have a five-second deadline; complete request bodies
+  are discarded within a 25-second connection deadline. Slower requests are
+  closed and may receive 503 instead of 500. Malformed or oversized headers
+  may be closed earlier.
 - **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
   substring on another controller may need adjusting.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
