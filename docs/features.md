@@ -122,6 +122,9 @@ One annotation is read from the **Ingress** instead (it depends on that Ingress'
 
 ## L4 (TCP/UDP)
 
+UDP flow identity includes the client IP and source port; clients sharing an IP
+keep separate reply destinations.
+
 Raw TCP/UDP forwarding is a `TCPRoute` or a `UDPRoute` on a layer-4 `Gateway`
 listener. There is no host multiplexing at layer 4: one port forwards to exactly
 one Service.
