@@ -786,6 +786,11 @@ async fn reconcile(
         applied = true;
     }
 
+    // Fence every pass, including one that applied nothing: `publish_new` above
+    // makes apiserver calls, so the pre-build check is not "a moment ago", and
+    // `write_route` guards only the *route*'s identity — nothing downstream
+    // notices that our Gateway was replaced. Worse, its 409 path re-merges and
+    // retries, so a stale writer wins the race instead of losing it.
     verify_gateway_identity(args, client).await?;
 
     // Report Gateway API status (best-effort; never fails the reconcile). It is
@@ -802,7 +807,7 @@ async fn reconcile(
             s.metadata.namespace.as_deref() == Some(ns) && s.metadata.name.as_deref() == Some(name)
         })
     });
-    let gw_addresses = status::published_gateway_addresses(
+    let published = status::publication(
         publish_reference.is_some(),
         publish_svc.map(|svc| svc.as_ref()),
     );
@@ -822,7 +827,7 @@ async fn reconcile(
             &out.gateway_classes,
             &out.gateways,
             &route_updates,
-            gw_addresses.as_deref(),
+            &published,
             &args.gateway_scope,
         )
         .await;
