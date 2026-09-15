@@ -670,12 +670,10 @@ async fn run_provisioner(
             }
         };
         tokio::select! {
-            event = rx.recv() => {
+            event = changes::debounced(&mut rx, Duration::from_millis(args.debounce_ms)) => {
                 if event.is_none() {
                     anyhow::bail!("provisioning watch channel closed");
                 }
-                tokio::time::sleep(Duration::from_millis(args.debounce_ms)).await;
-                while rx.try_recv().is_ok() {}
             }
             _ = maybe_tick(resync.as_mut()) => {}
             _ = tokio::time::sleep(Duration::from_secs(5)), if failed => {}
