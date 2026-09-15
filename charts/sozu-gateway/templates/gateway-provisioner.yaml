@@ -25,13 +25,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-      app.kubernetes.io/instance: {{ printf "%s_manager" .Release.Name }}
+      {{- include "sozu-gateway.provisionerSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
-        app.kubernetes.io/instance: {{ printf "%s_manager" .Release.Name }}
+        {{- include "sozu-gateway.provisionerSelectorLabels" . | nindent 8 }}
       annotations:
         checksum/template: {{ include "sozu-gateway.gatewayTemplate" . | sha256sum }}
     spec:
@@ -49,17 +47,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: provisioner
-          {{- if .Values.image.controller.digest }}
-          image: "{{ .Values.image.controller.repository }}@{{ .Values.image.controller.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}"
-          {{- end }}
+          image: "{{ include "sozu-gateway.controllerImage" . }}"
           imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            {{- include "sozu-gateway.controllerSecurityContext" . | nindent 12 }}
           env:
             - name: SOZU_GW_PROVISION_TEMPLATE
               value: /etc/sozu-gateway/template.json
@@ -84,19 +75,7 @@ spec:
           ports:
             - name: health
               containerPort: {{ .Values.controller.healthPort | default 8081 }}
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: health
-            periodSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: health
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+          {{- include "sozu-gateway.controllerProbes" . | nindent 10 }}
           volumeMounts:
             - name: gateway-template
               mountPath: /etc/sozu-gateway
@@ -110,23 +89,7 @@ spec:
         - name: gateway-template
           configMap:
             name: {{ include "sozu-gateway.gatewayTemplateName" . }}
-        - name: kube-api-access
-          projected:
-            defaultMode: 0444
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 3607
-              - configMap:
-                  name: kube-root-ca.crt
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
-              - downwardAPI:
-                  items:
-                    - path: namespace
-                      fieldRef:
-                        fieldPath: metadata.namespace
+        {{- include "sozu-gateway.kubeApiAccessVolume" . | nindent 8 }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
