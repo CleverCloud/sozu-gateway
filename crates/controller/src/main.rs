@@ -975,14 +975,20 @@ async fn main() -> Result<()> {
             cfg
         }
     };
+    // A scoped instance serves one Gateway and `GatewayScope::filter_inputs`
+    // discards every Ingress, so watching them cluster-wide would only hold a
+    // cache it never reads and wake this worker on changes it must ignore.
+    let serves_ingresses = args.gateway_scope.is_default();
     let (ingresses, w) = reflector::store();
-    spawn_watch::<Ingress>(
-        Api::all(client.clone()),
-        watch_all(),
-        w,
-        tx.clone(),
-        "ingress",
-    );
+    if serves_ingresses {
+        spawn_watch::<Ingress>(
+            Api::all(client.clone()),
+            watch_all(),
+            w,
+            tx.clone(),
+            "ingress",
+        );
+    }
     // Namespaces are watched for their **labels**: that is what
     // `allowedRoutes.namespaces.selector` selects on, and a label edit changes
     // which routes a listener admits, so it has to wake the loop.
@@ -995,13 +1001,15 @@ async fn main() -> Result<()> {
         "namespace",
     );
     let (ingress_classes, w) = reflector::store();
-    spawn_watch::<IngressClass>(
-        Api::all(client.clone()),
-        watch_all(),
-        w,
-        tx.clone(),
-        "ingressclass",
-    );
+    if serves_ingresses {
+        spawn_watch::<IngressClass>(
+            Api::all(client.clone()),
+            watch_all(),
+            w,
+            tx.clone(),
+            "ingressclass",
+        );
+    }
     let (services, w) = reflector::store();
     spawn_watch::<Service>(
         Api::all(client.clone()),
@@ -1130,9 +1138,9 @@ async fn main() -> Result<()> {
     info!("waiting for informer caches to sync...");
     let sync = async {
         tokio::try_join!(
-            stores.ingresses.wait_until_ready(),
+            ready_when(serves_ingresses, &stores.ingresses),
             stores.namespaces.wait_until_ready(),
-            stores.ingress_classes.wait_until_ready(),
+            ready_when(serves_ingresses, &stores.ingress_classes),
             stores.services.wait_until_ready(),
             stores.endpointslices.wait_until_ready(),
             stores.secrets.wait_until_ready(),
