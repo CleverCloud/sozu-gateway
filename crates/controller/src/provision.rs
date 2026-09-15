@@ -5,7 +5,7 @@
 //! generated resource because a Gateway in another namespace cannot do so.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,7 +48,6 @@ pub struct ProvisionConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instance {
     pub name: String,
-    pub service_name: String,
     pub gateway_namespace: String,
     pub gateway_name: String,
     pub gateway_uid: String,
@@ -246,9 +245,7 @@ impl Provisioner {
                 }
             }
         }
-        self.confirmed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.confirmed_writes()
             .retain(|_, entry| desired.contains(&entry.gateway_uid));
         Ok(outcome)
     }
@@ -259,6 +256,13 @@ impl Provisioner {
             &self.config.namespace,
             &kind.resource(),
         )
+    }
+
+    /// A poisoned lock only means some other task panicked mid-update; the map
+    /// is a memo, so recovering the guard is always preferable to spreading the
+    /// panic through the provisioning loop.
+    fn confirmed_writes(&self) -> MutexGuard<'_, BTreeMap<(Kind, String), ConfirmedWrite>> {
+        self.confirmed.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn verify_anchor(&self, anchor: &ConfigMap) -> Result<()> {
@@ -297,6 +301,10 @@ impl Provisioner {
         }
     }
 
+    /// Read live, every time, and never memoise across the pass: a cached
+    /// *negative* would let a class that disappears and comes back mid-cleanup
+    /// carry its absence into every later deletion, taking down resources that
+    /// had become valid again. The repeated GETs are the price of that.
     async fn live_owned(&self, gateway: &Gateway, controller_name: &str) -> Result<bool> {
         if gateway.metadata.deletion_timestamp.is_some() {
             return Ok(false);
@@ -352,7 +360,6 @@ impl Provisioner {
         let installation = format!("{:016x}", stable_hash(self.installation_uid.as_bytes()));
         let name = format!("sozu-gw-{}-{suffix}", &installation[..8]);
         Ok(Instance {
-            service_name: name.clone(),
             name,
             gateway_namespace: gateway.namespace().context("Gateway has no namespace")?,
             gateway_name: gateway.name_any(),
@@ -405,8 +412,11 @@ impl Provisioner {
             ("SOZU_GW_GATEWAY_UID", instance.gateway_uid.clone()),
             (
                 "SOZU_GW_PUBLISH_SERVICE",
-                format!("{}/{}", self.config.namespace, instance.service_name),
+                format!("{}/{}", self.config.namespace, instance.name),
             ),
+            // Set explicitly rather than left to the default: dropping the key
+            // would change every generated Pod template and roll every
+            // instance, for a value the scope already implies.
             ("SOZU_GW_INGRESS_STATUS_WRITES", "false".into()),
         ] {
             env.retain(|e| e["name"] != key);
@@ -435,7 +445,7 @@ impl Provisioner {
         // against the default Pods or ignores its own replicas.
         rewrite_pod_selectors(spec, &old_selector, &selector);
         let mut service = serde_json::to_value(&self.config.service)?;
-        self.identity(&mut service, &instance.service_name, instance);
+        self.identity(&mut service, &instance.name, instance);
         service["spec"]["selector"] = selector.clone();
         let mut resources = vec![(Kind::ConfigMap, config_map), (Kind::Service, service)];
         if let Some(template) = &self.config.metrics_service {
@@ -531,10 +541,7 @@ impl Provisioner {
             let live = match request(api.get(name)).await {
                 Ok(live) => Some(live),
                 Err(error) if api_code(&error) == Some(404) => {
-                    self.confirmed
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&cache_key);
+                    self.confirmed_writes().remove(&cache_key);
                     None
                 }
                 Err(error) => return Err(error),
@@ -549,9 +556,7 @@ impl Provisioner {
                     bail!("{kind:?} {name} is still being deleted");
                 }
                 let confirmed = self
-                    .confirmed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .confirmed_writes()
                     .get(&cache_key)
                     .is_some_and(|entry| {
                         live.metadata.uid.as_deref() == Some(&entry.uid)
@@ -605,10 +610,7 @@ impl Provisioner {
                         gateway_uid: gateway_uid.to_owned(),
                         template: encoded,
                     };
-                    self.confirmed
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(cache_key.clone(), entry);
+                    self.confirmed_writes().insert(cache_key.clone(), entry);
                     return Ok(());
                 }
                 Err(error) if api_code(&error) == Some(409) && attempt + 1 < RETRIES => {}
@@ -653,23 +655,14 @@ impl Provisioner {
             ..Default::default()
         };
         self.check_installation().await?;
-        match request(self.api(kind).delete(&object.name_any(), &params)).await {
-            Ok(_) => {
-                self.confirmed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&(kind, object.name_any()));
-                Ok(())
+        // An already-gone object is a completed prune, not a failure.
+        if let Err(error) = request(self.api(kind).delete(&object.name_any(), &params)).await {
+            if api_code(&error) != Some(404) {
+                return Err(error);
             }
-            Err(error) if api_code(&error) == Some(404) => {
-                self.confirmed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&(kind, object.name_any()));
-                Ok(())
-            }
-            Err(error) => Err(error),
         }
+        self.confirmed_writes().remove(&(kind, object.name_any()));
+        Ok(())
     }
 }
 
