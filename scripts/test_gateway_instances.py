@@ -5,7 +5,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import tomllib
 import unittest
 
 CHART = Path(__file__).resolve().parents[1] / "charts/sozu-gateway"
@@ -90,9 +89,12 @@ class GatewayProvisioning(unittest.TestCase):
         self.assertEqual(set(template), {"namespace", "template_config_map", "deployment", "service", "config_map",
                                         "pod_disruption_budget", "metrics_service", "service_monitor"})
         self.assertNotIn("SOZU_GW_PROVISION_TEMPLATE", env(template["deployment"]))
-        self.assertNotIn("SOZU_GW_INGRESS_ONLY", env(template["deployment"]))
-        self.assertEqual(env(template["deployment"])["SOZU_GW_GATEWAY_SCOPE"], "template/template")
-        self.assertEqual(env(template["deployment"])["SOZU_GW_PUBLISH_SERVICE"], "test/sozu-template")
+        # Instance identity is the provisioner's to write. The chart must not
+        # compute a second copy of it; INGRESS_ONLY rides along in the template
+        # and is stripped per instance (pinned in provision.rs's tests).
+        self.assertEqual(env(template["deployment"])["SOZU_GW_INGRESS_ONLY"], "true")
+        for key in ("SOZU_GW_GATEWAY_SCOPE", "SOZU_GW_GATEWAY_UID", "SOZU_GW_PUBLISH_SERVICE"):
+            self.assertNotIn(key, env(template["deployment"]))
 
     def test_default_gateway_and_provisioner_selectors_do_not_overlap(self):
         resources = self.render(gatewayProvisioning={"enabled": True})
@@ -153,10 +155,9 @@ class GatewayProvisioning(unittest.TestCase):
         template = config(resources)
         expected = [("web", 80, 8080, "http"), ("tls", 443, 8443, "https"),
                     ("web-extra", 5300, 5300, "http"), ("tls-extra", 9443, 9443, "https")]
-        for deployment, service, config_map in [
-            (select(resources, "Deployment", "sozu"), select(resources, "Service", "sozu"),
-             select(resources, "ConfigMap", "sozu-sozu")),
-            (template["deployment"], template["service"], template["config_map"]),
+        for deployment, service in [
+            (select(resources, "Deployment", "sozu"), select(resources, "Service", "sozu")),
+            (template["deployment"], template["service"]),
         ]:
             with self.subTest(deployment=deployment["metadata"]["name"]):
                 exposure = json.loads(env(deployment)["SOZU_GW_EXPOSURE"])
@@ -170,20 +171,11 @@ class GatewayProvisioning(unittest.TestCase):
                                  [(name, bind) for name, _, bind, _ in expected])
                 for probe in ["readinessProbe", "livenessProbe"]:
                     self.assertEqual(sozu[probe]["tcpSocket"]["port"], "web")
-                config_toml = tomllib.loads(config_map["data"]["config.toml"])
-                self.assertEqual(config_toml["front_timeout"], 45)
-                self.assertEqual([(l["protocol"], l["address"]) for l in config_toml["listeners"]],
-                                 [(protocol, f"0.0.0.0:{bind}") for _, _, bind, protocol in expected])
-                for listener in config_toml["listeners"]:
-                    self.assertEqual(listener["sozu_id_header"], "x-proxy-id")
-                    self.assertTrue(listener["send_x_real_ip"])
-                    self.assertTrue(listener["elide_x_real_ip"])
-                    if listener["protocol"] == "https":
-                        self.assertEqual(listener["tls_versions"], ["TLS_V12", "TLS_V13"])
-                        self.assertFalse(listener["strict_sni_binding"])
-                        self.assertEqual(listener["hsts"], {"enabled": True, "max_age": 86400})
-                    else:
-                        self.assertNotIn("hsts", listener)
+        # Listener semantics belong to check-listener-config.py, which asserts
+        # them on this same fixture. What matters here is that the generated
+        # worker inherits that ConfigMap verbatim rather than rebuilding it.
+        self.assertEqual(template["config_map"]["data"],
+                         select(resources, "ConfigMap", "sozu-sozu")["data"])
 
     def test_single_replica_gateway_omits_only_its_own_budget(self):
         resources = self.render(replicaCount=2, gatewayProvisioning={"enabled": True, "replicaCount": 1})

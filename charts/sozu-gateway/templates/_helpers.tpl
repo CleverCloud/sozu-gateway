@@ -47,6 +47,75 @@ sozu.io/gateway-instance: {{ .gatewayInstance.name }}
 {{- end }}
 {{- end -}}
 
+{{/*
+Blocks shared by the controller and the provisioner. Both run the same image
+with the same hardening and the same health endpoints, so these are one
+decision each, not one per workload.
+*/}}
+{{- define "sozu-gateway.controllerImage" -}}
+{{- if .Values.image.controller.digest -}}
+{{ .Values.image.controller.repository }}@{{ .Values.image.controller.digest }}
+{{- else -}}
+{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}
+{{- end -}}
+{{- end -}}
+
+{{- define "sozu-gateway.controllerSecurityContext" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities:
+  drop: ["ALL"]
+{{- end -}}
+
+{{- define "sozu-gateway.controllerProbes" -}}
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  periodSeconds: 5
+  failureThreshold: 3
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+{{- end -}}
+
+{{/*
+The projected token volume both workloads mount. Its expiry and mode are one
+decision; each call site says why that Pod hand-rolls it.
+*/}}
+{{- define "sozu-gateway.kubeApiAccessVolume" -}}
+- name: kube-api-access
+  projected:
+    defaultMode: 0444
+    sources:
+      - serviceAccountToken:
+          path: token
+          expirationSeconds: 3607
+      - configMap:
+          name: kube-root-ca.crt
+          items:
+            - key: ca.crt
+              path: ca.crt
+      - downwardAPI:
+          items:
+            - path: namespace
+              fieldRef:
+                fieldPath: metadata.namespace
+{{- end -}}
+
+{{/*
+The provisioner is a singleton manager, never a proxy. Its Pods must stay out
+of every proxy selector, hence the same underscore trick as instanceLabel.
+*/}}
+{{- define "sozu-gateway.provisionerSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "sozu-gateway.name" . }}
+app.kubernetes.io/instance: {{ printf "%s_manager" .Release.Name }}
+{{- end -}}
+
 {{- define "sozu-gateway.serviceAccountName" -}}
 {{ include "sozu-gateway.baseFullname" . }}
 {{- end -}}
@@ -287,11 +356,6 @@ number the user never wrote.
 
 {{/* Helm owns the existing default instance. Gateway instances are created at
      runtime from the template below, without a predeclared list of Gateways. */}}
-{{- define "sozu-gateway.renderDefault" -}}
-{{- include "sozu-gateway.validateGatewayProvisioning" .root -}}
-{{- include .template .root -}}
-{{- end -}}
-
 {{- define "sozu-gateway.gatewayTemplateName" -}}
 {{ include "sozu-gateway.baseFullname" . }}-gateway-template
 {{- end -}}
@@ -316,7 +380,7 @@ number the user never wrote.
 {{- end -}}
 {{- $context := deepCopy . -}}
 {{- $_ := set $context "Values" $values -}}
-{{- $_ := set $context "gatewayInstance" (dict "name" "template" "gateway" (dict "namespace" "template" "name" "template")) -}}
+{{- $_ := set $context "gatewayInstance" (dict "name" "template") -}}
 {{- $config := dict "namespace" .Release.Namespace "template_config_map" (include "sozu-gateway.gatewayTemplateName" .) -}}
 {{- range $key, $template := dict "deployment" "deployment" "service" "service" "config_map" "configmap" "pod_disruption_budget" "pdb" "metrics_service" "metrics-service" "service_monitor" "servicemonitor" -}}
   {{- $rendered := include (printf "sozu-gateway.%s" $template) $context -}}

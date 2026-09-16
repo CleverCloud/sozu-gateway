@@ -55,6 +55,8 @@ struct Mock {
     objects: BTreeMap<String, Value>,
     requests: Vec<(String, String, Value)>,
     forbidden: BTreeSet<String>,
+    /// Paths that answer 404 exactly once, then exist again.
+    vanish_once: BTreeSet<String>,
     replace_on_patch: Option<(String, Value)>,
     conflict_all_patches: bool,
     normalize_quantities: bool,
@@ -179,6 +181,8 @@ fn mock_client(gateways: &[Arc<Gateway>]) -> (Client, Arc<Mutex<Mock>>) {
                     .push((method.clone(), path.clone(), body.clone()));
                 if state.forbidden.contains(&path) {
                     (403, status(403))
+                } else if method == "GET" && state.vanish_once.remove(&path) {
+                    (404, status(404))
                 } else {
                     match method.as_str() {
                         "GET" if query.contains("labelSelector") => {
@@ -489,6 +493,38 @@ async fn lost_class_ownership_is_checked_live_before_cleanup() {
             .filter(|(method, _, _)| method == "DELETE")
             .count(),
         3
+    );
+}
+
+/// A memoised *negative* ownership answer would carry one transient absence
+/// into every later deletion of the same pass, taking down resources that had
+/// become valid again by the time they were examined.
+#[tokio::test]
+async fn a_class_that_reappears_mid_cleanup_keeps_its_remaining_resources() {
+    let a = gateway(GATEWAY_A, "a");
+    let b = gateway(GATEWAY_B, "b");
+    let (client, state) = mock_client(&[a.clone(), b.clone()]);
+    let provisioner = Provisioner::new(client, config()).await.unwrap();
+    reconcile(&provisioner, &[a, b]).await;
+    state
+        .lock()
+        .unwrap()
+        .vanish_once
+        .insert("/apis/gateway.networking.k8s.io/v1/gatewayclasses/sozu".into());
+    // Both Gateways still exist live; only the cache no longer lists them, so
+    // every generated resource reaches the cleanup phase.
+    let result = reconcile(&provisioner, &[]).await;
+    assert!(result.failures.is_empty(), "{:?}", result.failures);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(method, _, _)| method == "DELETE")
+            .count(),
+        1,
+        "only the resource examined while the class was absent may be deleted"
     );
 }
 

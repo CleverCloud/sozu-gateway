@@ -112,7 +112,7 @@ pub struct RouteParentResult {
 /// Status conditions and Events are written back onto the *object*, so the
 /// kind has to travel with the result: the controller reads it to pick the
 /// `Api<K>` to patch and the Event's `involvedObject.kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum RouteKind {
     HttpRoute,
     TcpRoute,

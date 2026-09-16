@@ -118,17 +118,10 @@ spec:
             {{- toYaml .Values.resources.sozu | nindent 12 }}
         # --- control plane ----------------------------------------------------
         - name: controller
-          {{- if .Values.image.controller.digest }}
-          image: "{{ .Values.image.controller.repository }}@{{ .Values.image.controller.digest }}"
-          {{- else }}
-          image: "{{ .Values.image.controller.repository }}:{{ .Values.image.controller.tag | default .Chart.AppVersion }}"
-          {{- end }}
+          image: "{{ include "sozu-gateway.controllerImage" . }}"
           imagePullPolicy: {{ .Values.image.controller.pullPolicy }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            {{- include "sozu-gateway.controllerSecurityContext" . | nindent 12 }}
           env:
             - name: SOZU_GW_CLASS
               value: {{ .Values.ingressClass.name | quote }}
@@ -136,10 +129,9 @@ spec:
               value: {{ .Values.ingressClass.controllerValue | quote }}
             - name: SOZU_GW_SOCKET
               value: /run/sozu/sozu.sock
-            {{- if .gatewayInstance }}
-            - name: SOZU_GW_GATEWAY_SCOPE
-              value: {{ printf "%s/%s" .gatewayInstance.gateway.namespace .gatewayInstance.gateway.name | quote }}
-            {{- else if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" }}
+            {{- if eq (include "sozu-gateway.gatewayProvisioningEnabled" .) "true" }}
+            # Provisioned instances get their own scope, UID and publish Service
+            # from the provisioner, which strips this key from their template.
             - name: SOZU_GW_INGRESS_ONLY
               value: "true"
             {{- end }}
@@ -165,15 +157,11 @@ spec:
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"
             {{- end }}
-            {{- if or .Values.rbac.allowStatusWrites (and .Values.rbac.allowGatewayStatusWrites .gatewayInstance) }}
+            {{- if .Values.rbac.allowStatusWrites }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'
             # .status (needs the ingresses/status grant gated by the same flag).
             - name: SOZU_GW_PUBLISH_SERVICE
               value: "{{ .Release.Namespace }}/{{ include "sozu-gateway.fullname" . }}"
-            {{- end }}
-            {{- if and .gatewayInstance (not .Values.rbac.allowStatusWrites) }}
-            - name: SOZU_GW_INGRESS_STATUS_WRITES
-              value: "false"
             {{- end }}
             {{- if not .Values.rbac.allowGatewayStatusWrites }}
             # Without the */status grants every write would 403; tell the
@@ -194,19 +182,7 @@ spec:
           # Readiness only goes green once the controller has programmed Sōzu, so
           # a fresh Pod (start, rolling update, scale-out) takes no traffic until
           # its routes exist. Liveness is independent: it is up from boot.
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: health
-            periodSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: health
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+          {{- include "sozu-gateway.controllerProbes" . | nindent 10 }}
           volumeMounts:
             - name: sozu-run
               mountPath: /run/sozu
@@ -232,23 +208,7 @@ spec:
             name: {{ include "sozu-gateway.fullname" . }}-sozu
         # Hand-rolled equivalent of the automounted token volume, so the
         # controller keeps API access while the sozu container gets none.
-        - name: kube-api-access
-          projected:
-            defaultMode: 0444
-            sources:
-              - serviceAccountToken:
-                  path: token
-                  expirationSeconds: 3607
-              - configMap:
-                  name: kube-root-ca.crt
-                  items:
-                    - key: ca.crt
-                      path: ca.crt
-              - downwardAPI:
-                  items:
-                    - path: namespace
-                      fieldRef:
-                        fieldPath: metadata.namespace
+        {{- include "sozu-gateway.kubeApiAccessVolume" . | nindent 8 }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         # The selector is the chart's own, and `matchLabelKeys` scopes the skew
@@ -281,4 +241,4 @@ spec:
       {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.deployment") }}
+{{- include "sozu-gateway.deployment" . }}

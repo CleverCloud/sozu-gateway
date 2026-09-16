@@ -21,4 +21,4 @@ spec:
 {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.servicemonitor") }}
+{{- include "sozu-gateway.servicemonitor" . }}

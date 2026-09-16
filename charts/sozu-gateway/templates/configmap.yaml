@@ -67,4 +67,4 @@ data:
     {{- end }}
     {{- end }}
 {{ end -}}
-{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.configmap") -}}
+{{- include "sozu-gateway.configmap" . -}}

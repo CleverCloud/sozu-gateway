@@ -1,8 +1,10 @@
 {{- define "sozu-gateway.service" -}}
 {{- include "sozu-gateway.validateExposure" . }}
-{{- /* Both chart-wide preconditions are asserted here, and not in the file
+{{- /* The chart-wide preconditions are asserted here, and not in the file
      they guard: deployment.yaml re-renders the ConfigMap to checksum it, so a
-     `fail` raised inside it is reported against the checksum line. */ -}}
+     `fail` raised inside it is reported against the checksum line. The
+     provisioning one sits below, outside the define, because `gatewayTemplate`
+     renders this same define per instance and must not re-assert it. */ -}}
 {{- include "sozu-gateway.validateTimeouts" . }}
 apiVersion: v1
 kind: Service
@@ -35,4 +37,5 @@ spec:
     {{- end }}
 
 {{- end -}}
-{{- include "sozu-gateway.renderDefault" (dict "root" . "template" "sozu-gateway.service") }}
+{{- include "sozu-gateway.validateGatewayProvisioning" . -}}
+{{- include "sozu-gateway.service" . }}

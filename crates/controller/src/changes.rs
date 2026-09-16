@@ -29,6 +29,16 @@ pub async fn next(
     Some(())
 }
 
+/// Wait for one rebuild on a single channel, for loops with no endpoint
+/// priority. Await this *in* a `select!` head so resync and shutdown stay
+/// selectable while ordinary events settle.
+pub async fn debounced(changes: &mut mpsc::Receiver<()>, debounce: Duration) -> Option<()> {
+    changes.recv().await?;
+    tokio::time::sleep(debounce).await;
+    drain_pending(changes);
+    Some(())
+}
+
 fn drain_pending(rx: &mut mpsc::Receiver<()>) {
     // Bound the drain even if producers keep filling the channel. Rebuilding
     // the latest cache includes these changes; draining an unbounded stream
@@ -159,6 +169,31 @@ mod tests {
         let started = Instant::now();
         assert_eq!(next(&mut rx, &mut endpoint_rx, DEBOUNCE).await, Some(()));
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_channel_debounce_bounds_its_drain_and_ends_when_closed() {
+        let (tx, mut rx) = mpsc::channel(64);
+        for _ in 0..64 {
+            tx.try_send(()).unwrap();
+        }
+        let started = Instant::now();
+        assert_eq!(debounced(&mut rx, DEBOUNCE).await, Some(()));
+        assert_eq!(started.elapsed(), DEBOUNCE);
+        assert!(rx.is_empty());
+        drop(tx);
+        assert_eq!(debounced(&mut rx, DEBOUNCE).await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_channel_debounce_stays_interruptible() {
+        let (tx, mut rx) = mpsc::channel(64);
+        tx.try_send(()).unwrap();
+        // Shutdown and resync must not wait out the debounce.
+        tokio::select! {
+            _ = debounced(&mut rx, DEBOUNCE) => panic!("debounce finished too soon"),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
     }
 
     #[tokio::test(start_paused = true)]

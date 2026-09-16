@@ -670,12 +670,10 @@ async fn run_provisioner(
             }
         };
         tokio::select! {
-            event = rx.recv() => {
+            event = changes::debounced(&mut rx, Duration::from_millis(args.debounce_ms)) => {
                 if event.is_none() {
                     anyhow::bail!("provisioning watch channel closed");
                 }
-                tokio::time::sleep(Duration::from_millis(args.debounce_ms)).await;
-                while rx.try_recv().is_ok() {}
             }
             _ = maybe_tick(resync.as_mut()) => {}
             _ = tokio::time::sleep(Duration::from_secs(5)), if failed => {}
@@ -786,6 +784,11 @@ async fn reconcile(
         applied = true;
     }
 
+    // Fence every pass, including one that applied nothing: `publish_new` above
+    // makes apiserver calls, so the pre-build check is not "a moment ago", and
+    // `write_route` guards only the *route*'s identity — nothing downstream
+    // notices that our Gateway was replaced. Worse, its 409 path re-merges and
+    // retries, so a stale writer wins the race instead of losing it.
     verify_gateway_identity(args, client).await?;
 
     // Report Gateway API status (best-effort; never fails the reconcile). It is
@@ -802,7 +805,7 @@ async fn reconcile(
             s.metadata.namespace.as_deref() == Some(ns) && s.metadata.name.as_deref() == Some(name)
         })
     });
-    let gw_addresses = status::published_gateway_addresses(
+    let published = status::publication(
         publish_reference.is_some(),
         publish_svc.map(|svc| svc.as_ref()),
     );
@@ -822,7 +825,7 @@ async fn reconcile(
             &out.gateway_classes,
             &out.gateways,
             &route_updates,
-            gw_addresses.as_deref(),
+            &published,
             &args.gateway_scope,
         )
         .await;
@@ -972,14 +975,20 @@ async fn main() -> Result<()> {
             cfg
         }
     };
+    // A scoped instance serves one Gateway and `GatewayScope::filter_inputs`
+    // discards every Ingress, so watching them cluster-wide would only hold a
+    // cache it never reads and wake this worker on changes it must ignore.
+    let serves_ingresses = args.gateway_scope.is_default();
     let (ingresses, w) = reflector::store();
-    spawn_watch::<Ingress>(
-        Api::all(client.clone()),
-        watch_all(),
-        w,
-        tx.clone(),
-        "ingress",
-    );
+    if serves_ingresses {
+        spawn_watch::<Ingress>(
+            Api::all(client.clone()),
+            watch_all(),
+            w,
+            tx.clone(),
+            "ingress",
+        );
+    }
     // Namespaces are watched for their **labels**: that is what
     // `allowedRoutes.namespaces.selector` selects on, and a label edit changes
     // which routes a listener admits, so it has to wake the loop.
@@ -992,13 +1001,15 @@ async fn main() -> Result<()> {
         "namespace",
     );
     let (ingress_classes, w) = reflector::store();
-    spawn_watch::<IngressClass>(
-        Api::all(client.clone()),
-        watch_all(),
-        w,
-        tx.clone(),
-        "ingressclass",
-    );
+    if serves_ingresses {
+        spawn_watch::<IngressClass>(
+            Api::all(client.clone()),
+            watch_all(),
+            w,
+            tx.clone(),
+            "ingressclass",
+        );
+    }
     let (services, w) = reflector::store();
     spawn_watch::<Service>(
         Api::all(client.clone()),
@@ -1127,9 +1138,9 @@ async fn main() -> Result<()> {
     info!("waiting for informer caches to sync...");
     let sync = async {
         tokio::try_join!(
-            stores.ingresses.wait_until_ready(),
+            ready_when(serves_ingresses, &stores.ingresses),
             stores.namespaces.wait_until_ready(),
-            stores.ingress_classes.wait_until_ready(),
+            ready_when(serves_ingresses, &stores.ingress_classes),
             stores.services.wait_until_ready(),
             stores.endpointslices.wait_until_ready(),
             stores.secrets.wait_until_ready(),

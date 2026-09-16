@@ -15,6 +15,7 @@
 //! nothing in common — they are foreign types, so the trait tying them together
 //! ([`RouteParents`]) is declared here and implemented once per kind.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::scope::GatewayScope;
@@ -76,7 +77,7 @@ pub async fn write_status(
     gateway_classes: &[GatewayClassResult],
     gateways: &[GatewayResult],
     routes: &[RouteStatusUpdate],
-    gateway_addresses: Option<&[GatewayStatusAddresses]>,
+    published: &Publication,
     scope: &GatewayScope,
 ) {
     for gc in gateway_classes
@@ -88,7 +89,7 @@ pub async fn write_status(
         }
     }
     for gw in gateways {
-        if let Err(e) = write_gateway(client, gw, gateway_addresses).await {
+        if let Err(e) = write_gateway(client, gw, published).await {
             warn!(namespace = %gw.namespace, name = %gw.name, error = %e, "failed to write Gateway status");
         }
     }
@@ -371,10 +372,10 @@ fn build_gateway_conditions(
 async fn write_gateway(
     client: &Client,
     gw: &GatewayResult,
-    addresses: Option<&[GatewayStatusAddresses]>,
+    published: &Publication,
 ) -> Result<(), kube::Error> {
-    let awaiting_address = addresses.is_some_and(|a| a.is_empty());
-    let addresses = addresses.unwrap_or_default();
+    let awaiting_address = published.pending();
+    let addresses = published.addresses();
     let api: Api<Gateway> = Api::namespaced(client.clone(), &gw.namespace);
     let current = api.get(&gw.name).await?;
     if current.metadata.uid != gw.uid {
@@ -434,25 +435,56 @@ async fn write_gateway(
     Ok(())
 }
 
+/// What the publish Service can contribute to `status.addresses` right now.
+/// One named state rather than an `Option` whose emptiness re-encodes "pending":
+/// `Programmed` gates on that distinction, and "not configured" and "this type
+/// publishes no address" are the same outcome for entirely different reasons.
+#[derive(Debug)]
+pub(crate) enum Publication {
+    /// No publish Service configured, or its type publishes no address.
+    NotPublished,
+    /// Configured, but no address exists yet.
+    Pending,
+    Ready(Vec<GatewayStatusAddresses>),
+}
+
+impl Publication {
+    fn addresses(&self) -> &[GatewayStatusAddresses] {
+        match self {
+            Publication::Ready(addresses) => addresses,
+            _ => &[],
+        }
+    }
+
+    fn pending(&self) -> bool {
+        matches!(self, Publication::Pending)
+    }
+}
+
 /// A configured publish Service must reach the cache before the Gateway can
 /// claim its address is ready. Once observed, only address-bearing Service
 /// types make publication a readiness gate; NodePort keeps listener-only status
-/// until node address publication is supported.
-pub(crate) fn published_gateway_addresses(
-    configured: bool,
-    svc: Option<&Service>,
-) -> Option<Vec<GatewayStatusAddresses>> {
+/// until node address publication is supported — which is one arm here, and
+/// nothing anywhere else.
+pub(crate) fn publication(configured: bool, svc: Option<&Service>) -> Publication {
     if !configured {
-        return None;
+        return Publication::NotPublished;
     }
     let Some(svc) = svc else {
-        return Some(vec![]);
+        return Publication::Pending;
     };
-    matches!(
+    if !matches!(
         svc.spec.as_ref().and_then(|s| s.type_.as_deref()),
         Some("LoadBalancer" | "ClusterIP")
-    )
-    .then(|| gateway_addresses(svc))
+    ) {
+        return Publication::NotPublished;
+    }
+    let addresses = gateway_addresses(svc);
+    if addresses.is_empty() {
+        Publication::Pending
+    } else {
+        Publication::Ready(addresses)
+    }
 }
 
 /// Map the publish Service's load-balancer address(es) to Gateway status
@@ -546,6 +578,15 @@ pub struct RouteParentRef {
 /// shape mismatch, catches a generated struct that drifts.
 pub trait RouteParents {
     fn route_parents(&self) -> Vec<RouteParentStatus>;
+    /// Whether any existing entry is ours, without materialising the parents.
+    /// Most cached routes belong to another instance, so the pruning check runs
+    /// far more often than the copy that follows it.
+    fn has_owned_parent(
+        &self,
+        controller_name: &str,
+        scope: &GatewayScope,
+        namespace: &str,
+    ) -> bool;
 }
 
 /// Implement [`RouteParents`] for one kopium-generated route kind. The bodies
@@ -571,6 +612,24 @@ macro_rules! impl_route_parents {
                         },
                     })
                     .collect()
+            }
+
+            fn has_owned_parent(
+                &self,
+                controller_name: &str,
+                scope: &GatewayScope,
+                namespace: &str,
+            ) -> bool {
+                self.status.iter().flat_map(|s| s.parents.iter()).any(|p| {
+                    p.controller_name == controller_name
+                        && scope.owns_parent(
+                            namespace,
+                            p.parent_ref.group.as_deref(),
+                            p.parent_ref.kind.as_deref(),
+                            p.parent_ref.namespace.as_deref(),
+                            &p.parent_ref.name,
+                        )
+                })
             }
         }
     };
@@ -700,7 +759,7 @@ pub fn route_updates(
     fn collect<K: RouteParents + Resource>(
         objects: &[Arc<K>],
         kind: RouteKind,
-        results: &[RouteResult],
+        results: &HashMap<(RouteKind, &str, &str), &RouteResult>,
         controller_name: &str,
         scope: &GatewayScope,
         updates: &mut Vec<RouteStatusUpdate>,
@@ -709,14 +768,8 @@ pub fn route_updates(
             let meta = object.meta();
             let namespace = meta.namespace.as_deref().unwrap_or("default");
             let name = meta.name.as_deref().unwrap_or_default();
-            let result = results
-                .iter()
-                .find(|r| r.kind == kind && r.namespace == namespace && r.name == name);
-            if result.is_none()
-                && !object.route_parents().iter().any(|p| {
-                    p.controller_name == controller_name && owned_parent(scope, namespace, p)
-                })
-            {
+            let result = results.get(&(kind, namespace, name)).copied();
+            if result.is_none() && !object.has_owned_parent(controller_name, scope, namespace) {
                 continue;
             }
             // A route absent from build results may have lost its last parent
@@ -733,11 +786,17 @@ pub fn route_updates(
             });
         }
     }
+    let index: HashMap<(RouteKind, &str, &str), &RouteResult> = results
+        .iter()
+        .map(|r| ((r.kind, r.namespace.as_str(), r.name.as_str()), r))
+        .collect();
+    // One call per kind: `collect` is generic over the route type, and the three
+    // kopium-generated types share no trait to iterate them together.
     let mut updates = Vec::new();
     collect(
         &inputs.http_routes,
         RouteKind::HttpRoute,
-        results,
+        &index,
         controller_name,
         scope,
         &mut updates,
@@ -745,7 +804,7 @@ pub fn route_updates(
     collect(
         &inputs.tcp_routes,
         RouteKind::TcpRoute,
-        results,
+        &index,
         controller_name,
         scope,
         &mut updates,
@@ -753,7 +812,7 @@ pub fn route_updates(
     collect(
         &inputs.udp_routes,
         RouteKind::UdpRoute,
-        results,
+        &index,
         controller_name,
         scope,
         &mut updates,
@@ -1433,8 +1492,13 @@ mod tests {
             let service: Option<Service> =
                 service.map(|value| serde_json::from_value(value).unwrap());
             assert_eq!(
-                published_gateway_addresses(configured, service.as_ref())
-                    .map(|addresses| addresses.into_iter().map(|a| a.value).collect::<Vec<_>>()),
+                match publication(configured, service.as_ref()) {
+                    Publication::NotPublished => None,
+                    Publication::Pending => Some(vec![]),
+                    Publication::Ready(addresses) => {
+                        Some(addresses.into_iter().map(|a| a.value).collect::<Vec<_>>())
+                    }
+                },
                 expected,
                 "configured={configured}, service={service:?}"
             );
@@ -1779,7 +1843,7 @@ mod tests {
         replacement["metadata"]["uid"] = json!("gateway-replacement");
         replacement["metadata"]["resourceVersion"] = json!("2");
         let (client, state) = mock_client(replacement.clone(), false, false);
-        write_gateway(&client, &gateway_result(), Some(&[]))
+        write_gateway(&client, &gateway_result(), &Publication::Pending)
             .await
             .unwrap();
         let state = state.lock().unwrap();
@@ -1798,7 +1862,7 @@ mod tests {
             let (client, state) = mock_client(current_gateway(), false, false);
             state.lock().unwrap().replace_before_patch = Some(newer.clone());
 
-            let result = write_gateway(&client, &gateway_result(), Some(&[])).await;
+            let result = write_gateway(&client, &gateway_result(), &Publication::Pending).await;
             assert!(matches!(result, Err(kube::Error::Api(error)) if error.code == 409));
             let state = state.lock().unwrap();
             assert_eq!(state.gets, 1);
@@ -1820,7 +1884,7 @@ mod tests {
             .unwrap()
             .remove("resourceVersion");
         let (client, state) = mock_client(current, false, false);
-        let result = write_gateway(&client, &gateway_result(), Some(&[])).await;
+        let result = write_gateway(&client, &gateway_result(), &Publication::Pending).await;
         assert!(matches!(result, Err(kube::Error::Service(_))));
         assert_eq!(state.lock().unwrap().patches, 0);
     }
@@ -1831,7 +1895,9 @@ mod tests {
         let current = current_gateway();
         let gateway = gateway_result();
         let (client, state) = mock_client(current, false, false);
-        write_gateway(&client, &gateway, Some(&[])).await.unwrap();
+        write_gateway(&client, &gateway, &Publication::Pending)
+            .await
+            .unwrap();
         {
             let state = state.lock().unwrap();
             let condition = state.object["status"]["conditions"]
@@ -1848,13 +1914,15 @@ mod tests {
             );
             assert_eq!(state.patches, 1);
         }
-        write_gateway(&client, &gateway, Some(&[])).await.unwrap();
+        write_gateway(&client, &gateway, &Publication::Pending)
+            .await
+            .unwrap();
         assert_eq!(state.lock().unwrap().patches, 1, "waiting is a fixed point");
         let assigned = vec![GatewayStatusAddresses {
             r#type: Some("IPAddress".into()),
             value: "198.51.100.20".into(),
         }];
-        write_gateway(&client, &gateway, Some(&assigned))
+        write_gateway(&client, &gateway, &Publication::Ready(assigned.clone()))
             .await
             .unwrap();
         {
@@ -1870,7 +1938,7 @@ mod tests {
             assert_eq!(state.object["status"]["addresses"], json!(assigned));
             assert_eq!(state.patches, 2);
         }
-        write_gateway(&client, &gateway, Some(&assigned))
+        write_gateway(&client, &gateway, &Publication::Ready(assigned.clone()))
             .await
             .unwrap();
         assert_eq!(
@@ -1878,7 +1946,9 @@ mod tests {
             2,
             "assigned is a fixed point"
         );
-        write_gateway(&client, &gateway, None).await.unwrap();
+        write_gateway(&client, &gateway, &Publication::NotPublished)
+            .await
+            .unwrap();
         assert_eq!(
             state.lock().unwrap().patches,
             2,
@@ -1911,7 +1981,7 @@ mod tests {
             &classes,
             &[],
             &[],
-            None,
+            &Publication::NotPublished,
             &scoped,
         )
         .await;
@@ -1922,7 +1992,7 @@ mod tests {
             &classes,
             &[],
             &[],
-            None,
+            &Publication::NotPublished,
             &GatewayScope::default(),
         )
         .await;
