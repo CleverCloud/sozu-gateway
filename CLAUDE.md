@@ -88,8 +88,10 @@ then a no-op that still counts as a successful reconcile.
   **It does not cover a stream that goes silent without ending.** `watcher` retries internally, so
   a watch that stops delivering surfaces as neither an item nor an error and the reflector just
   stops advancing, and no `sozu_gw_controller_*` signal moves. What bounds it is the watch's own
-  idle timeout: the chart now sets `controller.watchTimeoutSecs: 60` by default
-  (see [docs/UPGRADING.md](docs/UPGRADING.md)), where the kube-rs default leaves it near five
+  idle timeout: the binary defaults `--watch-timeout-secs` to 60 and the chart's
+  `controller.watchTimeoutSecs: 60` mirrors it (an explicit `0` opts out and is rendered as such;
+  ≥ 295 is refused at startup because kube-rs refuses it on every watch start — see
+  [docs/UPGRADING.md](docs/UPGRADING.md)), where the kube-rs default leaves it near five
   minutes. Measured across three managed-cluster upgrades, the unbounded default cost
   **19.7%, 17.1% and 14.7%** of fresh HTTP requests for the duration of node replacement — every
   failure an HTTP 504 from Sōzu against a withdrawn backend, while bare TCP, DNS and the

@@ -68,7 +68,13 @@ controller:
   # This sets `timeoutSeconds` on every watch, which is also what kube-rs
   # derives its *client-side* idle timeout from (that value plus a 5s margin).
   # 0 restores kube-rs's default of 290s — i.e. up to ~5 minutes of blindness,
-  # which is longer than a managed-cluster node replacement takes.
+  # which is longer than a managed-cluster node replacement takes. kube-rs
+  # refuses 295 and above, so the controller refuses it at startup.
+  #
+  # 60 is the controller binary's own default; this key mirrors it. Removing
+  # the key (or an old values file replayed by `helm upgrade --reuse-values`)
+  # therefore still runs bounded. An explicit 0 is passed through as the
+  # opt-out — the env var is rendered whenever the key is set, zero included.
   #
   # Those are nominal. Measured, by cutting controllers off from the apiserver
   # and timing each one to its first logged watch error: 336-364s at the

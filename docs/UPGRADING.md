@@ -52,6 +52,30 @@ not belong to `tls.crt` (Sōzu never checked the pair, and every handshake for
 those names failed), and an HTTPRoute rule with an uncompilable regex match,
 which is skipped whole — its other matches included — rather than half-applied.
 Check `kubectl get events` and route status after upgrading for either reason.
+## The watch bound is the controller's default, not only the chart's
+
+`--watch-timeout-secs` (`SOZU_GW_WATCH_TIMEOUT_SECS`) now defaults to `60` in
+the binary; `controller.watchTimeoutSecs: 60` in the chart merely mirrors it.
+Until now the binary defaulted to `0` and the chart rendered the env var only
+for a truthy value, so any release whose values predate the key — every
+`helm upgrade --reuse-values` from such a release, which was the documented
+upgrade command — silently ran unbounded, with the
+[measured 14.7–19.7% loss](#watch-blindness-is-bounded-by-default) that the
+setting exists to prevent. An install that never set the key now gets the
+bound on its next image roll, with no values change.
+
+**`0` still opts out.** It keeps kube-rs's own default of 290 s, in both the
+routing controller and the provisioner (which used to read `0` as `60`). The
+chart renders the env var whenever the key is *set*, zero included, so
+`controller.watchTimeoutSecs: 0` reaches the container; only an absent key
+leaves the binary's default in force.
+
+**`295` and above are refused at startup.** kube-rs rejects a watch
+`timeoutSeconds` of 295 or more on every watch *start* — after the initial
+LIST has already filled the cache — and the controller's watch loop only
+warned about it, so such a value did not crash: every cache froze on its LIST
+snapshot behind a green `/readyz`, the exact blindness the flag bounds. The
+controller now exits with an error naming the limit instead.
 
 ---
 
@@ -331,9 +355,12 @@ silent is still counted available, so those two series do not detect it.
 The chart used to set no timeouts, so Sōzu's own applied — including **3 seconds
 to connect to a backend**. It now renders `connect_timeout = 2`.
 
-A `helm upgrade` picks this up like any other config change, including with
-`--reuse-values`, because the value ships in the chart rather than in your
-overrides. **A backend that legitimately takes longer than 2 seconds to accept a
+A `helm upgrade` picks this up like any other config change — unless you
+upgrade with `--reuse-values`, which replays the previous release's values in
+place of the new chart's and so never sees a key the chart has since added
+(`sozu.timeouts.connect` included); use `--reset-then-reuse-values`, as
+[above](#sōzu-is-drained-on-shutdown-and-the-grace-period-grows-to-40s).
+**A backend that legitimately takes longer than 2 seconds to accept a
 connection — a cold runtime, a saturated accept queue — starts being answered
 `504` where it previously waited.**
 

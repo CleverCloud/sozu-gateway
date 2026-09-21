@@ -62,7 +62,8 @@ spec:
               value: {{ .Values.controller.resyncSecs | quote }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
-            {{- if .Values.controller.watchTimeoutSecs }}
+            {{- if eq (include "sozu-gateway.watchTimeoutSet" .) "true" }}
+            # Presence, not truthiness: 0 is the opt-out (see deployment.yaml).
             - name: SOZU_GW_WATCH_TIMEOUT_SECS
               value: {{ .Values.controller.watchTimeoutSecs | quote }}
             {{- end }}

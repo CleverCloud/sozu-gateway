@@ -7,7 +7,7 @@ This guide walks you through deploying the Sōzu gateway on a Kubernetes cluster
 - A running Kubernetes cluster (the controller pins `kube` 4 / `k8s-openapi` v1_36; older clusters
   work for the stable core objects it uses)
 - `kubectl` pointing at your cluster, with cluster-admin access
-- `helm` v3.x
+- `helm` v3.14+ (the upgrade path uses `--reset-then-reuse-values`, added in 3.14)
 - A way to expose the proxy: a `Service type=LoadBalancer` provider, or override `service.type`
 
 > **Note:** No external credentials are required. The controller talks only to the in-cluster
@@ -109,8 +109,12 @@ anonymous `ttl.sh` registry by default — no credentials needed).
 
 ```sh
 helm upgrade sozu-gateway oci://ghcr.io/clevercloud/sozu-gateway \
-  --version <new-version> --namespace sozu-system --reuse-values --wait
+  --version <new-version> --namespace sozu-system --reset-then-reuse-values --wait
 ```
+
+`--reset-then-reuse-values` rather than `--reuse-values`: the latter replays the previous
+release's values *instead of* the new chart's, so a key the new chart adds never takes effect —
+see [UPGRADING.md](../UPGRADING.md#sōzu-is-drained-on-shutdown-and-the-grace-period-grows-to-40s).
 
 A new version bumps both the controller image and the bundled Sōzu version together (they are
 released as a matched pair, because the controller speaks Sōzu's command protocol through a pinned
