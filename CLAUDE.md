@@ -117,6 +117,19 @@ then a no-op that still counts as a successful reconcile.
   Worker PIDs alone are insufficient: a restarted container can reuse the same PID set.
   Socket identity must describe the connection that answered the worker probe, not a later
   pathname lookup that could already refer to a replacement socket.
+- **A Sōzu-only restart is caught by a liveness tick, and it drops readiness.** An *idle*
+  command socket never reconnects, so on a quiet cluster the resync tick was the only thing that
+  ran the generation check — up to `SOZU_GW_RESYNC_SECS` (never, at 0) during which the restarted
+  Sōzu, back with only its static listeners and its own TCP probe green, stayed in the Service
+  answering 404. `--sozu-probe-secs` (`SOZU_GW_SOZU_PROBE_SECS`, chart `controller.sozuProbeSecs`,
+  default 2, 0 disables) is a `select!` arm that runs that same check every period and **nothing
+  else** unless it returns `Reset` (`reconciles()` gates the rebuild): `Unchanged` ends the pass,
+  `ProbeFailed` is retried on the next tick (at debug after the first warning, no channel nudge —
+  the nudge on a failed probe is now the tick-less path only). A `Reset` from **any** probe site
+  sets `/readyz` to 503 immediately (`unmark_ready`) and only the next successful `reconcile()`
+  sets it back — readiness reflects programming, not process liveness. The kubelet sees the drop
+  after `failureThreshold` × `periodSeconds` (3 × 5 s in the chart), so on a fast re-apply it is a
+  safety net; the win is the 2 s detection.
 - **The shadow is a bare `Ir` with no version field**, so every new field needs `#[serde(default)]`
   — enforced by a frozen fixture (`controller/tests/fixtures/shadow-v0.2.json`), not by convention.
   The reverse direction cannot be defaulted: an older build has no variant for an enum value a

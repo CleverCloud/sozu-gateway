@@ -97,6 +97,30 @@ on stops between two requests instead of landing its remainder on the socket.
 The agent's per-read deadline is 20 s (was 30 s) so that a request's usual
 worst case stays under the controller's 60 s apply deadline and the real
 error is what gets logged.
+## A Sōzu-only restart drops `/readyz`, and is caught within seconds
+
+When the Sōzu container restarts on its own, it comes back holding only its
+static listeners. Its readiness probe is a TCP check on the HTTP listener, so it
+is green within seconds; the controller's `/readyz`, once green, never went red;
+and an idle command socket never reconnects — so on a quiet cluster the
+controller noticed the restart only on its next resync tick (`resyncSecs`, 60 by
+default; never, at 0). Until then the Pod stayed in the Service answering 404
+and failing TLS.
+
+Two changes. The controller now polls Sōzu for a restart every
+`controller.sozuProbeSecs` (default `2`; `0` disables it, env
+`SOZU_GW_SOZU_PROBE_SECS`): one `Status` round-trip on the command socket per
+period, nothing rebuilt unless it finds one. And a detected restart now sets
+`/readyz` to 503 until the full state has been re-applied — readiness reflects
+whether Sōzu is programmed, not whether the controller process is up. The
+kubelet's readiness probe has `failureThreshold: 3` and `periodSeconds: 5`, so a
+re-apply that lands within seconds is never seen as a dip; the drop matters when
+the re-apply is slow or fails.
+
+A single worker bounce (`worker_automatic_restart`) reads as a restart too, as
+before, and now briefly drops readiness while the (harmless) full re-apply runs.
+Set `controller.sozuProbeSecs: 0` to restore the previous polling; the readiness
+drop has no switch.
 
 ---
 

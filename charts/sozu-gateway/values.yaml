@@ -55,8 +55,18 @@ controller:
   logLevel: info          # RUST_LOG (e.g. "info", "info,sozu_gw_controller=debug")
   debounceMs: 500         # coalesce ordinary watch events; referenced endpoints bypass it
   resyncSecs: 60          # periodic full resync; 0 disables it (Sōzu-restart
-                          # detection then only runs on a command-socket reconnect)
-  healthPort: 8081        # /healthz (liveness) + /readyz (readiness gated on first reconcile)
+                          # detection is then left to sozuProbeSecs and reconnects)
+  # How often the controller polls Sōzu for a restart: one Status round-trip on
+  # the command socket per period, nothing rebuilt unless it finds one. This
+  # bounds how long a Sōzu container that restarted on its own stays Ready in
+  # the Service while holding no routes: it comes back with only its static
+  # listeners, its own TCP probe is green within seconds, and an idle socket
+  # never reconnects, so without the poll the controller notices only on the
+  # next watch event or resync tick (up to resyncSecs on a quiet cluster —
+  # every request a 404 or a TLS failure until then). On a restart the
+  # controller's /readyz drops and the full state is re-applied. 0 disables it.
+  sozuProbeSecs: 2
+  healthPort: 8081        # /healthz (liveness) + /readyz (readiness: Sōzu programmed)
 
   # How long a watch may be silently dead before the client gives up and
   # re-lists. A replaced control plane leaves the connection open and silent
