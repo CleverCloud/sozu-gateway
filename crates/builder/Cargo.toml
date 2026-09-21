@@ -17,6 +17,19 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Reuse Sōzu's PEM chain splitter for TLS Secret handling (no socket I/O).
 sozu-command-lib = { workspace = true }
+# Tenant input Sōzu would reject is refused here, with the same calls Sōzu
+# makes, so it becomes a per-object Problem instead of a request that fails
+# every reconcile of the shared instance (translation is all-or-nothing).
+#
+# A `Regex` path rule is compiled by Sōzu with `regex::bytes::Regex::new`
+# (default flags, no builder limits). The lock resolves this to 1.13.1, the
+# version Sōzu 2.2.1 builds against, so the accepted grammar is the same;
+# keep it there when refreshing the lock (`cargo update -p regex --precise`).
+regex = "1"
+# A `tls.key` is parsed by Sōzu with `rustls_pki_types::PrivateKeyDer` and
+# loaded with the ring provider; the pairing check against `tls.crt` is ours.
+# `ring` is what the lock already resolves rustls to (via kube): no aws-lc.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [dependencies.k8s-openapi]
 version = "0.28"

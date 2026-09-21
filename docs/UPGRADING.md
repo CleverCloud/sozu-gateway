@@ -4,6 +4,30 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Invalid keys and regex paths are reported, not applied
+
+Two tenant inputs used to reach Sōzu unchecked and were measured to fail every
+reconcile of the shared instance until the offending object was removed — a
+new route created during the freeze stayed 404: a `tls.key` whose PEM body is
+not a private key, and a regex path (Ingress `pathType: ImplementationSpecific`,
+HTTPRoute `type: RegularExpression`) that Sōzu cannot compile.
+
+Both are now refused in the builder and reported on the object that carries
+them — `InvalidCertificate` (Ingress Event, listener `ResolvedRefs: False` with
+`InvalidCertificateRef`) and `InvalidPathRegex` (a Warning Event on the owning
+object). A rejected certificate programs nothing for that Secret; an
+uncompilable regex match is dropped like an unsupported header/query match, so
+the rule's other matches, the route's other rules and every other object still
+program, and the route stays `Accepted`.
+
+Two inputs that used to load now stop: a `tls.key` that is a valid key but does
+not belong to `tls.crt` (Sōzu never checked the pair, and every handshake for
+those names failed), and an HTTPRoute rule with an uncompilable regex match,
+which is skipped whole — its other matches included — rather than half-applied.
+Check `kubectl get events` and route status after upgrading for either reason.
+
+---
+
 ## Automatic Gateway instances
 
 Enable automatic provisioning once for the Helm release:

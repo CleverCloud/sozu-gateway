@@ -238,6 +238,17 @@ changes.
   `/foo/` to `/foo` first, so one path has one IR spelling and collision reporting still works.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
+- **Tenant input Sōzu would reject is refused in the builder, with the calls Sōzu makes.** A
+  `tls.key` is parsed and loaded the way Sōzu loads it (`rustls-pki-types` + the ring provider)
+  and then checked against the leaf, which Sōzu skips — by a signature round-trip, never a byte
+  comparison of the two key encodings, and **never stricter than Sōzu**: a leaf carrying a
+  compressed EC point (`02`/`03`) is admitted unpaired, since ring verifies only uncompressed
+  points and Sōzu serves such a leaf regardless; a regex path is compiled with
+  `regex::bytes::Regex::new` on the `regex` version Sōzu 2.2.1 builds against (pinned in the
+  lock). Measured (2026-09-21): either input unvalidated makes Sōzu reject the request, and since
+  translation is all-or-nothing that fails every reconcile of the shared instance until the
+  object is removed. The builder is the only place these strings enter the IR; the translator
+  does not re-validate.
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
   (`--metrics-listen`, off when the flag is absent; the chart sets it by default via
   `metrics.enabled`) by issuing a `QueryMetrics` over the command

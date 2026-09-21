@@ -16,12 +16,12 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | Host match — wildcard (`*.example.com`) | ✅ | one extra label |
 | Ingress | `pathType: Prefix` | ✅ | |
 | Ingress | `pathType: Exact` | ✅ | |
-| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex (2.x anchors regexes) |
+| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex (2.x anchors regexes); a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
 | Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a conflicting owner of the same host+path is reported (`RouteCollision` on the loser; the winner is deterministic) |
 | Ingress | Rule without a host (catch-all) | ✅ | one plain-HTTP `*` frontend (Sōzu `DomainRule::Any`), emitted in `POST` position so it never shadows a specific-host route. No HTTPS frontend: a `*` is not covered by any certificate, so the host stays plain HTTP |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
-| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets. Each TLS entry must list `hosts` — a hostless entry is reported (`TlsEntryWithoutHosts`) and skipped |
+| TLS | Termination from a `Secret` (`tls.crt`/`tls.key`) | ✅ | `type: kubernetes.io/tls` Secrets only (the controller watches nothing else); works with cert-manager-issued Secrets. Each TLS entry must list `hosts` — a hostless entry is reported (`TlsEntryWithoutHosts`) and skipped. A `tls.key` that does not load (PKCS#8/PKCS#1/SEC1; RSA, ECDSA P-256/P-384, Ed25519) or does not match `tls.crt` is reported (`InvalidCertificate`) and the Secret is skipped |
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
 | TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
@@ -47,7 +47,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
 | Gateway API | `Gateway.spec.infrastructure.parametersRef` | ❌ | no parameter kinds are supported; an explicit reference rejects the Gateway with `Accepted: False` / `InvalidParameters`, without programming its routes or certificates |
 | Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare a port the chart's `exposure` table advertises for that protocol (default `80`/`443`); a mismatch is rejected with `PortUnavailable`. A Gateway with no accepted listeners reports `Accepted: False` / `ListenersNotValid`; a mix of accepted and rejected listeners reports `Accepted: True` / `ListenersNotValid`. An unresolved certificate affects `Programmed` and `ResolvedRefs`, without rejecting the Gateway |
-| Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent. A route whose hostnames intersect none of the listener's is `Accepted: False` / `NoMatchingListenerHostname` and does not count toward `attachedRoutes` — it is attached to nothing |
+| Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent. A `RegularExpression` match Sōzu cannot compile is dropped and reported (`InvalidPathRegex`, a Warning Event), like an unsupported header/query match; the rule's other matches still program and the route stays `Accepted`. A route whose hostnames intersect none of the listener's is `Accepted: False` / `NoMatchingListenerHostname` and does not count toward `attachedRoutes` — it is attached to nothing |
 | Gateway API | HTTPRoute collision precedence | ✅ | among emitted frontends sharing one route key: oldest creation timestamp, then alphabetical `namespace/name`, then first rule. Skipped rules do not reserve a match. See [mixed Ingress collisions](UPGRADING.md#httproute-collision-precedence) |
 | Gateway API | Separate Gateway addresses and routing tables | ✅ | `gatewayProvisioning.enabled` automatically provisions a Deployment and Service per owned Gateway; the default instance serves Ingress. Local routing controllers remain per Pod. See [UPGRADING](UPGRADING.md#automatic-gateway-instances) |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |

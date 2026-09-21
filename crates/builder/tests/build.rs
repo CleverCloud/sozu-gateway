@@ -15,6 +15,23 @@ use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
 const KEY_A: &str = include_str!("fixtures/key_a.pem");
+// An RSA pair for `other.example.com` (key_a is ECDSA P-256), so the key
+// loader is exercised on both algorithms and the pairing check has a key that
+// parses but belongs to another certificate.
+const CERT_B: &str = include_str!("fixtures/cert_b.pem");
+const KEY_B: &str = include_str!("fixtures/key_b.pem");
+/// An X509**v1** self-signed certificate (no extensions) and, separately, a key
+/// that does not match it. webpki refuses to parse a v1 leaf, so a pairing
+/// check routed through it would tolerate this mismatch; x509-parser (what Sōzu
+/// uses) parses it, so the pairing check must still catch it.
+const CERT_V1: &str = include_str!("fixtures/cert_v1.pem");
+const KEY_V1_MATCH: &str = include_str!("fixtures/key_v1_match.pem");
+const KEY_V1_OTHER: &str = include_str!("fixtures/key_v1_other.pem");
+/// `cert_a`'s key again, but the certificate carries the public point in
+/// **compressed** form (`03` prefix; `openssl ec -conv_form compressed`).
+/// ring's ECDSA verifier takes only the uncompressed `04` form, so this leaf
+/// cannot be paired the way a handshake pairs it — and Sōzu loads it anyway.
+const CERT_A_COMPRESSED: &str = include_str!("fixtures/cert_a_compressed.pem");
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("valid k8s object json")
@@ -371,6 +388,82 @@ fn path_types_map_correctly() {
     insta::assert_json_snapshot!(out.ir.frontends);
 }
 
+/// Ingress with two `ImplementationSpecific` (regex) paths on one host.
+fn regex_paths_ingress(first: &str, second: &str) -> Ingress {
+    from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "paths", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": "app.example.com",
+                "http": { "paths": [
+                    { "path": first, "pathType": "ImplementationSpecific",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } },
+                    { "path": second, "pathType": "ImplementationSpecific",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }))
+}
+
+#[test]
+fn a_regex_path_sozu_cannot_compile_is_skipped_and_reported() {
+    // Measured live (2026-09-21): the pattern reaches Sōzu verbatim, which
+    // answers "Could not parse rule from frontend path" — and because
+    // translation is all-or-nothing, every reconcile of the shared instance
+    // failed until the Ingress was removed (a new route stayed 404 meanwhile).
+    // The bad path programs nothing; its valid sibling still does.
+    let inputs = Inputs {
+        ingresses: arcs(vec![regex_paths_ingress("/foo([", "^/api/v[0-9]+")]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert_eq!(
+        out.ir.frontends[0].path,
+        ir::PathMatch::Regex("^/api/v[0-9]+".to_string())
+    );
+    match &out.results[0].problems[..] {
+        [Problem::InvalidPathRegex { path, reason }] => {
+            assert_eq!(path, "/foo([");
+            assert!(
+                reason.contains("unclosed character class"),
+                "the reason carries the regex diagnostic: {reason}"
+            );
+            assert!(!reason.contains('\n'), "one line: {reason:?}");
+        }
+        other => panic!("expected InvalidPathRegex, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_valid_regex_path_reaches_the_ir_unchanged() {
+    // Regression guard for the compile check: validation must not rewrite,
+    // anchor or escape a pattern Sōzu accepts.
+    let inputs = Inputs {
+        ingresses: arcs(vec![regex_paths_ingress("^/api/v[0-9]+", "/(a|b)/c$")]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+    let paths: Vec<&ir::PathMatch> = out.ir.frontends.iter().map(|f| &f.path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            &ir::PathMatch::Regex("^/api/v[0-9]+".to_string()),
+            &ir::PathMatch::Regex("/(a|b)/c$".to_string()),
+        ]
+    );
+}
+
 /// `web` Service carrying the load-balancing + sticky-session annotations.
 fn annotated_service(lb: &str, sticky: &str) -> Service {
     from_json(json!({
@@ -562,7 +655,8 @@ fn http_only_ingress_is_not_redirected() {
 /// A build with the given Secret material must report `InvalidCertificate`,
 /// load no cert, and keep the host's frontend plain HTTP (no HTTPS, no
 /// redirect) — the "TLS-ready only with a successfully loaded cert" rule.
-fn assert_invalid_certificate(crt: &str, key: &str) {
+/// Returns the problem's reason, for tests that pin the diagnosis.
+fn assert_invalid_certificate(crt: &str, key: &str) -> String {
     let inputs = Inputs {
         ingresses: arcs(vec![ingress_tls()]),
         services: arcs(vec![web_service()]),
@@ -580,14 +674,10 @@ fn assert_invalid_certificate(crt: &str, key: &str) {
         "no HTTPS to redirect to"
     );
     assert_eq!(out.results.len(), 1, "build still succeeds");
-    assert!(
-        matches!(
-            &out.results[0].problems[..],
-            [Problem::InvalidCertificate { secret, .. }] if secret == "app-tls"
-        ),
-        "expected InvalidCertificate, got {:?}",
-        out.results[0].problems
-    );
+    match &out.results[0].problems[..] {
+        [Problem::InvalidCertificate { secret, reason }] if secret == "app-tls" => reason.clone(),
+        other => panic!("expected InvalidCertificate, got {other:?}"),
+    }
 }
 
 #[test]
@@ -636,6 +726,161 @@ fn key_with_non_key_pem_label_is_rejected() {
     // A well-formed PEM block that is not a private key (here: a certificate)
     // is not plausible tls.key material.
     assert_invalid_certificate(CERT_A, CERT_A);
+}
+
+/// PKCS#8 framing around a body that is valid base64 but not a key.
+const GARBAGE_BODY_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+                                bm90IGEgcHJpdmF0ZSBrZXksIGp1c3QgYmFzZTY0IGdhcmJhZ2U=\n\
+                                -----END PRIVATE KEY-----\n";
+
+#[test]
+fn key_with_valid_base64_but_non_key_body_is_rejected() {
+    // Passes a PEM framing + label check, which is all that used to be done.
+    // Measured live (2026-09-21): Sōzu rejects the AddCertificate with
+    // "invalid private key: failed to parse private key as RSA, ECDSA, or
+    // EdDSA", and since translation is all-or-nothing every reconcile of the
+    // shared instance failed until the Secret was removed.
+    let reason = assert_invalid_certificate(CERT_A, GARBAGE_BODY_KEY);
+    assert!(
+        reason.starts_with("invalid private key in tls.key: "),
+        "{reason}"
+    );
+}
+
+#[test]
+fn key_belonging_to_another_certificate_is_rejected() {
+    // Both halves are valid on their own. Sōzu loads the pair without checking
+    // that they belong together, so this would program and then fail every
+    // handshake for the host; the builder refuses it with a reason that names
+    // the mismatch, in both algorithm directions.
+    assert_eq!(
+        assert_invalid_certificate(CERT_A, KEY_B),
+        "tls.key does not match tls.crt"
+    );
+    assert_eq!(
+        assert_invalid_certificate(CERT_B, KEY_A),
+        "tls.key does not match tls.crt"
+    );
+}
+
+#[test]
+fn a_mismatched_key_is_caught_even_on_an_x509v1_leaf_webpki_would_reject() {
+    // The pairing check must not depend on webpki: it rejects a v1 leaf
+    // before looking at the key, and Sōzu (x509-parser) loads and serves such
+    // a certificate, so a mismatch here has to be caught against the public
+    // key Sōzu's own parser yields — not swallowed as "could not compare".
+    assert_eq!(
+        assert_invalid_certificate(CERT_V1, KEY_V1_OTHER),
+        "tls.key does not match tls.crt"
+    );
+}
+
+#[test]
+fn a_matching_x509v1_pair_still_loads() {
+    // ...and the same permissive parsing must accept a v1 certificate whose
+    // key does match, exactly as Sōzu would.
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_V1, KEY_V1_MATCH)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert_eq!(out.ir.certificates.len(), 1, "a valid v1 pair must load");
+    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+}
+
+#[test]
+fn a_compressed_ec_point_certificate_loads_as_it_does_in_sozu() {
+    // The pairing check signs with the key and verifies against the leaf's
+    // public key through ring, which only takes an uncompressed (`04`) EC
+    // point. A leaf carrying a compressed point is valid, Sōzu loads it, and
+    // TLS clients decompress it — so refusing it here would be stricter than
+    // the data plane. It is admitted unpaired: the matching key loads, and so
+    // does a foreign one, which is exactly what Sōzu does with that pair.
+    for key in [KEY_A, KEY_B] {
+        let inputs = Inputs {
+            ingresses: arcs(vec![ingress_tls()]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A_COMPRESSED, key)]),
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.certificates.len(), 1, "compressed point must load");
+        assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+    }
+}
+
+#[test]
+fn rsa_and_ecdsa_pairs_both_load() {
+    // The loader must accept every key type Sōzu accepts: key_a is ECDSA
+    // P-256, key_b is RSA-2048. A pairing check that only knew one of them
+    // would refuse working material.
+    for (crt, key) in [(CERT_A, KEY_A), (CERT_B, KEY_B)] {
+        let inputs = Inputs {
+            ingresses: arcs(vec![ingress_tls()]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            secrets: arcs(vec![tls_secret("demo", "app-tls", crt, key)]),
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.certificates.len(), 1);
+        assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+    }
+}
+
+#[test]
+fn a_bad_key_in_one_ingress_leaves_the_others_untouched() {
+    // The point of catching it in the builder: the failure is scoped to the
+    // owning object. The Ingress with the bad Secret keeps its HTTP frontend,
+    // and an unrelated Ingress in the same build programs as if it were alone.
+    let (svc, slice) = web_service_in("other");
+    let inputs = Inputs {
+        ingresses: arcs(vec![
+            ingress_tls(),
+            plain_ingress("other", "web", "other.example.com"),
+        ]),
+        services: arcs(vec![web_service(), svc]),
+        endpointslices: arcs(vec![web_slice(), slice]),
+        secrets: arcs(vec![tls_secret(
+            "demo",
+            "app-tls",
+            CERT_A,
+            GARBAGE_BODY_KEY,
+        )]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.certificates.is_empty());
+    let hosts: Vec<(&str, bool)> = out
+        .ir
+        .frontends
+        .iter()
+        .map(|f| (f.hostname.as_str(), f.tls))
+        .collect();
+    assert_eq!(
+        hosts,
+        vec![("app.example.com", false), ("other.example.com", false)]
+    );
+    let other = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "other")
+        .expect("other result");
+    assert!(other.problems.is_empty(), "{other:?}");
+    let demo = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "demo")
+        .expect("demo result");
+    assert!(
+        matches!(&demo.problems[..], [Problem::InvalidCertificate { .. }]),
+        "{demo:?}"
+    );
 }
 
 #[test]
@@ -993,6 +1238,13 @@ fn problem_display_carries_the_detail_and_reason_stays_machine_readable() {
         "listener-scoped variants say so"
     );
     assert_eq!(Problem::TimeoutsUnsupported.listener(), None);
+
+    let p = Problem::InvalidPathRegex {
+        path: "/foo([".into(),
+        reason: "unclosed character class".into(),
+    };
+    assert!(p.to_string().contains("/foo([") && p.to_string().contains("unclosed"));
+    assert_eq!(p.reason(), "InvalidPathRegex");
 }
 
 #[test]
