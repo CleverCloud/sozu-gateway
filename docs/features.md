@@ -15,8 +15,8 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | Host match — exact | ✅ | |
 | Ingress | Host match — wildcard (`*.example.com`) | ✅ | one extra label |
 | Ingress | `pathType: Prefix` | ✅ | |
-| Ingress | `pathType: Exact` | ✅ | |
-| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex (2.x anchors regexes); a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
+| Ingress | `pathType: Exact` | ✅ | compiled to an anchored whole-path regex, query string allowed (Sōzu's `Equals` misses `/get?x=1` and cannot be removed once added) |
+| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex, verbatim — Sōzu 2.x does **not** anchor regexes, so anchor yours; a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
 | Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a conflicting owner of the same host+path is reported (`RouteCollision` on the loser; the winner is deterministic) |
 | Ingress | Rule without a host (catch-all) | ✅ | one plain-HTTP `*` frontend (Sōzu `DomainRule::Any`), emitted in `POST` position so it never shadows a specific-host route. No HTTPS frontend: a `*` is not covered by any certificate, so the host stays plain HTTP |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
@@ -84,8 +84,10 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   changes to an already loaded certificate with the same fingerprint; roll the gateway
   Pods to apply such changes until [#81](https://github.com/CleverCloud/sozu-gateway/issues/81)
   provides native support. See [Upgrading](UPGRADING.md#gateway-certificate-name-inference).
-- **Regex paths (`ImplementationSpecific`).** Sōzu 2.x anchors regexes, so a pattern that matched a
-  substring on another controller may need adjusting.
+- **Regex paths (`ImplementationSpecific`).** Sōzu 2.x does **not** anchor regexes (measured, see
+  PROTOCOL.md): `/api` also matches `/x/api`. Anchor your pattern (`^/api(/|$)`) unless you mean
+  a substring match. A pattern that spells the same rule as a `Prefix`/`Exact` path on the same
+  host is one route to Sōzu and is arbitrated as a collision.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
   and Gateway API HTTPRoute filters (Phase 3). A Gateway `set` deletes existing occurrences before
   appending its value; `add` appends and `remove` deletes, on requests and responses. Empty `set`

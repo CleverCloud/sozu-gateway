@@ -42,6 +42,66 @@ pub enum PathMatch {
     Regex(String),
 }
 
+/// The Sōzu path rule a [`PathMatch`] compiles to. This is the identity Sōzu
+/// keys a route on (with the listener, hostname and method), so it is what
+/// the builder must compare when it arbitrates two objects claiming one
+/// route, and what the translator emits — one definition, two callers, so
+/// they can never disagree about what collides.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SozuPathRule {
+    /// A plain string prefix — only ever the root `/`.
+    Prefix(String),
+    /// An anchored regex, Sōzu's `PathRuleKind::Regex`.
+    Regex(String),
+}
+
+impl PathMatch {
+    /// Compile to the Sōzu rule with **Kubernetes** semantics, measured against
+    /// a live Sōzu 2.2.x: path rules are matched against the request target
+    /// with the query string still attached, and regexes are not anchored by
+    /// Sōzu, so the `^` and the `(?:\?|$)` are both load-bearing.
+    ///
+    /// - `Prefix`: element-boundary matching. `/foo` covers `/foo`, `/foo?q`
+    ///   and `/foo/bar` but never `/foobar`, so a non-root prefix is an anchored
+    ///   regex — Sōzu's own `Prefix` is a raw `starts_with`. The root `/` stays
+    ///   a plain prefix (every target starts with it, and it is cheaper). A
+    ///   trailing slash is insignificant and trimmed, so `/foo/` ≡ `/foo`.
+    /// - `Exact`: the whole path, query string allowed. Sōzu's `Equals` compares
+    ///   the query-bearing target literally, so `/get?x=1` would not match
+    ///   `Equals("/get")` — and Sōzu 2.2.x cannot remove an `Equals` rule it
+    ///   holds (its rule equality has no `Equals` arm), so a route once added as
+    ///   `Equals` kept matching after its removal was acknowledged. An anchored
+    ///   regex has neither problem. The trailing slash is kept literal: Exact
+    ///   means exact.
+    /// - `Regex`: the user's own pattern, verbatim (validated by the builder).
+    pub fn sozu_rule(&self) -> SozuPathRule {
+        match self {
+            PathMatch::Regex(v) => SozuPathRule::Regex(v.clone()),
+            PathMatch::Exact(v) => SozuPathRule::Regex(format!("^{}(?:\\?|$)", regex_escape(v))),
+            PathMatch::Prefix(v) => {
+                let trimmed = v.trim_end_matches('/');
+                if trimmed.is_empty() {
+                    SozuPathRule::Prefix("/".to_string())
+                } else {
+                    SozuPathRule::Regex(format!("^{}(/|\\?|$)", regex_escape(trimmed)))
+                }
+            }
+        }
+    }
+}
+
+/// Escape every regex metacharacter so a literal path is matched literally.
+fn regex_escape(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    for c in literal.chars() {
+        if r"\.+*?()|[]{}^$".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A routing target: one Sōzu cluster, typically one per Service:port.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cluster {
@@ -208,4 +268,51 @@ pub struct Ir {
     /// Raw TCP/UDP routes (L4), from TCPRoute/UDPRoute. Empty otherwise.
     #[serde(default)]
     pub l4_frontends: Vec<L4Frontend>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_matches_compile_to_their_sozu_rules() {
+        let regex = |s: &str| SozuPathRule::Regex(s.to_string());
+        assert_eq!(
+            PathMatch::Prefix("/".into()).sozu_rule(),
+            SozuPathRule::Prefix("/".into())
+        );
+        assert_eq!(
+            PathMatch::Prefix("/foo".into()).sozu_rule(),
+            regex("^/foo(/|\\?|$)")
+        );
+        assert_eq!(
+            PathMatch::Prefix("/foo/".into()).sozu_rule(),
+            regex("^/foo(/|\\?|$)")
+        );
+        assert_eq!(
+            PathMatch::Exact("/foo".into()).sozu_rule(),
+            regex("^/foo(?:\\?|$)")
+        );
+        assert_eq!(
+            PathMatch::Exact("/foo/".into()).sozu_rule(),
+            regex("^/foo/(?:\\?|$)")
+        );
+        assert_eq!(
+            PathMatch::Exact("/".into()).sozu_rule(),
+            regex("^/(?:\\?|$)")
+        );
+        assert_eq!(PathMatch::Regex("^/x$".into()).sozu_rule(), regex("^/x$"));
+        assert_eq!(
+            PathMatch::Exact("/a.b(c)".into()).sozu_rule(),
+            regex("^/a\\.b\\(c\\)(?:\\?|$)")
+        );
+    }
+
+    #[test]
+    fn an_exact_and_a_prefix_on_one_path_are_distinct_rules() {
+        assert_ne!(
+            PathMatch::Exact("/foo".into()).sozu_rule(),
+            PathMatch::Prefix("/foo".into()).sozu_rule()
+        );
+    }
 }

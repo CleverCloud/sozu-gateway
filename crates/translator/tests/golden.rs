@@ -230,12 +230,12 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
         (PathRuleKind::Prefix as i32, "/".to_string())
     );
 
-    // Exact and ImplementationSpecific still map one-to-one.
-    let mut exact = one_prefix_route("/foo");
-    exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
+    // ImplementationSpecific maps one-to-one.
+    let mut regex = one_prefix_route("/foo");
+    regex.frontends[0].path = ir::PathMatch::Regex("^/foo/[0-9]+$".into());
     assert_eq!(
-        emitted_path(&exact),
-        (PathRuleKind::Equals as i32, "/foo".to_string())
+        emitted_path(&regex),
+        (PathRuleKind::Regex as i32, "^/foo/[0-9]+$".to_string())
     );
 
     // One rule per frontend, so the diff round-trips as it always did.
@@ -248,6 +248,80 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
             .filter(|r| matches!(r.request_type, Some(RequestType::RemoveHttpFrontend(_))))
             .count(),
         1
+    );
+}
+
+#[test]
+fn exact_path_compiles_to_an_anchored_whole_path_regex() {
+    // Never `Equals`: measured on Sōzu 2.2.x, `Equals("/get")` does not match
+    // `/get?x=1` (the rule is compared against the query-bearing target), and
+    // a removed `Equals` rule keeps matching after Sōzu acknowledged the
+    // removal (its rule equality has no `Equals` arm), so the route stayed
+    // exposed as a zombie. An anchored regex has neither defect.
+    let mut exact = one_prefix_route("/foo");
+    exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
+    assert_eq!(
+        emitted_path(&exact),
+        (PathRuleKind::Regex as i32, "^/foo(?:\\?|$)".to_string())
+    );
+    // No `/` alternative: `/foo/bar` is not `/foo`. And the trailing slash is
+    // kept literal — Exact means exact, unlike Prefix's canonicalisation.
+    exact.frontends[0].path = ir::PathMatch::Exact("/foo/".into());
+    assert_eq!(
+        emitted_path(&exact),
+        (PathRuleKind::Regex as i32, "^/foo/(?:\\?|$)".to_string())
+    );
+    exact.frontends[0].path = ir::PathMatch::Exact("/".into());
+    assert_eq!(
+        emitted_path(&exact),
+        (PathRuleKind::Regex as i32, "^/(?:\\?|$)".to_string())
+    );
+    // Regex metacharacters in the literal path are escaped.
+    exact.frontends[0].path = ir::PathMatch::Exact("/a.b+c".into());
+    assert_eq!(
+        emitted_path(&exact),
+        (
+            PathRuleKind::Regex as i32,
+            "^/a\\.b\\+c(?:\\?|$)".to_string()
+        )
+    );
+}
+
+#[test]
+fn an_exact_route_and_an_identical_user_regex_are_one_route() {
+    // They compile to the same Sōzu rule, so Sōzu holds one route key: the
+    // translator must emit one add — and the builder, keying its collision
+    // report on the same compiled rule, is what names the loser.
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("exact", ir::LbAlgorithm::RoundRobin, false),
+            cluster("regex", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        backends: vec![],
+        frontends: vec![
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Exact("/foo".into()),
+                "exact",
+                false,
+            ),
+            frontend(
+                "h.example.com",
+                ir::PathMatch::Regex("^/foo(?:\\?|$)".into()),
+                "regex",
+                false,
+            ),
+        ],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
+    assert_eq!(
+        reqs.iter()
+            .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
+            .count(),
+        1,
+        "one Sōzu route key, one add: {dump}",
+        dump = dump(&reqs)
     );
 }
 

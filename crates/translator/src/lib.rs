@@ -57,18 +57,6 @@ fn lb_algorithm(algo: ir::LbAlgorithm) -> i32 {
     v as i32
 }
 
-/// Escape every regex metacharacter so a literal path is matched literally.
-fn regex_escape(literal: &str) -> String {
-    let mut out = String::with_capacity(literal.len());
-    for c in literal.chars() {
-        if r"\.+*?()|[]{}^$".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 fn rule(kind: PathRuleKind, value: String) -> PathRule {
     PathRule {
         kind: kind as i32,
@@ -76,45 +64,15 @@ fn rule(kind: PathRuleKind, value: String) -> PathRule {
     }
 }
 
-/// The Sōzu path rule one IR path match compiles to.
-///
-/// `PathMatch::Prefix` carries **Kubernetes** prefix semantics: it matches on
-/// path *element* boundaries, so `/foo` covers `/foo`, `/foo?page=2` and
-/// `/foo/bar`, but never `/foobar`. Sōzu's `PathRuleKind::Prefix` is a plain
-/// string prefix and matches all four, so a non-root prefix compiles to an
-/// anchored regex instead.
-///
-/// The alternation is what makes it a *boundary*: after the literal the target
-/// must end, continue with `/`, or start its query string. Sōzu matches path
-/// rules against the request target with the query string still attached
-/// (verified against a live Sōzu: without the `\?` branch, `/foo?page=2` 404s),
-/// and it does **not** anchor regexes on its own — an unanchored `/foo(/|$)`
-/// also matches `/xx/foo`, so the `^` is load-bearing. `PROTOCOL.md` left this
-/// as an open question; both halves are now measured.
-///
-/// Two cases stay a plain rule:
-///  - the root `/`, which every target starts with, so `Prefix("/")` is already
-///    exactly right and cheaper than a regex;
-///  - `Exact`/`Regex`, which map one-to-one.
-///
-/// Kubernetes treats a trailing slash as insignificant (`/foo/` ≡ `/foo`), so it
-/// is trimmed first — otherwise the two spellings of one route would diff
-/// forever.
+/// The Sōzu path rule one IR path match compiles to — [`ir::PathMatch::sozu_rule`]
+/// mapped onto the wire type. The compilation itself lives in the IR so the
+/// builder keys its collision arbitration on exactly what is emitted here: two
+/// matches that compile to one rule are one route to Sōzu, whatever their IR
+/// spelling.
 fn path_rule(path: &ir::PathMatch) -> PathRule {
-    match path {
-        ir::PathMatch::Exact(v) => rule(PathRuleKind::Equals, v.clone()),
-        ir::PathMatch::Regex(v) => rule(PathRuleKind::Regex, v.clone()),
-        ir::PathMatch::Prefix(v) => {
-            let trimmed = v.trim_end_matches('/');
-            if trimmed.is_empty() {
-                rule(PathRuleKind::Prefix, "/".to_string())
-            } else {
-                rule(
-                    PathRuleKind::Regex,
-                    format!("^{}(/|\\?|$)", regex_escape(trimmed)),
-                )
-            }
-        }
+    match path.sozu_rule() {
+        ir::SozuPathRule::Prefix(v) => rule(PathRuleKind::Prefix, v),
+        ir::SozuPathRule::Regex(v) => rule(PathRuleKind::Regex, v),
     }
 }
 
@@ -236,12 +194,16 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
     }
 }
 
-/// Frontends deduplicated by their IR route identity: tls, listener, hostname,
-/// path and method. Sōzu rejects a duplicate AddHttpFrontend, so a benign
-/// duplicate produced by overlapping Ingresses must not become a hard reconcile
-/// failure. First occurrence wins, matching the builder's collision reporting.
+/// Frontends deduplicated by the route identity Sōzu keys on: tls, listener,
+/// hostname, the *compiled* path rule and method. Sōzu rejects a duplicate
+/// AddHttpFrontend, so a benign duplicate produced by overlapping objects must
+/// not become a hard reconcile failure. Comparing the compiled rule rather
+/// than the IR spelling is what makes `Exact("/foo")` and a user regex that
+/// spells the same anchored pattern one route here, exactly as they are to
+/// Sōzu — and it is the same rule the builder keys its collision report on,
+/// so the loser is the one it named. First occurrence wins, as everywhere else.
 fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
-    let mut seen: BTreeSet<(bool, SocketAddr, &str, &ir::PathMatch, Option<&str>)> =
+    let mut seen: BTreeSet<(bool, SocketAddr, &str, ir::SozuPathRule, Option<&str>)> =
         BTreeSet::new();
     ir.frontends
         .iter()
@@ -250,7 +212,7 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
                 f.tls,
                 f.listener,
                 f.hostname.as_str(),
-                &f.path,
+                f.path.sozu_rule(),
                 f.method.as_deref(),
             ))
         })
@@ -258,16 +220,11 @@ fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
 }
 
 /// HTTP/HTTPS frontend requests, deduplicated a second time on the *emitted*
-/// route key.
-///
-/// [`unique_frontends`] compares IR path matches, but two different ones can
-/// still compile to the same Sōzu rule — `Prefix("/foo")` and `Prefix("/foo/")`
-/// are one path in Kubernetes. The builder canonicalises that spelling away, so
-/// this pass is a backstop rather than the primary control: Sōzu holds a route
-/// key once, and because translation is all-or-nothing a single clash would
-/// fail *every* reconcile, taking unrelated routes down with it. Never let an
-/// IR, however it was produced, be able to do that. First occurrence wins, as
-/// everywhere else.
+/// wire key — a backstop for [`unique_frontends`], which keys on the same rule
+/// one step earlier: Sōzu holds a route key once, and because translation is
+/// all-or-nothing a single clash would fail *every* reconcile, taking unrelated
+/// routes down with it. Never let an IR, however it was produced, be able to do
+/// that. First occurrence wins.
 fn http_frontend_requests(ir: &ir::Ir) -> Vec<Request> {
     let mut seen: BTreeSet<(bool, SocketAddr, String, i32, String, Option<String>)> =
         BTreeSet::new();

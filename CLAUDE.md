@@ -235,7 +235,12 @@ changes.
   anchored regex — Sōzu's own `Prefix` rule is a raw `starts_with`. Two measured facts drive the
   pattern: Sōzu matches path rules against the request target with the **query string attached**,
   and it does **not** anchor regexes. The root `/` stays a plain prefix. The builder canonicalises
-  `/foo/` to `/foo` first, so one path has one IR spelling and collision reporting still works.
+  `/foo/` to `/foo` first, so one path has one IR spelling. **`pathType: Exact` is an anchored
+  regex too** (`^<escaped>(?:\?|$)`, trailing slash kept literal), never Sōzu's `Equals`: measured
+  on 2.2.1, `Equals` misses a query-bearing target and cannot be removed once added (the worker's
+  rule equality has no `Equals` arm), so a removed `Exact` route kept serving. The compilation
+  lives in `ir::PathMatch::sozu_rule` and both the builder's collision key and the translator use
+  it, so two spellings of one Sōzu rule are one route everywhere.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **Tenant input Sōzu would reject is refused in the builder, with the calls Sōzu makes.** A
@@ -243,9 +248,12 @@ changes.
   and then checked against the leaf, which Sōzu skips — by a signature round-trip, never a byte
   comparison of the two key encodings, and **never stricter than Sōzu**: a leaf carrying a
   compressed EC point (`02`/`03`) is admitted unpaired, since ring verifies only uncompressed
-  points and Sōzu serves such a leaf regardless; a regex path is compiled with
-  `regex::bytes::Regex::new` on the `regex` version Sōzu 2.2.1 builds against (pinned in the
-  lock). Measured (2026-09-21): either input unvalidated makes Sōzu reject the request, and since
+  points and Sōzu serves such a leaf regardless; **every path rule that compiles to a
+  regex** — a user `ImplementationSpecific`/`RegularExpression` pattern, and the anchored regex a
+  non-root `Prefix` or an `Exact` becomes — is compiled with `regex::bytes::Regex::new` on the
+  `regex` version Sōzu 2.2.1 builds against (pinned in the lock), because the crate refuses a
+  compiled program past 10 MiB and a literal path of a few hundred kilobytes, which Kubernetes
+  accepts, reaches it. Measured (2026-09-21): either input unvalidated makes Sōzu reject the request, and since
   translation is all-or-nothing that fails every reconcile of the shared instance until the
   object is removed. The builder is the only place these strings enter the IR; the translator
   does not re-validate.

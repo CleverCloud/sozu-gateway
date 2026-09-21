@@ -4,6 +4,33 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## `pathType: Exact` is an anchored regex, no longer Sōzu's `Equals`
+
+Measured on Sōzu 2.2.1: an `Equals` rule is compared against the request
+target with its query string, so `/get?x=1` did not match an `Exact /get`
+route (404); and the worker's rule equality has no `Equals` arm, so a
+`RemoveHttpFrontend` for such a route was acknowledged while the rule kept
+matching — a deleted `Exact` route stayed reachable. `Exact` now compiles to
+`^<escaped path>(?:\?|$)`, which has neither defect. The trailing slash is
+kept literal (Exact means exact). Because the rule is now a regex, an `Exact`
+path long enough to exceed the regex engine's compiled-size limit (a few
+hundred kilobytes, which Kubernetes does not bound) is refused and reported
+(`InvalidPathRegex`) rather than forwarded — the same guard a non-root `Prefix`
+gets, since it always compiled to a regex.
+
+**Roll the gateway Pods after upgrading.** The diff renders both sides through
+the new mapping, so an unchanged `Exact` route produces no migration request,
+and the `Equals` rules already loaded in the workers cannot be removed by any
+request anyway; only a fresh Sōzu starts clean. An `ImplementationSpecific`
+regex that spells the same anchored pattern as an `Exact` or `Prefix` path on
+the same host is now reported as a `RouteCollision` instead of being silently
+dropped by the translator. The winner is decided exactly as for any route-key
+clash — for two Ingresses, the existing lexicographic cluster-id order; for
+HTTPRoutes, oldest `creationTimestamp` then name — this change only makes the
+two spellings recognise each other as the same Sōzu route.
+
+---
+
 ## Invalid keys and regex paths are reported, not applied
 
 Two tenant inputs used to reach Sōzu unchecked and were measured to fail every
