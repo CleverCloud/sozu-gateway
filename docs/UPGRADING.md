@@ -161,10 +161,16 @@ wins. Prefixes such as `/api` and `/api/` share one collision key, as their
 trailing slash is insignificant; exact paths retain that distinction.
 
 A previously colliding route may therefore change backend at the first
-reconcile. Ingress candidates compete in cluster-id order against the selected
-HTTPRoute. This can change a mixed Ingress/HTTPRoute winner too: an Ingress on
-`demo.m.80`, an older HTTPRoute on `demo.z.80` and a newer one on `demo.a.80`
-now select the Ingress; previously the newer HTTPRoute won.
+reconcile. **Ingress candidates now use the same policy** — oldest
+`creationTimestamp`, then `namespace/name` — instead of the old lexicographic
+cluster-id order, and it applies uniformly across Ingress and HTTPRoute. This
+closes a cross-namespace host takeover: a tenant could previously win another
+namespace's `host+path` just by having a backend whose cluster id
+(`{namespace}.{service}.{port}`) sorted earlier. The winner is now whoever
+claimed the route first. Two consequences on upgrade: an install relying on
+the old cluster-id order may see a different Ingress win a contested
+`host+path` (the loser is reported with `RouteCollision`), and the winner no
+longer depends on the backend Service's namespace.
 
 Rules skipped because of unsupported or unresolved configuration do not reserve
 a route key. Collisions between different objects still report the final winner
