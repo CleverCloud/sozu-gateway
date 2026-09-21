@@ -42,19 +42,25 @@ const DEFAULT_BUFFER_SIZE: u64 = 1024 * 1024;
 const DEFAULT_MAX_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
 /// Upper bound on a whole request's ack sequence, so a wedged Sōzu can't hang
 /// us forever (applies across the Processing→Ok replies, not per read).
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Sized so that one request's usual worst case — a read timeout, the
+/// reconnect backoff, and a second read timeout on the retry — stays under the
+/// controller's 60 s apply deadline: the controller must see the agent's own
+/// error, not its timeout, or the real cause is lost and the job runs on
+/// after the caller gave up. A Sōzu ack is normally milliseconds.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// `SO_SNDTIMEO` on the command socket, so a Sōzu that keeps the socket open
 /// but stops reading can't block the worker thread in the kernel forever once
 /// the socket buffer fills (same order of magnitude as the read deadline).
-const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Small backoff before a reconnect-and-retry, so an unhealthy Sōzu is not
 /// hammered with reconnect storms across reconcile cycles.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Whether a request is a teardown verb (`Remove*` / `DeactivateListener`).
 /// Sōzu rejects removing (or deactivating) an object it no longer holds, so a
-/// failed teardown is treated as an already-done no-op rather than wedging
-/// reconciliation (see [`SozuAgent::apply`]).
+/// failed teardown *of that kind* is treated as an already-done no-op rather
+/// than wedging reconciliation (see [`is_already_gone`] and [`SozuAgent::apply`]).
 fn is_teardown(request: &Request) -> bool {
     matches!(
         &request.request_type,
@@ -159,6 +165,100 @@ fn repair_found_nothing(failure_message: &str) -> bool {
     m.contains("did not find") || m.contains("did not bring any change")
 }
 
+/// The per-worker outcomes Sōzu's main process folds into one failure message:
+/// `"<worker id>: <message>"` joined by `", "`, with the workers that succeeded
+/// contributing `"<id>: OK"` (verified live: `1: could not add certificate: …,
+/// 0: could not add certificate: …`). A message without that shape — a failure
+/// raised by the main process before dispatch — is one segment. Split them back
+/// out so that one worker's benign message can never hide another's real
+/// failure.
+fn worker_segments(message: &str) -> Vec<&str> {
+    let bytes = message.as_bytes();
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || (i >= 2 && &bytes[i - 2..i] == b", ");
+        if at_boundary && bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if bytes[j..].starts_with(b": ") {
+                starts.push((i, j + 2));
+                i = j + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if starts.is_empty() {
+        return vec![message];
+    }
+    let mut out = Vec::with_capacity(starts.len());
+    for (n, &(start, body)) in starts.iter().enumerate() {
+        let end = starts
+            .get(n + 1)
+            .map(|&(next, _)| next.saturating_sub(2))
+            .unwrap_or(bytes.len());
+        let _ = start;
+        out.push(message[body..end].trim());
+    }
+    out
+}
+
+/// Is a failed teardown really "already gone" — Sōzu (main process or every
+/// worker) saying it no longer holds the object — rather than a removal that
+/// genuinely did not happen? Only the former may be skipped: skipping the
+/// latter would advance the shadow over an object Sōzu still serves.
+///
+/// The message families come from Sōzu 2.2.1 itself. The main process answers
+/// `Did not find …` / `did not bring any change` for any teardown verb before
+/// dispatching. A worker whose state diverged from the main process answers
+/// `found no listener` for any object addressed through a listener that is
+/// gone (a certificate, a frontend, the listener itself — the main process
+/// keeps accepting a valid-fingerprint certificate removal, so this one must
+/// not fail the batch or it fails it forever), and per kind: listeners `the
+/// listener is not activated` / `no TCP|UDP listener to remove`, HTTP routes
+/// `Could not remove route`. A worker that could not deactivate a listener
+/// wraps the cause in `Couldn't deactivate … listener at address …: …`, so
+/// the substrings are searched anywhere in the segment. Anything else — a
+/// parse error, a wrong fingerprint, a lock failure — is a real failure.
+///
+/// An aggregate whose every segment is `OK` is *not* benign: the main process
+/// only folds the responses it received and answers `Failure` when a worker
+/// timed out, so all-`OK` under a `Failure` status means a worker never
+/// answered, not that the object is gone.
+fn is_already_gone(request: &Request, failure_message: &str) -> bool {
+    if !is_teardown(request) {
+        return false;
+    }
+    let kind_specific: &[&str] = match &request.request_type {
+        Some(RequestType::RemoveListener(_)) | Some(RequestType::DeactivateListener(_)) => &[
+            "the listener is not activated",
+            "no tcp listener to remove",
+            "no udp listener to remove",
+        ],
+        Some(RequestType::RemoveHttpFrontend(_)) | Some(RequestType::RemoveHttpsFrontend(_)) => {
+            &["could not remove route"]
+        }
+        _ => &[],
+    };
+    let mut saw_gone = false;
+    let all_benign = worker_segments(failure_message).iter().all(|segment| {
+        let m = segment.to_ascii_lowercase();
+        if m == "ok" {
+            return true;
+        }
+        let gone = m.contains("did not find")
+            || m.contains("did not bring any change")
+            || m.contains("found no listener")
+            || kind_specific.iter().any(|needle| m.contains(needle));
+        saw_gone |= gone;
+        gone
+    });
+    all_benign && saw_gone
+}
+
 fn removal_for(request: &Request) -> Option<Request> {
     match &request.request_type {
         Some(RequestType::AddHttpFrontend(front)) => {
@@ -187,6 +287,8 @@ pub enum SozuError {
     UnexpectedResponse,
     #[error("sozu-agent worker thread is gone")]
     WorkerGone,
+    #[error("apply abandoned by its caller after {applied} of {total} requests")]
+    Abandoned { applied: usize, total: usize },
 }
 
 /// Identity of the command socket in the shared filesystem. Container restarts
@@ -396,7 +498,18 @@ impl SozuAgent {
                 self.reconnects.fetch_add(1, Ordering::Relaxed);
                 thread::sleep(RECONNECT_BACKOFF);
                 let channel = self.channel_mut()?;
-                Self::send_one(channel, read_timeout, request)
+                let retry = Self::send_one(channel, read_timeout, request);
+                // The protocol has no request ids (PROTOCOL.md §1): a channel
+                // error on the retry — typically a read timeout — leaves the
+                // reply of *this* request in flight, and keeping the connection
+                // would hand that reply to the next request as its own ack.
+                // Only an application-level `Failure` proves the channel is in
+                // step; every other error means the connection cannot be
+                // trusted again.
+                if !matches!(retry, Ok(_) | Err(SozuError::Failure(_))) {
+                    self.channel = None;
+                }
+                retry
             }
         }
     }
@@ -409,12 +522,37 @@ impl SozuAgent {
 
     /// Apply a batch of requests in order (the caller supplies a dependency-safe
     /// order, e.g. from the Translator). Stops at the first error — except a
-    /// failed *teardown* (see [`is_teardown`]), which is tolerated, and a
-    /// *duplicate add* (see [`is_duplicate_add`]): a duplicate frontend add is
-    /// repaired with a remove + re-add (see [`removal_for`]), a duplicate L4
-    /// listener add is tolerated.
+    /// teardown of an object Sōzu says it no longer holds (see
+    /// [`is_already_gone`]), which is tolerated, and a *duplicate add* (see
+    /// [`is_duplicate_add`]): a duplicate frontend add is repaired with a
+    /// remove + re-add (see [`removal_for`]), a duplicate L4 listener add is
+    /// tolerated.
     pub fn apply(&mut self, requests: &[Request]) -> Result<(), SozuError> {
-        for request in requests {
+        self.apply_unless(requests, || false)
+    }
+
+    /// [`Self::apply`], stopping between two requests once `abandoned()` turns
+    /// true. The caller that bounds an apply with a deadline drops its side of
+    /// the reply channel when it gives up; the batch must not keep landing on
+    /// the socket after that, or Sōzu drifts from a shadow the caller already
+    /// declared not applied and the next batch queues behind the orphan.
+    fn apply_unless(
+        &mut self,
+        requests: &[Request],
+        abandoned: impl Fn() -> bool,
+    ) -> Result<(), SozuError> {
+        for (applied, request) in requests.iter().enumerate() {
+            if abandoned() {
+                warn!(
+                    applied,
+                    total = requests.len(),
+                    "apply abandoned by its caller; stopping before the next request"
+                );
+                return Err(SozuError::Abandoned {
+                    applied,
+                    total: requests.len(),
+                });
+            }
             match self.apply_one(request) {
                 Ok(()) => {}
                 // Sōzu's teardown verbs are NOT idempotent: removing an object it
@@ -424,9 +562,13 @@ impl SozuAgent {
                 // This keeps the invariant that re-diffing from the shadow
                 // converges: without it, one un-removable object wedges *all*
                 // reconciliation forever (the same failing remove re-emitted
-                // every cycle).
-                Err(SozuError::Failure(msg)) if is_teardown(request) => {
-                    warn!(error = %msg, "sozu rejected a teardown; treating it as already-gone so reconciliation converges");
+                // every cycle). Only the "no longer held" failures qualify: a
+                // teardown Sōzu refused for another reason — a bad request, a
+                // worker that could not act — leaves the object in place, and
+                // skipping it would advance the shadow over a route Sōzu still
+                // serves.
+                Err(SozuError::Failure(msg)) if is_already_gone(request, &msg) => {
+                    warn!(error = %msg, "sozu no longer holds the object this teardown targets; treating it as already-gone so reconciliation converges");
                 }
                 // The mirror image: an add Sōzu already holds (the shadow missed
                 // an applied batch) fails with `Exists` on every re-application,
@@ -624,7 +766,8 @@ impl SozuAgentHandle {
                     }
                     match job {
                         Job::Apply(requests, reply) => {
-                            let _ = reply.send(agent.apply(&requests));
+                            let result = agent.apply_unless(&requests, || reply.is_closed());
+                            let _ = reply.send(result);
                         }
                         Job::SaveState(path, reply) => {
                             let _ = reply.send(agent.save_state(path));
@@ -715,8 +858,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use sozu_command_lib::proto::command::{
-        Cluster, DeactivateListener, ListenerType, RequestHttpFrontend, RequestTcpFrontend,
-        SocketAddress, TcpListenerConfig, WorkerInfo, WorkerInfos,
+        AddBackend, Cluster, DeactivateListener, ListenerType, RemoveBackend, RemoveCertificate,
+        RequestHttpFrontend, RequestTcpFrontend, SocketAddress, TcpListenerConfig, WorkerInfo,
+        WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -817,6 +961,337 @@ mod tests {
             }
             received
         })
+    }
+
+    #[test]
+    fn worker_segments_split_the_main_process_aggregate() {
+        assert_eq!(
+            worker_segments("Did not find Backend with address or id_bytes=3"),
+            vec!["Did not find Backend with address or id_bytes=3"],
+            "a main-process failure is a single segment"
+        );
+        assert_eq!(
+            worker_segments(
+                "1: could not add certificate: invalid private key, 0: could not add certificate: invalid private key"
+            ),
+            vec![
+                "could not add certificate: invalid private key",
+                "could not add certificate: invalid private key"
+            ],
+            "the live-observed two-worker aggregate splits into two segments"
+        );
+        assert_eq!(
+            worker_segments("0: OK, 1: found no listener with address 0.0.0.0:5353"),
+            vec!["OK", "found no listener with address 0.0.0.0:5353"],
+            "a worker that succeeded contributes an `OK` segment"
+        );
+        assert_eq!(
+            worker_segments("listener at 127.0.0.1:8080, port 8080: refused"),
+            vec!["listener at 127.0.0.1:8080, port 8080: refused"],
+            "a comma inside a plain message must not be mistaken for a worker boundary"
+        );
+    }
+
+    #[test]
+    fn already_gone_is_scoped_to_sozu_no_longer_holding_the_object() {
+        let remove_backend: Request = RequestType::RemoveBackend(RemoveBackend {
+            cluster_id: "c".into(),
+            backend_id: "b".into(),
+            address: socket_address(1),
+        })
+        .into();
+        assert!(is_already_gone(
+            &remove_backend,
+            "Did not find Backend with address or id_bytes=1"
+        ));
+        assert!(is_already_gone(
+            &remove_backend,
+            "dispatching this request did not bring any change to the state"
+        ));
+        assert!(
+            !is_already_gone(&remove_backend, "Wrong field value: address"),
+            "a request Sōzu could not even interpret leaves the object in place"
+        );
+
+        let deactivate: Request = RequestType::DeactivateListener(DeactivateListener {
+            address: socket_address(5353),
+            proxy: ListenerType::Tcp as i32,
+            to_scm: false,
+        })
+        .into();
+        assert!(is_already_gone(
+            &deactivate,
+            "1: Could not deactivate TCP listener at address 0.0.0.0:5353: the listener is not activated, 0: OK"
+        ));
+        assert!(is_already_gone(
+            &deactivate,
+            "0: found no listener with address 0.0.0.0:5353, 1: found no listener with address 0.0.0.0:5353"
+        ));
+        assert!(
+            !is_already_gone(
+                &deactivate,
+                "0: found no listener with address 0.0.0.0:5353, 1: failed to acquire the lock"
+            ),
+            "one worker's benign answer must not hide another worker's real failure"
+        );
+
+        let remove_front: Request =
+            RequestType::RemoveHttpFrontend(RequestHttpFrontend::default()).into();
+        assert!(is_already_gone(
+            &remove_front,
+            "could not remove frontend: Could not remove route, route_bytes=42"
+        ));
+        assert!(
+            !is_already_gone(
+                &remove_front,
+                "could not remove frontend: Could not parse rule from frontend path, path_bytes=13"
+            ),
+            "a parse failure is not an absent route"
+        );
+
+        let remove_cert: Request = RequestType::RemoveCertificate(RemoveCertificate {
+            address: socket_address(8443),
+            fingerprint: "zz".into(),
+        })
+        .into();
+        assert!(
+            !is_already_gone(
+                &remove_cert,
+                "Could not remove certificate: fingerprint_bytes=2"
+            ),
+            "a fingerprint Sōzu could not decode was never looked up, let alone removed"
+        );
+        assert!(
+            is_already_gone(
+                &remove_cert,
+                "0: found no listener with address 0.0.0.0:8443, 1: found no listener with address 0.0.0.0:8443"
+            ),
+            "the main process keeps accepting the removal of a cert on a listener that is gone; \
+             the workers' answer must be benign or the batch fails forever"
+        );
+        assert!(
+            !is_already_gone(&deactivate, "0: OK"),
+            "all-OK under a Failure status means a worker never answered (timed out), \
+             not that the object is gone"
+        );
+        assert!(
+            !is_already_gone(&deactivate, "0: OK, 1: OK"),
+            "same with every worker reporting OK"
+        );
+
+        let add: Request = RequestType::AddCluster(Cluster::default()).into();
+        assert!(
+            !is_already_gone(&add, "Did not find Cluster with address or id_bytes=1"),
+            "only teardown verbs may be tolerated"
+        );
+    }
+
+    /// A teardown Sōzu refused for a reason other than "no longer held" must
+    /// fail the batch: skipping it would advance the shadow over an object
+    /// Sōzu still serves.
+    #[test]
+    fn teardown_refused_for_another_reason_fails_the_batch() {
+        let path = temp_socket_path("teardown-real-failure");
+        let server = spawn_fake_sozu_failing_with(&path, "Wrong field value: address");
+        let remove: Request = RequestType::RemoveCluster("c".to_string()).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply(&[remove]).unwrap_err();
+        assert!(matches!(err, SozuError::Failure(_)), "got {err:?}");
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn teardown_of_an_object_sozu_no_longer_holds_is_tolerated() {
+        let path = temp_socket_path("teardown-gone");
+        let server =
+            spawn_fake_sozu_failing_with(&path, "Did not find Cluster with address or id_bytes=1");
+        let remove: Request = RequestType::RemoveCluster("c".to_string()).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent
+            .apply(&[remove])
+            .expect("an already-gone teardown converges");
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// What one accepted connection of [`spawn_per_connection_fake_sozu`] does.
+    type ConnectionHandler = Box<dyn FnOnce(Channel<Response, Request>) + Send>;
+
+    /// A fake Sōzu that serves each accepted connection on its own thread,
+    /// running the handler for that connection's ordinal. Sequential accept
+    /// would otherwise let a handler that deliberately lingers block the next
+    /// connection the agent opens.
+    fn spawn_per_connection_fake_sozu(
+        path: &Path,
+        handlers: Vec<ConnectionHandler>,
+    ) -> thread::JoinHandle<()> {
+        let listener = std::os::unix::net::UnixListener::bind(path).expect("bind fake sozu");
+        thread::spawn(move || {
+            let mut workers = Vec::new();
+            for handler in handlers {
+                let (stream, _) = listener.accept().expect("accept");
+                stream.set_nonblocking(true).expect("set nonblocking");
+                let mut channel: Channel<Response, Request> =
+                    Channel::new(mio::net::UnixStream::from_std(stream), 16_384, 65_536);
+                channel.blocking().expect("set blocking");
+                workers.push(thread::spawn(move || handler(channel)));
+            }
+            for worker in workers {
+                let _ = worker.join();
+            }
+        })
+    }
+
+    /// The protocol carries no request ids. After a retry that also times
+    /// out, the connection must be dropped: a reply that arrives late on it
+    /// would otherwise be read as the *next* request's ack. Here the late
+    /// reply is a rejection; the next request must still get its own `Ok`.
+    #[test]
+    fn a_failed_retry_drops_the_channel_so_a_late_reply_is_not_the_next_ack() {
+        let path = temp_socket_path("late-reply");
+        let read_timeout = Duration::from_millis(100);
+        let server = spawn_per_connection_fake_sozu(
+            &path,
+            vec![
+                // First attempt: read the request, never answer, wait for the
+                // agent to hang up.
+                Box::new(|mut channel: Channel<Response, Request>| {
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                }),
+                // Retry: read the request, answer *after* the agent's read
+                // deadline with a rejection, then linger so the reply stays
+                // readable on this connection if the agent kept it.
+                Box::new(move |mut channel: Channel<Response, Request>| {
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                    thread::sleep(read_timeout * 3);
+                    let _ = channel.write_message(&failure_response("first request REJECTED"));
+                    thread::sleep(Duration::from_secs(2));
+                }),
+                // The connection a correct agent opens for the next request.
+                Box::new(|mut channel: Channel<Response, Request>| {
+                    if channel
+                        .read_message_blocking_timeout(Some(Duration::from_secs(2)))
+                        .is_ok()
+                    {
+                        let _ = channel.write_message(&ok_response());
+                    }
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                }),
+            ],
+        );
+
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.read_timeout = read_timeout;
+        let first: Request = RequestType::AddCluster(Cluster::default()).into();
+        let err = agent.apply(&[first]).unwrap_err();
+        assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+        assert!(
+            agent.channel.is_none(),
+            "a connection whose reply may still be in flight must not be reused"
+        );
+        // Give the lingering retry connection time to write its late reply,
+        // then let the healthy follow-up wait generously: the point is which
+        // reply it reads, not how fast.
+        thread::sleep(read_timeout * 4);
+        agent.read_timeout = Duration::from_secs(5);
+        let second: Request = RequestType::AddBackend(AddBackend::default()).into();
+        agent
+            .apply(&[second])
+            .expect("the next request gets its own ack, not the first request's late rejection");
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The wiring behind [`apply_stops_between_requests_once_abandoned`]: a
+    /// caller that drops its side of the reply (here, a timed-out future) must
+    /// stop the batch at the next request boundary.
+    #[tokio::test]
+    async fn a_caller_that_times_out_stops_the_batch_at_the_next_request() {
+        let path = temp_socket_path("abandon-async");
+        let (count_tx, count_rx) = std::sync::mpsc::channel::<usize>();
+        let server = spawn_per_connection_fake_sozu(
+            &path,
+            vec![Box::new(move |mut channel: Channel<Response, Request>| {
+                let mut received = 0usize;
+                // First request: answer late, after the caller's deadline.
+                if channel
+                    .read_message_blocking_timeout(Some(Duration::from_secs(5)))
+                    .is_ok()
+                {
+                    received += 1;
+                    thread::sleep(Duration::from_millis(300));
+                    let _ = channel.write_message(&ok_response());
+                }
+                // A second request must never arrive.
+                if channel
+                    .read_message_blocking_timeout(Some(Duration::from_secs(1)))
+                    .is_ok()
+                {
+                    received += 1;
+                }
+                let _ = count_tx.send(received);
+            })],
+        );
+        let handle = SozuAgentHandle::spawn(path.to_str().expect("utf-8 path")).expect("spawn");
+        let requests: Vec<Request> = vec![
+            RequestType::AddCluster(Cluster::default()).into(),
+            RequestType::AddBackend(AddBackend::default()).into(),
+        ];
+        let gave_up =
+            tokio::time::timeout(Duration::from_millis(100), handle.apply(requests)).await;
+        assert!(gave_up.is_err(), "the caller must have given up first");
+        let received = count_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fake sozu reports what it received");
+        assert_eq!(received, 1, "only the first request may reach the wire");
+        drop(handle);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Once the caller has given up on a batch, the agent must stop between
+    /// two requests instead of landing the rest on the socket: the caller
+    /// already treats the batch as not applied.
+    #[test]
+    fn apply_stops_between_requests_once_abandoned() {
+        let path = temp_socket_path("abandon-mid-batch");
+        let server = spawn_scripted_fake_sozu(&path, vec![ok_response(), ok_response()]);
+        let requests: Vec<Request> = vec![
+            RequestType::AddCluster(Cluster::default()).into(),
+            RequestType::AddBackend(AddBackend::default()).into(),
+        ];
+        let sent = std::cell::Cell::new(0usize);
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent
+            .apply_unless(&requests, || {
+                // Abandoned after the first request went out.
+                sent.set(sent.get() + 1);
+                sent.get() > 1
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SozuError::Abandoned {
+                    applied: 1,
+                    total: 2
+                }
+            ),
+            "got {err:?}"
+        );
+        drop(agent);
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(
+            received.len(),
+            1,
+            "only the first request may reach the wire"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
