@@ -32,12 +32,11 @@ use kube::runtime::reflector::{
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client, Resource};
 use serde::de::DeserializeOwned;
-use sozu_gw_ir::Ir;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use sozu_gw_agent::{SozuAgentHandle, SozuGeneration};
+use sozu_gw_agent::SozuAgentHandle;
 use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
@@ -481,15 +480,26 @@ enum Wakeup {
     Resync,
     /// The Sōzu liveness tick: generation check only, unless it reset.
     SozuProbe,
+    /// The self-scheduled retry of a failed reconcile, with both ticks off:
+    /// generation check (the failure may have been a restart), then reconcile.
+    Retry,
 }
 
 /// Whether a pass proceeds to a reconcile after its generation check. A
-/// liveness tick that found the generation unchanged — or could not reach Sōzu
-/// at all — has nothing to apply, and proceeding would turn a 2 s probe into a
-/// full rebuild every 2 s. Every other wakeup reconciles regardless of the
-/// check, as before; a reset always does — that reconcile *is* the re-apply.
-fn reconciles(wakeup: Wakeup, check: Option<shadow::GenerationCheck>) -> bool {
-    wakeup != Wakeup::SozuProbe || check == Some(shadow::GenerationCheck::Reset)
+/// liveness tick that found the generation unchanged has nothing *new* to
+/// apply, and proceeding would turn a 2 s probe into a full rebuild every 2 s
+/// — unless a previous reconcile failed and its work is still `pending`: then
+/// Sōzu answering again, same generation, is exactly the moment to retry it.
+/// Without that, a transient socket failure during an apply left the desired
+/// state unapplied until an unrelated Kubernetes event or the resync tick —
+/// never, with the resync disabled. A tick that could not reach Sōzu at all
+/// does not retry (the apply would fail the same way; the next tick will).
+/// Every other wakeup reconciles regardless of the check, as before; a reset
+/// always does — that reconcile *is* the re-apply.
+fn reconciles(wakeup: Wakeup, check: Option<shadow::GenerationCheck>, pending: bool) -> bool {
+    wakeup != Wakeup::SozuProbe
+        || check == Some(shadow::GenerationCheck::Reset)
+        || (pending && check == Some(shadow::GenerationCheck::Unchanged))
 }
 
 /// Whether a failed generation probe needs a channel nudge to be retried: only
@@ -499,6 +509,41 @@ fn reconciles(wakeup: Wakeup, check: Option<shadow::GenerationCheck>) -> bool {
 /// quietly, at debug, after the check's first warning.
 fn retry_by_nudge(outcome: shadow::GenerationCheck, has_probe_tick: bool) -> bool {
     outcome == shadow::GenerationCheck::ProbeFailed && !has_probe_tick
+}
+
+/// Whether a failed reconcile must schedule its own retry. The liveness tick
+/// retries pending work on its next successful probe and the resync tick
+/// rebuilds regardless, so with either one running the retry is theirs. With
+/// both disabled nothing else ever runs it again on a quiet cluster: a
+/// transient socket failure during one apply would leave the desired state
+/// unapplied until an unrelated watch event — possibly never.
+fn retry_reconcile_by_nudge(has_probe_tick: bool, has_resync: bool) -> bool {
+    !has_probe_tick && !has_resync
+}
+
+/// How long a self-scheduled reconcile retry waits. A failed apply is retried
+/// as a full rebuild, so this is not immediate: a data plane that just refused
+/// a batch is not asked again the same instant. It is the same order as the
+/// probe tick's own retry cadence, which is what it stands in for.
+const RECONCILE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// A pending self-scheduled retry, held as one `select!` arm rather than a
+/// spawned nudge: scheduling again *replaces* it, so however many failures
+/// land in one window there is ever one retry outstanding, and it goes away
+/// with the loop.
+type RetryTimer = std::pin::Pin<Box<tokio::time::Sleep>>;
+
+fn scheduled_retry() -> RetryTimer {
+    Box::pin(tokio::time::sleep(RECONCILE_RETRY_DELAY))
+}
+
+/// Await the optional retry timer; with none scheduled, pend forever so the
+/// `select!` arm simply never fires.
+async fn maybe_retry(timer: Option<&mut RetryTimer>) {
+    match timer {
+        Some(timer) => timer.await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// The Gateway API kinds gateway mode *requires*. All of them: watching a
@@ -669,20 +714,24 @@ fn gateway_crds_absent(err: &kube::Error) -> bool {
 async fn probe_sozu_generation(
     agent: &SozuAgentHandle,
     acked_reconnects: &mut u64,
-    baseline: &mut Option<SozuGeneration>,
-    shadow: &mut Ir,
+    shadow: &mut shadow::Shadow,
+    shadow_file: &str,
     self_metrics: &metrics::SelfMetrics,
     ready: &AtomicBool,
 ) -> shadow::GenerationCheck {
     // Read the epoch *before* the probe: a reconnect landing mid-probe stays
     // pending and triggers one more (cheap, idempotent) check.
     let pending = agent.reconnect_epoch();
-    let outcome = shadow::check_restart_generation(agent, baseline, shadow).await;
+    let outcome = shadow::check_restart_generation(agent, shadow).await;
     if outcome != shadow::GenerationCheck::ProbeFailed {
         *acked_reconnects = pending;
     }
     if outcome == shadow::GenerationCheck::Reset {
         self_metrics.record_shadow_reset();
+        // The file must never outlive the state it describes: a controller
+        // restart before the full re-apply lands would otherwise resume the
+        // stale IR against a Sōzu that holds nothing of it.
+        shadow::persist(shadow_file, shadow);
     }
     readiness_after_check(ready, outcome);
     outcome
@@ -802,7 +851,7 @@ async fn reconcile(
     client: &Client,
     stores: &Stores,
     agent: &SozuAgentHandle,
-    shadow: &mut Ir,
+    shadow: &mut shadow::Shadow,
     problem_events: &mut events::ProblemEvents,
     referenced_services: &RwLock<BTreeSet<String>>,
     exposure: &[ExposedPort],
@@ -871,8 +920,7 @@ async fn reconcile(
     // previous pass so resyncs do not flood etcd with duplicate events.
     problem_events.publish_new(&out).await;
 
-    let requests = tr::reconcile(shadow, &out.ir).context("translate IR to commands")?;
-    let mut applied = false;
+    let requests = tr::reconcile(&shadow.ir, &out.ir).context("translate IR to commands")?;
     if requests.is_empty() {
         debug!("reconcile: no socket changes");
     } else {
@@ -890,7 +938,22 @@ async fn reconcile(
             .await
             .context("timed out applying requests to sozu")?
             .context("apply requests to sozu")?;
-        applied = true;
+        // The shadow advances the moment the socket apply succeeds, before any
+        // apiserver call below can fail: Sōzu now holds `out.ir`, and a
+        // baseline that lags behind it would re-emit the same delta next pass —
+        // every frontend add answered `Exists` and "repaired" with a remove +
+        // re-add, a routing gap per route, for as long as the apiserver is
+        // unhappy. Persisting here also narrows the window in which a
+        // controller restart finds a file that predates the apply.
+        //
+        // Only a successful apply advances it. On failure it stays at the
+        // previous applied IR; the emitted requests are not all idempotent, so
+        // re-diffing from the unchanged shadow converges thanks to Sōzu's
+        // upsert semantics for clusters/backends plus the agent's handling of
+        // the rest: already-gone teardowns are tolerated, duplicate frontend
+        // adds repaired (remove + re-add on the same route key).
+        shadow.ir = out.ir.clone();
+        shadow::persist(&args.shadow_file, shadow);
     }
 
     // Fence every pass, including one that applied nothing: `publish_new` above
@@ -949,17 +1012,6 @@ async fn reconcile(
         status::write_ingress_status(client, &out.results, &lb_points).await;
     }
 
-    // Shadow advances only on a successful socket apply. On failure it stays at
-    // the previous applied IR. The emitted requests are not all idempotent, so
-    // re-diffing from the unchanged shadow converges thanks to Sōzu's upsert
-    // semantics for clusters/backends plus the agent's handling of the rest:
-    // already-gone teardowns are tolerated, duplicate frontend adds repaired
-    // (remove + re-add on the same route key).
-    if applied {
-        *shadow = out.ir;
-        // Persist the new baseline so a controller-only restart resumes from it.
-        shadow::persist(&args.shadow_file, shadow);
-    }
     Ok(())
 }
 
@@ -1264,38 +1316,37 @@ async fn main() -> Result<()> {
         .context("informer cache writer dropped before becoming ready")?;
     info!("caches synced");
 
-    // Capture the socket/worker generation BEFORE loading the persisted shadow.
-    // Otherwise a restart between the state probe and this capture could attach
-    // the old shadow to a fresh Sōzu generation and hide its lost state.
-    let mut generation_baseline = match agent.generation().await {
+    // Read the reconnect epoch *before* asking for the generation: a reconnect
+    // landing during that await must leave the epoch ahead of this baseline so
+    // the conditional probe below fires, instead of acknowledging it unseen and
+    // trusting a generation from a socket that has since gone.
+    let mut acked_reconnects = agent.reconnect_epoch();
+    // Capture the generation, then resume the persisted shadow only if it was
+    // written against the same command socket: a Sōzu that restarted while the
+    // controller was down recreated its socket and holds nothing the file
+    // describes. A failed capture is no proof, so nothing is resumed.
+    let generation = match agent.generation().await {
         Ok(generation) => Some(generation),
         Err(e) => {
-            warn!(error = %e, "could not capture Sōzu's generation baseline; will capture it on the first successful probe");
+            warn!(error = %e, "could not capture Sōzu's generation baseline; ignoring any persisted shadow, will re-apply");
             None
         }
     };
-    // The reconnect epoch acknowledged by a successful restart probe; anything
-    // newer is a pending reconnect to investigate before trusting the shadow.
-    let mut acked_reconnects = agent.reconnect_epoch();
-
-    // Resume only while Sōzu retains its state and generation. A failed startup
-    // proof discards the persisted baseline, as load_initial already does for
-    // an unreadable state probe. Mid-life failures retain the in-memory shadow.
-    let probe_file = format!("{}.probe", args.shadow_file);
-    let mut shadow = shadow::load_initial(&agent, &args.shadow_file, &probe_file).await;
-    if probe_sozu_generation(
-        &agent,
-        &mut acked_reconnects,
-        &mut generation_baseline,
-        &mut shadow,
-        &self_metrics,
-        &ready,
-    )
-    .await
-        == shadow::GenerationCheck::ProbeFailed
+    let mut shadow = shadow::load_initial(&args.shadow_file, generation.as_ref());
+    if agent.reconnect_epoch() != acked_reconnects
+        && probe_sozu_generation(
+            &agent,
+            &mut acked_reconnects,
+            &mut shadow,
+            &args.shadow_file,
+            &self_metrics,
+            &ready,
+        )
+        .await
+            == shadow::GenerationCheck::ProbeFailed
     {
         warn!("could not verify Sōzu's generation after loading the shadow; will re-apply");
-        shadow = Ir::default();
+        shadow = shadow::Shadow::empty(None);
     }
 
     let debounce = Duration::from_millis(args.debounce_ms);
@@ -1311,10 +1362,17 @@ async fn main() -> Result<()> {
     if !has_probe_tick {
         info!("Sōzu liveness probe disabled (sozu-probe-secs = 0)");
     }
+    // With neither tick, a failed reconcile schedules its own delayed retry;
+    // otherwise the ticks retry it and a timer would only double them.
+    let self_retry = retry_reconcile_by_nudge(has_probe_tick, resync.is_some());
+    let mut retry: Option<RetryTimer> = None;
     // Set by a failed generation probe, cleared by the next one that answers.
     // While it holds, the liveness tick retries at debug: the check warns on
     // every failure, and a dead data plane is not news every two seconds.
     let mut sozu_unreachable = false;
+    // Work a failed reconcile left behind, to be retried by the next successful
+    // probe rather than waiting for an unrelated event.
+    let mut pending_reconcile = false;
 
     // Graceful shutdown on the signals Kubernetes uses on Pod termination, so we
     // stop cleanly within the grace period instead of being SIGKILLed.
@@ -1346,6 +1404,10 @@ async fn main() -> Result<()> {
         Err(e) => {
             self_metrics.record_reconcile(started.elapsed(), false);
             error!(error = ?e, "initial reconcile failed; will retry");
+            pending_reconcile = true;
+            if self_retry {
+                retry = Some(scheduled_retry());
+            }
         }
     }
     // A reconnect can land *during* that first apply (Sōzu restarting
@@ -1355,8 +1417,8 @@ async fn main() -> Result<()> {
         let outcome = probe_sozu_generation(
             &agent,
             &mut acked_reconnects,
-            &mut generation_baseline,
             &mut shadow,
+            &args.shadow_file,
             &self_metrics,
             &ready,
         )
@@ -1369,13 +1431,24 @@ async fn main() -> Result<()> {
 
     loop {
         // Wait for a change signal, the resync tick or the Sōzu liveness tick.
+        // The change receivers are awaited raw here, not through
+        // `changes::next`, because `mpsc::Receiver::recv` is cancellation-safe:
+        // when the Sōzu-liveness or resync tick wins this race it removes no
+        // notice. A consumed change is debounced by `changes::settle` *after*
+        // the select! has resolved — past the race — so a tick can never drop a
+        // pending change (which an unchanged liveness tick would then never
+        // reconcile). Defensive `is_none`: this loop holds its own tx clone, so
+        // the channel cannot actually close; if that invariant ever breaks,
+        // exit loudly rather than spin on a dead channel.
         let wakeup = tokio::select! {
-            maybe = changes::next(&mut rx, &mut endpoint_rx, debounce) => {
-                // Defensive only: this loop holds its own tx clone (for
-                // self-nudges), so the channel cannot actually close while
-                // we are here. If that invariant is ever broken, exit loudly
-                // rather than spin on a dead channel.
-                if maybe.is_none() { warn!("change channel closed (should be unreachable); exiting"); break; }
+            changed = endpoint_rx.recv() => {
+                if changed.is_none() { warn!("change channel closed (should be unreachable); exiting"); break; }
+                changes::settle(&mut rx, &mut endpoint_rx, debounce, true).await;
+                Wakeup::Change
+            }
+            changed = rx.recv() => {
+                if changed.is_none() { warn!("change channel closed (should be unreachable); exiting"); break; }
+                changes::settle(&mut rx, &mut endpoint_rx, debounce, false).await;
                 Wakeup::Change
             }
             _ = maybe_tick(resync.as_mut()) => {
@@ -1415,6 +1488,10 @@ async fn main() -> Result<()> {
                 Wakeup::Resync
             }
             _ = maybe_tick(sozu_probe.as_mut()) => Wakeup::SozuProbe,
+            _ = maybe_retry(retry.as_mut()) => {
+                retry = None;
+                Wakeup::Retry
+            }
             _ = sigterm.recv() => { info!("SIGTERM received; shutting down"); break; }
             _ = sigint.recv() => { info!("SIGINT received; shutting down"); break; }
         };
@@ -1447,8 +1524,8 @@ async fn main() -> Result<()> {
             let outcome = probe_sozu_generation(
                 &agent,
                 &mut acked_reconnects,
-                &mut generation_baseline,
                 &mut shadow,
+                &args.shadow_file,
                 &self_metrics,
                 &ready,
             )
@@ -1463,7 +1540,7 @@ async fn main() -> Result<()> {
         };
         // A liveness tick that found nothing changed ends here: no rebuild, no
         // reconcile. Only a reset (a full re-apply is due) goes on.
-        if !reconciles(wakeup, check) {
+        if !reconciles(wakeup, check, pending_reconcile) {
             continue;
         }
 
@@ -1483,10 +1560,25 @@ async fn main() -> Result<()> {
             Ok(()) => {
                 self_metrics.record_reconcile(started.elapsed(), true);
                 mark_ready(&ready);
+                pending_reconcile = false;
+                // A watch event that reconciled successfully inside the retry
+                // window has done the retry's work: disarm it, or it would run
+                // one redundant full rebuild.
+                retry = None;
             }
             Err(e) => {
                 self_metrics.record_reconcile(started.elapsed(), false);
-                error!(error = ?e, "reconcile failed; will retry on next event/resync");
+                if self_retry {
+                    error!(
+                        error = ?e,
+                        retry_in_secs = RECONCILE_RETRY_DELAY.as_secs(),
+                        "reconcile failed; will retry"
+                    );
+                    retry = Some(scheduled_retry());
+                } else {
+                    error!(error = ?e, "reconcile failed; will retry on the next liveness tick, event or resync");
+                }
+                pending_reconcile = true;
             }
         }
 
@@ -1501,8 +1593,8 @@ async fn main() -> Result<()> {
             let outcome = probe_sozu_generation(
                 &agent,
                 &mut acked_reconnects,
-                &mut generation_baseline,
                 &mut shadow,
+                &args.shadow_file,
                 &self_metrics,
                 &ready,
             )
@@ -1990,19 +2082,32 @@ mod tests {
     }
 
     #[test]
-    fn a_liveness_tick_reconciles_only_after_a_reset() {
+    fn a_liveness_tick_reconciles_only_after_a_reset_or_for_pending_work() {
         use shadow::GenerationCheck::{ProbeFailed, Reset, Unchanged};
-        // Nothing changed, or Sōzu unreachable: the tick must not become a
-        // full rebuild every period.
-        assert!(!reconciles(Wakeup::SozuProbe, Some(Unchanged)));
-        assert!(!reconciles(Wakeup::SozuProbe, Some(ProbeFailed)));
-        // A reset is the one thing it acts on: that reconcile is the re-apply.
-        assert!(reconciles(Wakeup::SozuProbe, Some(Reset)));
+        // Nothing changed, or Sōzu unreachable, and nothing pending: the tick
+        // must not become a full rebuild every period.
+        assert!(!reconciles(Wakeup::SozuProbe, Some(Unchanged), false));
+        assert!(!reconciles(Wakeup::SozuProbe, Some(ProbeFailed), false));
+        // A reset is acted on: that reconcile is the re-apply.
+        assert!(reconciles(Wakeup::SozuProbe, Some(Reset), false));
+        // A previous reconcile failed (a transient socket error mid-apply):
+        // Sōzu answering again on the same generation is the retry moment —
+        // otherwise, with the resync disabled, the desired state waits for an
+        // unrelated Kubernetes event that may never come.
+        assert!(reconciles(Wakeup::SozuProbe, Some(Unchanged), true));
+        // ...but not while Sōzu is still unreachable: the apply would fail
+        // the same way, and the next tick retries.
+        assert!(!reconciles(Wakeup::SozuProbe, Some(ProbeFailed), true));
         // Every other wakeup reconciles regardless of the check, as before.
-        assert!(reconciles(Wakeup::Change, None));
-        assert!(reconciles(Wakeup::Change, Some(ProbeFailed)));
-        assert!(reconciles(Wakeup::Resync, Some(Unchanged)));
-        assert!(reconciles(Wakeup::Resync, Some(ProbeFailed)));
+        assert!(reconciles(Wakeup::Change, None, false));
+        assert!(reconciles(Wakeup::Change, Some(ProbeFailed), false));
+        assert!(reconciles(Wakeup::Resync, Some(Unchanged), false));
+        assert!(reconciles(Wakeup::Resync, Some(ProbeFailed), false));
+        // The self-scheduled retry exists to reconcile: it always does, even
+        // when its generation check could not reach Sōzu (the apply fails
+        // fast and schedules the next retry).
+        assert!(reconciles(Wakeup::Retry, Some(Unchanged), true));
+        assert!(reconciles(Wakeup::Retry, Some(ProbeFailed), true));
     }
 
     #[test]
@@ -2018,6 +2123,32 @@ mod tests {
             assert!(!retry_by_nudge(outcome, true));
             assert!(!retry_by_nudge(outcome, false));
         }
+    }
+
+    #[test]
+    fn a_failed_reconcile_schedules_its_own_retry_only_with_both_ticks_off() {
+        // Either tick retries pending work on its own; a nudge on top would
+        // run the rebuild twice per failure.
+        assert!(!retry_reconcile_by_nudge(true, true));
+        assert!(!retry_reconcile_by_nudge(true, false));
+        assert!(!retry_reconcile_by_nudge(false, true));
+        // With both off, nothing else ever retries on a quiet cluster: the
+        // failed apply would stay unapplied until an unrelated watch event.
+        assert!(retry_reconcile_by_nudge(false, false));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_scheduled_retry_fires_after_the_delay_not_before_and_never_unscheduled() {
+        let mut retry = Some(scheduled_retry());
+        // Paused time: the arm must not complete until the delay has elapsed…
+        let early = tokio::time::timeout(RECONCILE_RETRY_DELAY / 2, maybe_retry(retry.as_mut()));
+        assert!(early.await.is_err(), "the retry must not fire early");
+        // …and must once it has. `timeout` auto-advances the paused clock.
+        let due = tokio::time::timeout(RECONCILE_RETRY_DELAY, maybe_retry(retry.as_mut()));
+        assert!(due.await.is_ok(), "the retry must fire after the delay");
+        // With none scheduled the arm pends forever, like a disabled tick.
+        let idle = tokio::time::timeout(Duration::from_secs(60), maybe_retry(None));
+        assert!(idle.await.is_err(), "no retry scheduled must never fire");
     }
 
     #[tokio::test]

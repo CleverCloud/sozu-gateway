@@ -294,7 +294,7 @@ pub enum SozuError {
 /// Identity of the command socket in the shared filesystem. Container restarts
 /// recreate this socket even when their new PID namespace reuses worker PIDs.
 /// The change timestamp also distinguishes a reused device/inode pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SocketIdentity {
     pub device: u64,
     pub inode: u64,
@@ -326,7 +326,7 @@ impl SocketIdentity {
 
 /// Restart identity: the command socket detects a container restart with reused
 /// PIDs, while the live worker set also detects individual worker replacements.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SozuGeneration {
     pub socket: SocketIdentity,
     pub worker_pids: BTreeSet<i32>,

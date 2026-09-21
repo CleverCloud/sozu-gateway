@@ -83,7 +83,10 @@ then a no-op that still counts as a successful reconcile.
   (frontend/listener `Add*` verbs reject duplicates with `StateError::Exists`), but because
   `AddCluster`/`AddBackend` upsert and the agent tolerates teardowns of objects Sōzu says it no
   longer holds (only those: a teardown refused for any other reason fails the batch) and *repairs*
-  duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`).
+  duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`). A failed
+  reconcile is **retried without waiting for a watch event**: the liveness tick re-runs pending
+  work on its next successful probe, the resync rebuilds anyway, and with both disabled the loop
+  nudges itself after a short delay — a quiet cluster must never keep a failed apply pending.
 - **Fail-fast philosophy:** if a watch stream ends or caches don't sync within the timeout, the
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
   **It does not cover a stream that goes silent without ending.** `watcher` retries internally, so
@@ -107,30 +110,30 @@ then a no-op that still counts as a successful reconcile.
   nothing at all. It costs traffic only when the world moves while they cannot see it, which is
   why a quiet cluster never shows this and an upgrade always does.
 - The shadow is **persisted** to the shared volume (`--shadow-file`, default `/run/sozu/shadow.json`)
-  on every successful apply and reloaded at startup, so restarting *only* the controller resumes from
-  the real baseline and still prunes orphans. It reloads the file **only when Sōzu still holds state**
-  (probed via `save_state`): if Sōzu itself restarted (empty), the stale shadow is ignored and the
-  full state is re-applied, so a fresh Sōzu is never left unprogrammed. Mid-life, a Sōzu restart
-  under a live controller is detected by its **command-socket identity and worker-PID generation** (checked on every resync
-  tick, pending reconnect, and post-apply reconnect); a changed generation resets the shadow so
-  the next reconcile re-applies everything — an emptiness probe would be raceable there.
-  Worker PIDs alone are insufficient: a restarted container can reuse the same PID set.
-  Socket identity must describe the connection that answered the worker probe, not a later
-  pathname lookup that could already refer to a replacement socket.
-- **A Sōzu-only restart is caught by a liveness tick, and it drops readiness.** An *idle*
-  command socket never reconnects, so on a quiet cluster the resync tick was the only thing that
-  ran the generation check — up to `SOZU_GW_RESYNC_SECS` (never, at 0) during which the restarted
-  Sōzu, back with only its static listeners and its own TCP probe green, stayed in the Service
-  answering 404. `--sozu-probe-secs` (`SOZU_GW_SOZU_PROBE_SECS`, chart `controller.sozuProbeSecs`,
-  default 2, 0 disables) is a `select!` arm that runs that same check every period and **nothing
-  else** unless it returns `Reset` (`reconciles()` gates the rebuild): `Unchanged` ends the pass,
-  `ProbeFailed` is retried on the next tick (at debug after the first warning, no channel nudge —
-  the nudge on a failed probe is now the tick-less path only). A `Reset` from **any** probe site
-  sets `/readyz` to 503 immediately (`unmark_ready`) and only the next successful `reconcile()`
-  sets it back — readiness reflects programming, not process liveness. The kubelet sees the drop
-  after `failureThreshold` × `periodSeconds` (3 × 5 s in the chart), so on a fast re-apply it is a
-  safety net; the win is the 2 s detection.
-- **The shadow is a bare `Ir` with no version field**, so every new field needs `#[serde(default)]`
+  the moment a socket apply succeeds — before the status/Event apiserver calls that follow, which
+  must never hold the baseline back — and reloaded at startup, so restarting *only* the controller
+  resumes from the real baseline and still prunes orphans. The file carries the **restart
+  generation** of the Sōzu it was applied to (command-socket identity + live worker PIDs) and is
+  resumed **only if the Sōzu found at startup answers with the same socket identity**: a Sōzu that
+  restarted while the controller was down recreated its socket, so the file is ignored and the full
+  state re-applied. (An emptiness probe via `save_state` cannot do this: with the static listeners
+  a fresh Sōzu already dumps four records, so it never reads "empty".) Mid-life, a restart under a
+  live controller is detected the same way (checked on every resync tick, pending reconnect, and
+  post-apply reconnect); a changed **socket** resets the shadow, and the file with it, so the next
+  reconcile re-applies everything, and **`/readyz` drops for that window** so the Service stops
+  sending traffic to a Pod whose Sōzu holds no routes; it re-latches when the re-apply succeeds. An
+  idle socket never reconnects, so a **liveness tick** (`--sozu-probe-secs`, default 2, chart
+  `controller.sozuProbeSecs`) runs that same generation check on a timer — one `Status` round-trip,
+  nothing rebuilt unless it finds a restart — bounding how long a Sōzu that restarted alone stays in
+  the Service before the reset fires (without it, only the next watch event or resync notices, up to
+  `SOZU_GW_RESYNC_SECS`, never at 0). A
+  changed worker set on the *same* socket does **not** reset:
+  the main process re-feeds its state to a respawned worker, and diffing `empty → desired` would
+  emit only adds, never removing what left the desired state meanwhile. Worker PIDs alone could
+  never detect a restart anyway: a restarted container can reuse the same PID set. Socket
+  identity must describe the connection that answered the worker probe, not a later pathname
+  lookup that could already refer to a replacement socket.
+- **The shadow file is `{generation, ir}` and the `ir` half is a bare `Ir` with no version field**, so every new `Ir` field needs `#[serde(default)]`
   — enforced by a frozen fixture (`controller/tests/fixtures/shadow-v0.2.json`), not by convention.
   The reverse direction cannot be defaulted: an older build has no variant for an enum value a
   newer one wrote, serde fails the *whole* parse, and diffing from the resulting empty `Ir` emits

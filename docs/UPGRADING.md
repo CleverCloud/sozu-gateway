@@ -97,30 +97,41 @@ on stops between two requests instead of landing its remainder on the socket.
 The agent's per-read deadline is 20 s (was 30 s) so that a request's usual
 worst case stays under the controller's 60 s apply deadline and the real
 error is what gets logged.
-## A Sōzu-only restart drops `/readyz`, and is caught within seconds
+## The persisted shadow carries Sōzu's restart generation
 
-When the Sōzu container restarts on its own, it comes back holding only its
-static listeners. Its readiness probe is a TCP check on the HTTP listener, so it
-is green within seconds; the controller's `/readyz`, once green, never went red;
-and an idle command socket never reconnects — so on a quiet cluster the
-controller noticed the restart only on its next resync tick (`resyncSecs`, 60 by
-default; never, at 0). Until then the Pod stayed in the Service answering 404
-and failing TLS.
+`/run/sozu/shadow.json` is now `{"generation": …, "ir": …}` — the last-applied
+IR together with the command-socket identity and worker PIDs of the Sōzu it
+was applied to. At startup the file is resumed only when the Sōzu found
+answers with the same socket identity; a Sōzu that restarted while the
+controller was down is otherwise indistinguishable from one that kept its
+state, because with the static HTTP/HTTPS listeners a fresh Sōzu already dumps
+four records to `save_state` — the previous emptiness probe could never say
+"empty". A file in the old bare-`Ir` format carries no such proof and is
+ignored. On a controller-only restart that discards a legacy file, the new
+empty baseline can only emit *adds*, so anything deleted from Kubernetes while
+the old controller was down stays in Sōzu until an unrelated change re-diffs
+it. **Roll the gateway Pods (both containers) when upgrading onto this format**,
+so Sōzu starts empty and the first apply is authoritative; a controller-only
+restart is safe on every later start, once a file in the new format exists.
 
-Two changes. The controller now polls Sōzu for a restart every
-`controller.sozuProbeSecs` (default `2`; `0` disables it, env
-`SOZU_GW_SOZU_PROBE_SECS`): one `Status` round-trip on the command socket per
-period, nothing rebuilt unless it finds one. And a detected restart now sets
-`/readyz` to 503 until the full state has been re-applied — readiness reflects
-whether Sōzu is programmed, not whether the controller process is up. The
-kubelet's readiness probe has `failureThreshold: 3` and `periodSeconds: 5`, so a
-re-apply that lands within seconds is never seen as a dip; the drop matters when
-the re-apply is slow or fails.
-
-A single worker bounce (`worker_automatic_restart`) reads as a restart too, as
-before, and now briefly drops readiness while the (harmless) full re-apply runs.
-Set `controller.sozuProbeSecs: 0` to restore the previous polling; the readiness
-drop has no switch.
+Two behaviours changed with it. The shadow advances and is persisted the
+moment the socket apply succeeds, before the status and Event calls that
+follow: a failing apiserver could otherwise leave Sōzu ahead of the baseline
+and every later pass re-emitting the same delta (each frontend answered
+`Exists`, then removed and re-added — a routing gap per route). And a worker
+that restarts on the same socket no longer resets the shadow: the main
+process re-feeds its state to the new worker, and a reset diffs `empty →
+desired`, which emits only adds — an object that left the desired state in
+between would never be removed. On a reset the Pod also leaves the Service
+(`/readyz` drops) until the re-apply succeeds, so a Sōzu that came back with
+only its static listeners does not keep taking traffic it would answer 404/503. A new liveness
+tick (`--sozu-probe-secs` / `controller.sozuProbeSecs`, default 2 s, `0` disables) runs the
+generation check on a timer so an idle cluster notices a restart in ~2 s rather than at the next
+resync; it does one `Status` round-trip and reconciles only when it finds a change —
+or when a previous reconcile failed and its work is still pending: a transient
+socket error during an apply is then retried on the next tick that reaches Sōzu,
+rather than waiting for an unrelated Kubernetes event (which, with the resync
+disabled, might never come).
 
 ---
 
@@ -524,9 +535,13 @@ at `DEBUG`, so those figures include the failed reconnect that follows it, and
 why they exceed their nominal bound is not established — only that they do. Size
 any staleness alert on the measured figures.
 
-**What it does not fix.** `/readyz` still latches green on a controller that has
-gone blind, and no `sozu_gw_controller_*` series moves while it is blind. The
-setting bounds how long that lasts; it does not make it visible.
+**What it does not fix.** This bounds a controller going blind to the
+*apiserver* (a stale watch): `/readyz` still stays green in that case — the Pod
+serves the last-known routes correctly, it just stops learning — and no
+`sozu_gw_controller_*` series moves while it is blind. The setting bounds how
+long that lasts; it does not make it visible. (A Sōzu *data-plane* restart is a
+different case and now drops `/readyz` until the re-apply, see the shadow entry
+above.)
 
 **A restart is not a substitute.** v0.3.0 suggested rolling the gateway once the
 control plane had been replaced. That was measured on the next upgrade and does
@@ -541,8 +556,9 @@ does not tell you.
 
 Upgrades need nothing special. **Downgrades do**, and this is the procedure.
 
-The controller persists its last-applied state to `/run/sozu/shadow.json` as a
-bare `Ir` with no version field. Forward compatibility is covered — every field
+The controller persists its last-applied state to `/run/sozu/shadow.json` as
+`{generation, ir}`, where `ir` is a bare `Ir` with no version field. Forward
+compatibility is covered — every field
 added since is `#[serde(default)]`, and a frozen fixture test
 (`crates/controller/tests/fixtures/shadow-v0.2.json`) keeps it that way, so a
 new controller reads an old file.

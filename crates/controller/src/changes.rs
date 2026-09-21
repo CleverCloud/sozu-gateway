@@ -4,29 +4,31 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-/// Wait for one rebuild. Endpoint changes interrupt an ordinary debounce;
-/// they also remain pending when the reconcile loop is busy applying state.
-/// All notices consumed here precede the next cache snapshot. Notices arriving
-/// after this function returns remain queued for the following rebuild.
-pub async fn next(
+/// Settle a rebuild after its first notice has already been received. An
+/// ordinary change debounces (an endpoint notice cuts the debounce short); an
+/// endpoint notice does not. Then drain whatever else is queued.
+///
+/// The caller receives that first notice **in its own `select!`** —
+/// `mpsc::Receiver::recv` is cancellation-safe, so a competing timer that wins
+/// the race removes no message — and calls this only once it has committed to a
+/// rebuild. Composing the recv and the debounce into one future awaited as a
+/// single `select!` arm instead lets a sibling timer cancel it *after* it
+/// consumed a notice but during the debounce, dropping that notice; the run
+/// loop's Sōzu-liveness tick would then never reconcile it.
+pub async fn settle(
     changes: &mut mpsc::Receiver<()>,
     endpoints: &mut mpsc::Receiver<()>,
     debounce: Duration,
-) -> Option<()> {
-    tokio::select! {
-        changed = endpoints.recv() => { changed?; }
-        changed = changes.recv() => {
-            changed?;
-            tokio::select! {
-                changed = endpoints.recv() => { changed?; }
-                _ = tokio::time::sleep(debounce) => {}
-            }
+    first_was_endpoint: bool,
+) {
+    if !first_was_endpoint {
+        tokio::select! {
+            _ = endpoints.recv() => {}
+            _ = tokio::time::sleep(debounce) => {}
         }
     }
-
     drain_pending(changes);
     drain_pending(endpoints);
-    Some(())
 }
 
 /// Wait for one rebuild on a single channel, for loops with no endpoint
@@ -57,6 +59,42 @@ mod tests {
     use tokio::time::{advance, timeout, Instant};
 
     const DEBOUNCE: Duration = Duration::from_millis(500);
+
+    /// The run loop's recv-then-`settle` composition, as one awaitable, so the
+    /// debounce behaviour can be tested as a unit. Production code inlines this
+    /// in its `select!` so the first recv stays cancellation-safe.
+    async fn next(
+        changes: &mut mpsc::Receiver<()>,
+        endpoints: &mut mpsc::Receiver<()>,
+        debounce: Duration,
+    ) -> Option<()> {
+        let first_was_endpoint = tokio::select! {
+            changed = endpoints.recv() => { changed?; true }
+            changed = changes.recv() => { changed?; false }
+        };
+        settle(changes, endpoints, debounce, first_was_endpoint).await;
+        Some(())
+    }
+
+    /// The regression guard for the run loop's cancel-safety: when a competing
+    /// timer (the Sōzu-liveness or resync tick) wins the race against the raw
+    /// `recv`, the pending change must stay in the channel for the next
+    /// iteration, not be consumed and dropped. `mpsc::Receiver::recv` guarantees
+    /// this; composing recv+debounce into one cancelled future did not.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_winning_the_race_does_not_consume_a_pending_change() {
+        let (tx, mut rx) = mpsc::channel::<()>(64);
+        tx.try_send(()).unwrap();
+        // A ready timer competes with the change recv, biased to the timer so
+        // it always wins — exactly the loss window the old composed future had.
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::ZERO) => {}
+            changed = rx.recv() => panic!("recv should have lost the race: {changed:?}"),
+        }
+        // The change survived the cancelled recv and is still deliverable.
+        assert_eq!(rx.try_recv(), Ok(()));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn ordinary_changes_keep_the_debounce() {
