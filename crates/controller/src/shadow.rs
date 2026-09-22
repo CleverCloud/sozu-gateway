@@ -7,47 +7,67 @@
 //! controller would re-add everything from an empty baseline and never compute
 //! the removes for objects deleted meanwhile.
 //!
-//! So we persist the shadow to that shared volume and reload it on startup — but
-//! only when Sōzu *still holds the state it describes*. If Sōzu itself restarted
-//! (empty), the persisted shadow is stale and trusting it would leave a fresh
-//! Sōzu unprogrammed; in that case we start empty and re-apply everything. Any
+//! So we persist the shadow to that shared volume, **together with the restart
+//! generation of the Sōzu that holds it** (its command-socket identity and live
+//! worker PIDs), and reload it on startup only when the Sōzu we find answers
+//! with the same socket identity. A Sōzu that restarted while the controller
+//! was down recreated its socket, so its generation differs and the persisted
+//! shadow is ignored: we start empty and re-apply everything. Any read or parse
 //! error falls back to empty too, because re-applying is always correct.
+//!
+//! An emptiness probe (`save_state` and "is the dump empty?") cannot do this
+//! job: with the static HTTP/HTTPS listeners of this deployment a fresh Sōzu
+//! already dumps four listener records, so such a probe never reads "empty".
 
-use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use sozu_gw_agent::{SozuAgentHandle, SozuError, SozuGeneration};
 use sozu_gw_ir::Ir;
 use tracing::{debug, info, warn};
 
+/// The last-applied state, paired with the generation of the Sōzu it was
+/// applied to. This is also the on-disk format (see [`persist`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Shadow {
+    /// The generation of the Sōzu that holds `ir`; `None` until a probe has
+    /// succeeded, in which case the shadow is not yet proven and a
+    /// non-empty `ir` is reset on the first successful probe.
+    #[serde(default)]
+    pub generation: Option<SozuGeneration>,
+    /// The last successfully applied IR (private keys redacted on disk).
+    #[serde(default)]
+    pub ir: Ir,
+}
+
+impl Shadow {
+    pub fn empty(generation: Option<SozuGeneration>) -> Self {
+        Self {
+            generation,
+            ir: Ir::default(),
+        }
+    }
+}
+
 /// Load the initial shadow. Returns the persisted last-applied IR only when it
-/// is safe to trust (file present AND Sōzu non-empty); otherwise an empty IR.
-pub async fn load_initial(agent: &SozuAgentHandle, shadow_file: &str, probe_file: &str) -> Ir {
+/// is safe to trust: the file is present and readable, and the Sōzu that
+/// answered `current` has the same command socket as the one the file was
+/// written against. Worker PIDs may differ — a worker that bounced while the
+/// controller was down was re-fed the main process's state, so the shadow
+/// still describes what Sōzu serves. `current` being `None` means no proof at
+/// all, so nothing is resumed.
+pub fn load_initial(shadow_file: &str, current: Option<&SozuGeneration>) -> Shadow {
+    let empty = Shadow::empty(current.cloned());
     if shadow_file.is_empty() {
-        return Ir::default();
+        return empty;
     }
     let raw = match std::fs::read_to_string(shadow_file) {
         Ok(s) => s,
         Err(e) => {
             debug!(error = %e, file = %shadow_file, "no persisted shadow; starting empty");
-            return Ir::default();
+            return empty;
         }
     };
-    // The persisted shadow is only trustworthy if Sōzu still has its state.
-    match sozu_has_state(agent, probe_file).await {
-        Ok(true) => {}
-        Ok(false) => {
-            info!("Sōzu state is empty (restarted?); ignoring persisted shadow, will re-apply");
-            return Ir::default();
-        }
-        Err(e) => {
-            warn!(error = %e, "could not probe Sōzu state; ignoring persisted shadow, will re-apply");
-            return Ir::default();
-        }
-    }
-    match serde_json::from_str::<Ir>(&raw) {
-        Ok(ir) => {
-            info!(file = %shadow_file, "resumed shadow from persisted state");
-            ir
-        }
+    let persisted = match serde_json::from_str::<Shadow>(&raw) {
+        Ok(persisted) => persisted,
         Err(e) => {
             // Also the downgrade path: the IR is a versioned-by-nothing serde
             // enum soup, so a shadow written by a newer controller can carry a
@@ -57,7 +77,32 @@ pub async fn load_initial(agent: &SozuAgentHandle, shadow_file: &str, probe_file
             // changes. Widening an IR enum is therefore a compatibility event,
             // not a refactor.
             warn!(error = %e, "persisted shadow is unreadable; will re-apply");
-            Ir::default()
+            return empty;
+        }
+    };
+    match (persisted.generation.as_ref(), current) {
+        (Some(written_against), Some(current)) if written_against.socket == current.socket => {
+            info!(file = %shadow_file, "resumed shadow from persisted state (same Sōzu socket)");
+            Shadow {
+                generation: Some(current.clone()),
+                ir: persisted.ir,
+            }
+        }
+        (Some(written_against), Some(current)) => {
+            info!(
+                persisted = ?written_against.socket,
+                current = ?current.socket,
+                "Sōzu's command socket changed since the shadow was written (restarted while the controller was down?); ignoring persisted shadow, will re-apply"
+            );
+            empty
+        }
+        (None, _) => {
+            info!("persisted shadow carries no Sōzu generation; ignoring it, will re-apply");
+            empty
+        }
+        (_, None) => {
+            warn!("could not read Sōzu's generation; ignoring persisted shadow, will re-apply");
+            empty
         }
     }
 }
@@ -68,7 +113,7 @@ pub enum GenerationCheck {
     /// The probe succeeded and the generation matches the baseline (or there
     /// was nothing applied to lose); the shadow stands.
     Unchanged,
-    /// The probe succeeded, the generation changed under a non-empty shadow,
+    /// The probe succeeded, the socket changed under a non-empty shadow,
     /// and the shadow was reset — a full re-apply is due.
     Reset,
     /// The probe failed; nothing was decided. The caller must retry: never
@@ -78,8 +123,8 @@ pub enum GenerationCheck {
 }
 
 /// Mid-life counterpart of [`load_initial`]: check Sōzu's *restart generation*
-/// — its command-socket identity and live workers — against the baseline, and reset the shadow to
-/// empty when it changed.
+/// against the one the shadow was applied to, and reset the shadow to empty
+/// when its command socket changed.
 ///
 /// If the Sōzu container restarts under a live controller (main-process crash;
 /// `worker_automatic_restart` only covers workers), it comes back empty while
@@ -87,50 +132,66 @@ pub enum GenerationCheck {
 /// empty and every request 404s indefinitely. An emptiness probe cannot detect
 /// this reliably: any successful add-bearing apply that lands on the restarted
 /// Sōzu first (e.g. the tail of the very batch whose reconnect signalled the
-/// restart) makes it non-empty again, masking the restart forever. The
-/// generation is immune to that race: a container restart recreates the command
-/// socket even when its new PID namespace reuses the same worker PIDs. The cost is a false positive
-/// on a single worker bounce (`worker_automatic_restart` changes one PID): an
-/// acceptable, logged, harmless full re-apply.
+/// restart) makes it non-empty again, masking the restart forever. The socket
+/// identity is immune to that race: a container restart recreates the command
+/// socket even when its new PID namespace reuses the same worker PIDs.
 ///
-/// On success the baseline advances to the observed generation. A missing baseline
-/// (the startup capture failed) resets too when the shadow is non-empty: with
-/// no established generation there is no proof Sōzu still holds what the
-/// shadow claims, and one extra full re-apply is the safe way out.
+/// A changed worker set *alone* does not reset. The main process re-feeds its
+/// state to a respawned worker, so the shadow still describes what Sōzu
+/// serves; resetting would diff `empty → desired`, which emits only adds — so
+/// an object that left the desired state in the meantime would never be
+/// removed, and every frontend would be re-added and "repaired" (remove +
+/// re-add) for nothing.
+///
+/// On success the baseline advances to the observed generation. A missing
+/// baseline (the startup capture failed) resets too when the shadow is
+/// non-empty: with no established generation there is no proof Sōzu still
+/// holds what the shadow claims, and one extra full re-apply is the safe way
+/// out.
 pub async fn check_restart_generation(
     agent: &SozuAgentHandle,
-    baseline: &mut Option<SozuGeneration>,
-    shadow: &mut Ir,
+    shadow: &mut Shadow,
 ) -> GenerationCheck {
     let probe = agent.generation().await;
     if let Err(e) = &probe {
         warn!(error = %e, "could not query Sōzu's generation; keeping the shadow and retrying");
         return GenerationCheck::ProbeFailed;
     }
-    let outcome = if should_reset(&probe, baseline.as_ref(), shadow) {
+    let outcome = if should_reset(&probe, shadow.generation.as_ref(), &shadow.ir) {
         warn!(
-            baseline = ?baseline,
+            baseline = ?shadow.generation,
             current = ?probe.as_ref().ok(),
-            "Sōzu's generation changed (restarted?); resetting the shadow to re-apply the full state"
+            "Sōzu's command socket changed (restarted?); resetting the shadow to re-apply the full state"
         );
-        *shadow = Ir::default();
+        shadow.ir = Ir::default();
         GenerationCheck::Reset
     } else {
         GenerationCheck::Unchanged
     };
     if let Ok(generation) = probe {
-        *baseline = Some(generation);
+        if let Some(known) = &shadow.generation {
+            if outcome == GenerationCheck::Unchanged && known.worker_pids != generation.worker_pids
+            {
+                info!(
+                    previous = ?known.worker_pids,
+                    current = ?generation.worker_pids,
+                    "Sōzu's worker set changed on the same socket (worker restart); keeping the shadow"
+                );
+            }
+        }
+        shadow.generation = Some(generation);
     }
     outcome
 }
 
-/// Pure reset decision, keyed on (probe result, generation change, shadow
+/// Pure reset decision, keyed on (probe result, socket change, shadow
 /// emptiness). A probe *error* never resets (a transient failure must not
 /// trigger a full blind re-apply — the caller retries), and an empty shadow
 /// never resets (nothing applied, nothing to lose). On a successful probe the
-/// shadow is reset when the generation differs from the baseline — including a
-/// single worker bounce — or when no baseline was ever established (an
-/// unproven generation under a claimed-applied shadow is not trustworthy).
+/// shadow is reset when the command socket differs from the baseline's — a
+/// worker bounce on the same socket does not count — or when no baseline was
+/// ever established (an unproven generation under a claimed-applied shadow is
+/// not trustworthy).
 fn should_reset(
     probe: &Result<SozuGeneration, SozuError>,
     baseline: Option<&SozuGeneration>,
@@ -143,38 +204,9 @@ fn should_reset(
         return false;
     }
     match baseline {
-        Some(known) => known != generation,
+        Some(known) => known.socket != generation.socket,
         None => true,
     }
-}
-
-/// Probe whether Sōzu currently holds any routing state, by asking it to dump to
-/// `probe_file` (on the shared volume) and checking the dump is non-empty. A
-/// dump-file read failure is an *error*, never "empty": conflating the two
-/// would let a controller-side filesystem hiccup read as a restarted Sōzu.
-async fn sozu_has_state(agent: &SozuAgentHandle, probe_file: &str) -> anyhow::Result<bool> {
-    agent
-        .save_state(probe_file.to_string())
-        .await
-        .context("ask Sōzu to dump its state")?;
-    let dump = read_state_dump(probe_file)
-        .with_context(|| format!("read Sōzu's state dump at {probe_file}"))?;
-    Ok(state_dump_is_nonempty(&dump))
-}
-
-/// Read (and best-effort clean up) the probe dump. Errors surface to the
-/// caller — see [`sozu_has_state`].
-fn read_state_dump(probe_file: &str) -> std::io::Result<String> {
-    let dump = std::fs::read_to_string(probe_file)?;
-    let _ = std::fs::remove_file(probe_file); // best-effort cleanup
-    Ok(dump)
-}
-
-/// A Sōzu state dump is newline/NUL-delimited JSON records; it is non-empty when
-/// it has at least one record.
-fn state_dump_is_nonempty(dump: &str) -> bool {
-    dump.split('\n')
-        .any(|line| !line.trim_matches(['\0', ' ', '\r', '\t']).is_empty())
 }
 
 /// Persist the shadow. Best-effort: a write failure must never fail a reconcile.
@@ -191,11 +223,15 @@ fn state_dump_is_nonempty(dump: &str) -> bool {
 /// built *desired* IR, whose keys come straight from the Secrets. Persisting
 /// keys would put every tenant's private key at rest on the shared volume for
 /// zero functional benefit.
-pub fn persist(shadow_file: &str, shadow: &Ir) {
+pub fn persist(shadow_file: &str, shadow: &Shadow) {
     if shadow_file.is_empty() {
         return;
     }
-    let bytes = match serde_json::to_vec(&redact_private_keys(shadow)) {
+    let redacted = Shadow {
+        generation: shadow.generation.clone(),
+        ir: redact_private_keys(&shadow.ir),
+    };
+    let bytes = match serde_json::to_vec(&redacted) {
         Ok(bytes) => bytes,
         Err(e) => {
             warn!(error = %e, "failed to serialize shadow");
@@ -212,7 +248,7 @@ pub fn persist(shadow_file: &str, shadow: &Ir) {
     }
 }
 
-/// The shadow with every certificate's private key blanked — what [`persist`]
+/// The IR with every certificate's private key blanked — what [`persist`]
 /// actually writes. A reloaded key-less shadow still identifies its
 /// certificates (the diff works on fingerprints computed from the public PEM),
 /// so it diffs cleanly against a freshly built desired IR.
@@ -242,20 +278,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_dump_is_detected_as_empty() {
-        assert!(!state_dump_is_nonempty(""));
-        assert!(!state_dump_is_nonempty("\n\0\n"));
-        assert!(!state_dump_is_nonempty("   \r\n"));
-    }
-
-    #[test]
-    fn nonempty_dump_is_detected() {
-        assert!(state_dump_is_nonempty(
-            "{\"id\":\"SAVE-0\",\"content\":{}}\n\0"
-        ));
-    }
-
-    #[test]
     fn reset_only_on_a_successful_probe_showing_a_new_generation() {
         let generation = |pids| SozuGeneration {
             socket: sozu_gw_agent::SocketIdentity {
@@ -280,15 +302,24 @@ mod tests {
         let empty = Ir::default();
         let baseline = generation([101, 102]);
 
-        // Sōzu's main process restarted: every worker PID is new.
+        // Sōzu's main process restarted: it recreated its command socket.
+        let mut restarted = generation([201, 202]);
+        restarted.socket.inode += 7;
+        restarted.socket.changed_secs += 1;
+        assert!(should_reset(&Ok(restarted), Some(&baseline), &applied));
+        // The same PID set can never mask that: only the socket is compared.
+        let mut same_pids_new_socket = baseline.clone();
+        same_pids_new_socket.socket.changed_secs += 1;
         assert!(should_reset(
-            &Ok(generation([201, 202])),
+            &Ok(same_pids_new_socket),
             Some(&baseline),
             &applied
         ));
-        // A single worker bounce (worker_automatic_restart) resets too: an
-        // acceptable, logged, harmless full re-apply.
-        assert!(should_reset(
+        // A worker bounce on the same socket (`worker_automatic_restart`) does
+        // NOT reset: the main process re-feeds its state to the new worker, so
+        // the shadow still describes what Sōzu serves — and a reset would diff
+        // `empty → desired`, never removing what left the desired state since.
+        assert!(!should_reset(
             &Ok(generation([101, 103])),
             Some(&baseline),
             &applied
@@ -312,11 +343,9 @@ mod tests {
             &applied
         ));
         // Nothing was ever applied: nothing a restarted Sōzu could have lost.
-        assert!(!should_reset(
-            &Ok(generation([201, 202])),
-            Some(&baseline),
-            &empty
-        ));
+        let mut restarted_again = generation([201, 202]);
+        restarted_again.socket.inode += 1;
+        assert!(!should_reset(&Ok(restarted_again), Some(&baseline), &empty));
         // A probe error must never trigger a full blind re-apply — the caller
         // keeps the reconnect pending and retries.
         assert!(!should_reset(
@@ -355,23 +384,18 @@ mod tests {
             }],
             ..Default::default()
         };
-        let known = baseline.clone();
-        let applied = shadow.clone();
+        let mut state = Shadow {
+            generation: baseline.take(),
+            ir: shadow.clone(),
+        };
+        let before = state.clone();
         assert_eq!(
-            check_restart_generation(&agent, &mut baseline, &mut shadow).await,
+            check_restart_generation(&agent, &mut state).await,
             GenerationCheck::ProbeFailed
         );
-        assert_eq!(baseline, known);
-        assert_eq!(shadow, applied);
-    }
-
-    #[test]
-    fn a_missing_state_dump_is_an_error_not_an_empty_dump() {
-        // A controller-side read failure must surface as an error (the caller
-        // keeps/ignores the shadow accordingly), never read as "Sōzu is empty".
-        let missing =
-            std::env::temp_dir().join(format!("sozu-gw-nonexistent-{}.probe", std::process::id()));
-        assert!(read_state_dump(missing.to_str().expect("utf-8 path")).is_err());
+        assert_eq!(state, before);
+        shadow = state.ir;
+        let _ = shadow;
     }
 
     #[test]
@@ -400,11 +424,15 @@ mod tests {
             }],
             ..Default::default()
         };
-        persist(path, &ir);
+        let shadow = Shadow {
+            generation: Some(generation_fixture([7, 8])),
+            ir,
+        };
+        persist(path, &shadow);
 
         let raw = std::fs::read_to_string(&file).expect("shadow file present");
-        let back: Ir = serde_json::from_str(&raw).expect("persisted shadow parses");
-        assert_eq!(back, ir, "the target must hold exactly the new shadow");
+        let back: Shadow = serde_json::from_str(&raw).expect("persisted shadow parses");
+        assert_eq!(back, shadow, "the target must hold exactly the new shadow");
         assert!(
             !std::path::Path::new(&tmp).exists(),
             "the temp file must be renamed away, never left behind"
@@ -436,17 +464,23 @@ mod tests {
             std::env::temp_dir().join(format!("sozu-gw-shadow-redact-{}.json", std::process::id()));
         let path = file.to_str().expect("utf-8 temp path");
 
-        persist(path, &ir_with_certificate());
+        persist(
+            path,
+            &Shadow {
+                generation: Some(generation_fixture([7, 8])),
+                ir: ir_with_certificate(),
+            },
+        );
 
         let raw = std::fs::read_to_string(&file).expect("shadow file present");
         assert!(
             !raw.contains("PRIVATE KEY"),
             "no private-key material may reach the persisted shadow"
         );
-        let back: Ir = serde_json::from_str(&raw).expect("persisted shadow parses");
-        assert!(back.certificates[0].key.is_empty());
+        let back: Shadow = serde_json::from_str(&raw).expect("persisted shadow parses");
+        assert!(back.ir.certificates[0].key.is_empty());
         assert_eq!(
-            back.certificates[0].certificate, CERT_A,
+            back.ir.certificates[0].certificate, CERT_A,
             "the public identity must survive redaction"
         );
 
@@ -477,9 +511,9 @@ mod tests {
         );
     }
 
-    /// A shadow written by an older controller must still parse.
+    /// An IR written by an older controller must still parse.
     ///
-    /// The file is a bare `Ir` with no version field, so every field added
+    /// The `ir` half of the shadow file is a bare `Ir` with no version field, so every field added
     /// since has to carry `#[serde(default)]`. That is a convention, and a
     /// convention is not a guarantee: this fixture is the guarantee. It is
     /// **frozen** — never regenerate it to make the test pass, because the
@@ -521,5 +555,111 @@ mod tests {
         let json = serde_json::to_string(&ir).unwrap();
         let back: Ir = serde_json::from_str(&json).unwrap();
         assert_eq!(ir, back);
+    }
+
+    fn generation_fixture(pids: [i32; 2]) -> SozuGeneration {
+        SozuGeneration {
+            socket: sozu_gw_agent::SocketIdentity {
+                device: 1,
+                inode: 10,
+                changed_secs: 1,
+                changed_nanos: 0,
+            },
+            worker_pids: std::collections::BTreeSet::from(pids),
+        }
+    }
+
+    fn applied_ir() -> Ir {
+        Ir {
+            clusters: vec![sozu_gw_ir::Cluster {
+                id: "demo.web.80".into(),
+                load_balancing: sozu_gw_ir::LbAlgorithm::default(),
+                sticky_session: false,
+                https_redirect: false,
+                max_connections_per_ip: None,
+                retry_after: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn temp_shadow_path(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("sozu-gw-shadow-{name}-{}.json", std::process::id()))
+            .to_str()
+            .expect("utf-8 temp path")
+            .to_string()
+    }
+
+    /// The whole point of persisting the generation: a Sōzu that restarted
+    /// while the controller was down has a new command socket, and the file
+    /// written against the old one must not be trusted.
+    #[test]
+    fn load_initial_ignores_a_shadow_written_against_another_socket() {
+        let path = temp_shadow_path("other-socket");
+        let written = generation_fixture([7, 8]);
+        persist(
+            &path,
+            &Shadow {
+                generation: Some(written.clone()),
+                ir: applied_ir(),
+            },
+        );
+        let mut restarted = written.clone();
+        restarted.socket.changed_secs += 1; // same PIDs, new socket
+        let loaded = load_initial(&path, Some(&restarted));
+        assert_eq!(loaded.ir, Ir::default(), "a restarted Sōzu holds nothing");
+        assert_eq!(loaded.generation, Some(restarted));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A worker that bounced while the controller was down was re-fed the
+    /// main process's state: same socket, other PIDs, shadow still valid.
+    #[test]
+    fn load_initial_resumes_on_the_same_socket_even_with_new_worker_pids() {
+        let path = temp_shadow_path("same-socket");
+        persist(
+            &path,
+            &Shadow {
+                generation: Some(generation_fixture([7, 8])),
+                ir: applied_ir(),
+            },
+        );
+        let current = generation_fixture([9, 10]);
+        let loaded = load_initial(&path, Some(&current));
+        assert_eq!(loaded.ir, applied_ir());
+        assert_eq!(
+            loaded.generation,
+            Some(current),
+            "the resumed shadow adopts the generation that was actually observed"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_initial_without_a_generation_proof_starts_empty() {
+        let path = temp_shadow_path("no-proof");
+        persist(
+            &path,
+            &Shadow {
+                generation: Some(generation_fixture([7, 8])),
+                ir: applied_ir(),
+            },
+        );
+        let loaded = load_initial(&path, None);
+        assert_eq!(loaded, Shadow::empty(None));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file from before the envelope (a bare `Ir`, or an envelope without a
+    /// generation) carries no proof and is ignored.
+    #[test]
+    fn load_initial_ignores_a_shadow_without_a_generation() {
+        let path = temp_shadow_path("bare-ir");
+        std::fs::write(&path, serde_json::to_vec(&applied_ir()).unwrap()).unwrap();
+        let current = generation_fixture([7, 8]);
+        let loaded = load_initial(&path, Some(&current));
+        assert_eq!(loaded.ir, Ir::default());
+        let _ = std::fs::remove_file(&path);
     }
 }

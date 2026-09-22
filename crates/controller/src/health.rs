@@ -1,10 +1,13 @@
 //! Minimal HTTP health endpoints for Kubernetes probes.
 //!
 //! `/healthz` (liveness) returns `200` as soon as the process serves. `/readyz`
-//! (readiness) returns `200` only after the first successful reconcile — so the
-//! Pod joins the Service (and receives traffic) only once Sōzu is programmed,
+//! (readiness) returns `200` only after a successful reconcile — so the Pod
+//! joins the Service (and receives traffic) only once Sōzu is programmed,
 //! never during the cold-start "program gap". Readiness latches on: once set, a
-//! later reconcile failure does not pull a live Pod out of rotation.
+//! later reconcile failure does not pull a live Pod out of rotation. The one
+//! thing that unsets it is a detected Sōzu restart (`main::unmark_ready`): the
+//! data plane is then known to hold nothing, and stays out of rotation until
+//! the full re-apply lands.
 //!
 //! Hand-rolled on a `TcpListener` to avoid pulling an HTTP server dependency for
 //! two fixed responses; probes send a tiny request we only need the path from.

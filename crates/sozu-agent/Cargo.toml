@@ -23,6 +23,8 @@ tokio = { workspace = true }
 # either, and std can only set `SO_SNDTIMEO` on a connected stream.
 mio = { workspace = true }
 socket2 = { workspace = true }
+# The restart generation is persisted next to the controller's shadow.
+serde = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

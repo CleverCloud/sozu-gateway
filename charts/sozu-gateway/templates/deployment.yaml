@@ -143,6 +143,11 @@ spec:
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS
               value: {{ .Values.controller.resyncSecs | quote }}
+            {{- /* hasKey, not truthiness: an explicit 0 (disable) must render. */}}
+            {{- if hasKey .Values.controller "sozuProbeSecs" }}
+            - name: SOZU_GW_SOZU_PROBE_SECS
+              value: {{ .Values.controller.sozuProbeSecs | quote }}
+            {{- end }}
             - name: SOZU_GW_HEALTH_LISTEN
               value: "0.0.0.0:{{ .Values.controller.healthPort | default 8081 }}"
             {{- if eq (include "sozu-gateway.watchTimeoutSet" .) "true" }}
