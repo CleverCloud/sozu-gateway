@@ -18,6 +18,22 @@ RELEASE="${HELM_RELEASE:-sozu-gateway}"
 NS="${HELM_NS:-sozu-system}"
 DEMO_NS="${DEMO_NS:-sozu-demo}"
 
+# Cleanup hooks, run on exit in reverse registration order, each handed the
+# script's exit status. One registry rather than one `trap ... EXIT` per
+# caller: a second `trap` silently replaces the first, so a suite installing
+# its own would leak the port-forward `pf_start` started (or the reverse).
+E2E_EXIT_HOOKS=()
+on_exit() {
+  E2E_EXIT_HOOKS+=("$1")
+}
+run_exit_hooks() {
+  local rc=$? i
+  for ((i = ${#E2E_EXIT_HOOKS[@]} - 1; i >= 0; i--)); do
+    "${E2E_EXIT_HOOKS[$i]}" "$rc" || true
+  done
+}
+trap run_exit_hooks EXIT
+
 # Build + push the controller image unless IMAGE is already set. Exports IMAGE,
 # DIGEST (when resolvable), REPO and TAG for the caller.
 ensure_image() {
@@ -92,15 +108,23 @@ ensure_demo_ns() {
 }
 
 # Port-forward to the gateway; args are `local:remote` port pairs. Sets PF_PID
-# and installs an EXIT trap that kills it.
+# and registers an exit hook that kills it. Returns once every pair is
+# listening locally (kubectl reports each as "Forwarding from ..."), or fails
+# with the port-forward's own output when it dies first, e.g. on a local port
+# another suite still holds.
 #
 # Targets a *Ready* pod explicitly instead of `svc/`: right after a rolling
 # update, `kubectl port-forward svc/...` can attach to a Terminating or
 # not-yet-ready pod (it picks the first selector match, ignoring readiness),
 # which makes the suite probe a proxy that is already being torn down.
 pf_start() {
-  local pod pair local_port svc_port target
+  local pod pair local_port svc_port target deadline
   local pairs=()
+  # A fresh log per invocation: a shared path could hand `pf_listening` a
+  # previous or concurrent run's "Forwarding from" line and pass before this
+  # port-forward has actually bound.
+  PF_LOG="$(mktemp "${TMPDIR:-/tmp}/sozu-e2e-pf.XXXXXX.log")"
+  on_exit pf_log_cleanup
   pod=$(kubectl -n "$NS" get pods \
     -l "app.kubernetes.io/instance=$RELEASE" \
     -o jsonpath='{range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
@@ -127,10 +151,40 @@ pf_start() {
     fi
     pairs+=("${local_port}:${target}")
   done
-  kubectl -n "$NS" port-forward "pod/$pod" "${pairs[@]}" >/tmp/sozu-e2e-pf.log 2>&1 &
+  kubectl -n "$NS" port-forward "pod/$pod" "${pairs[@]}" >"$PF_LOG" 2>&1 &
   PF_PID=$!
-  trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
-  sleep 3
+  on_exit pf_stop
+  deadline=$((SECONDS + 30))
+  until pf_listening "${pairs[@]}"; do
+    if ! kill -0 "$PF_PID" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+      echo "FAIL: port-forward to $pod (${pairs[*]}) did not come up:" >&2
+      sed 's/^/  /' "$PF_LOG" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
+# True once the port-forward reports every local port bound. Checked per port
+# rather than by counting lines: kubectl binds the ports one at a time and
+# prints one line per address (127.0.0.1 and ::1), so a count reaches the
+# number of pairs while the last port is still unbound.
+pf_listening() {
+  local pair
+  for pair in "$@"; do
+    grep -q "^Forwarding from .*:${pair%%:*} -> " "$PF_LOG" 2>/dev/null || return 1
+  done
+}
+
+pf_stop() {
+  if [ -n "${PF_PID:-}" ]; then
+    kill "$PF_PID" 2>/dev/null || true
+    wait "$PF_PID" 2>/dev/null || true
+  fi
+}
+
+pf_log_cleanup() {
+  [ -n "${PF_LOG:-}" ] && rm -f "$PF_LOG"
 }
 
 # Assert two values are equal, or fail the script.
@@ -141,4 +195,43 @@ assert_eq() {
     echo "  FAIL $3: expected '$2', got '$1'"
     exit 1
   fi
+}
+
+# Assert a file has a line matching the (case-insensitive, extended) regex, or
+# fail the script with the file's content.
+assert_grep() {
+  if grep -qiE "$1" "$2"; then
+    echo "  OK   $3"
+  else
+    echo "  FAIL $3: no line matching '$1' in $2:"
+    sed 's/^/       /' "$2"
+    exit 1
+  fi
+}
+
+# Poll a probe until it prints the expected value, then report OK; fail with
+# the last observed value once E2E_WAIT_SECS (default 60) have elapsed. The
+# probe is `"$@"` and must always succeed: it prints an observation, and a
+# transport error is an observation too (see `http_code` in e2e.sh).
+#
+# The controller debounces and applies a change within a couple of seconds;
+# a fixed sleep either outlasts that by a wide margin or, under load, not at
+# all. Polling makes the suite as fast as the reconcile and only ever slow
+# when it is about to fail.
+wait_for() {
+  local want="$1" label="$2" deadline got
+  shift 2
+  deadline=$((SECONDS + ${E2E_WAIT_SECS:-60}))
+  while :; do
+    got="$("$@")" || got="<probe failed>"
+    if [ "$got" = "$want" ]; then
+      echo "  OK   $label ($got)"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "  FAIL $label: expected '$want', last observed '$got' after ${E2E_WAIT_SECS:-60}s"
+      exit 1
+    fi
+    sleep 1
+  done
 }
