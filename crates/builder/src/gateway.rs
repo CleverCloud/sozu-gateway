@@ -43,8 +43,8 @@ use sozu_gw_ir as ir;
 
 use crate::selector::NamespaceSelector;
 use crate::{
-    add_service_route, extract_cert, meta_nn, BuildConfig, ExposedProtocol, FingerprintedCert,
-    FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
+    add_service_route, extract_cert, meta_nn, regex_path, BuildConfig, ExposedProtocol,
+    FingerprintedCert, FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -1080,10 +1080,25 @@ fn attach_rule(
                     problems.push(Problem::HeaderOrQueryMatchUnsupported);
                     continue;
                 }
-                route_matches.push((
-                    path_match(m.path.as_ref()),
-                    m.method.as_ref().and_then(method_string),
-                ));
+                // A regex Sōzu cannot compile is a match dimension we cannot
+                // serve, exactly like a header or query match: skip *this match*
+                // and report it, rather than take the whole route out. Emitting
+                // the frontend would fail the whole reconcile (translation is
+                // all-or-nothing); dropping the match keeps the route's other
+                // matches and rules programmable, and the `Problem` surfaces as
+                // a Warning Event on the route. (This is not yet a spec-correct
+                // `PartiallyInvalid=True`; the same gap applies to the
+                // header/query skip above and to unhonourable filters, and
+                // closing it means adding that condition across the status
+                // writer — tracked separately.)
+                let path = match path_match(m.path.as_ref()) {
+                    Ok(path) => path,
+                    Err(problem) => {
+                        problems.push(problem);
+                        continue;
+                    }
+                };
+                route_matches.push((path, m.method.as_ref().and_then(method_string)));
             }
         }
     }
@@ -1122,21 +1137,23 @@ fn attach_rule(
     }
 }
 
-fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
+/// Map an HTTPRoute path match to an IR path match. `Err` is a regex Sōzu
+/// would refuse; the caller skips the rule.
+fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> Result<ir::PathMatch, Problem> {
     let Some(path) = path else {
-        return ir::PathMatch::Prefix("/".to_string());
+        return Ok(ir::PathMatch::Prefix("/".to_string()));
     };
     let value = path
         .value
         .clone()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/".to_string());
-    match path.r#type {
+    Ok(match path.r#type {
         Some(HttpRouteRulesMatchesPathType::Exact) => ir::PathMatch::Exact(value),
-        Some(HttpRouteRulesMatchesPathType::RegularExpression) => ir::PathMatch::Regex(value),
+        Some(HttpRouteRulesMatchesPathType::RegularExpression) => regex_path(value)?,
         // PathPrefix (the default) or unset.
         _ => ir::PathMatch::Prefix(crate::canonical_prefix(&value)),
-    }
+    })
 }
 
 /// A rule's parsed filters, plus whether one of them makes the rule

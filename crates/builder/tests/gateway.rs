@@ -16,6 +16,8 @@ use sozu_gw_ir as ir;
 
 const CERT_A: &str = include_str!("fixtures/cert_a.pem");
 const KEY_A: &str = include_str!("fixtures/key_a.pem");
+/// A valid RSA key that belongs to another certificate (`cert_b.pem`).
+const KEY_B: &str = include_str!("fixtures/key_b.pem");
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("valid k8s object json")
@@ -1028,6 +1030,97 @@ fn referenced_services_cover_httproute_backends_resolved_or_not() {
         .contains(&Problem::ServiceNotFound {
             service: "missing".to_string()
         }));
+}
+
+#[test]
+fn a_regex_match_sozu_cannot_compile_refuses_the_rule_not_the_route() {
+    // Same measured failure as the Ingress side: the pattern reaches Sōzu
+    // verbatim and fails every reconcile. Refused like an unsupported header
+    // or query match — that one match is skipped and reported, while the
+    // rule's other match, and the route's other rules, still program and the
+    // route stays Accepted.
+    let route: HttpRoute = from_json(json!({
+        "metadata": { "name": "route", "namespace": "demo" },
+        "spec": {
+            "parentRefs": [{ "name": "gw" }],
+            "hostnames": ["app.example.com"],
+            "rules": [
+                { "matches": [
+                    { "path": { "type": "PathPrefix", "value": "/ok" } },
+                    { "path": { "type": "RegularExpression", "value": "/foo([" } }
+                  ],
+                  "backendRefs": [{ "name": "web", "port": 80 }] },
+                { "matches": [{ "path": { "type": "RegularExpression", "value": "^/api/v[0-9]+" } }],
+                  "backendRefs": [{ "name": "web", "port": 80 }] }
+            ]
+        }
+    }));
+    let out = build(&BuildConfig::default(), &inputs_with(route));
+
+    // The invalid match is dropped; the first rule's valid sibling match
+    // (`/ok`) and the second rule both still program.
+    let paths: Vec<&ir::PathMatch> = out.ir.frontends.iter().map(|f| &f.path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            &ir::PathMatch::Prefix("/ok".to_string()),
+            &ir::PathMatch::Regex("^/api/v[0-9]+".to_string()),
+        ]
+    );
+    let parent = &out.routes[0].parents[0];
+    assert!(
+        parent.accepted,
+        "a route that still serves valid matches stays Accepted"
+    );
+    assert!(parent.resolved_refs, "the backend itself is fine");
+    assert!(
+        matches!(
+            &parent.problems[..],
+            [Problem::InvalidPathRegex { path, .. }] if path == "/foo(["
+        ),
+        "the dropped match is still reported (surfaces as a Warning Event): {:?}",
+        parent.problems
+    );
+}
+
+#[test]
+fn https_listener_refuses_a_key_that_does_not_match_its_certificate() {
+    // The Gateway listener path loads Secrets through the same extractor as
+    // Ingress TLS, so the pairing check covers it: the listener stays
+    // unprogrammed with InvalidCertificateRef rather than handing Sōzu a
+    // pair that fails every handshake, and the route attaches to nothing.
+    let mut secret = tls_secret();
+    secret
+        .data
+        .as_mut()
+        .unwrap()
+        .insert("tls.key".to_string(), ByteString(KEY_B.as_bytes().to_vec()));
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![gateway_class("sozu.io/gateway-controller")]),
+        gateways: arcs(vec![https_gateway()]),
+        http_routes: arcs(vec![route_to_web(false)]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![secret]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert!(out.ir.certificates.is_empty());
+    assert!(out.ir.frontends.is_empty());
+    let listener = &out.gateways[0].listeners[0];
+    assert!(!listener.programmed);
+    assert!(!listener.resolved_refs);
+    assert_eq!(listener.resolved_refs_reason, "InvalidCertificateRef");
+    assert!(
+        out.gateways[0].problems.iter().any(|p| matches!(
+            p,
+            Problem::InvalidCertificate { secret, reason }
+                if secret == "app-tls" && reason == "tls.key does not match tls.crt"
+        )),
+        "{:?}",
+        out.gateways[0].problems
+    );
 }
 
 #[test]

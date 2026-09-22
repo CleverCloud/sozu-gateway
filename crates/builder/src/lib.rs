@@ -14,6 +14,8 @@ use std::sync::Arc;
 use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::PrivateKeyDer;
 use serde::Serialize;
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
@@ -286,6 +288,18 @@ pub enum Problem {
         path: String,
         winner: String,
     },
+    /// A user-supplied regex path (Ingress `ImplementationSpecific`, HTTPRoute
+    /// `RegularExpression`) that Sōzu cannot compile. Sōzu compiles the
+    /// pattern when the frontend is added and rejects the whole request on
+    /// failure — translation is all-or-nothing, so one such path would fail
+    /// every reconcile of the shared instance, for every tenant, until the
+    /// object is removed. The path is skipped (fail closed) and reported; the
+    /// rest of the object still programs. Applies to Ingress and Gateway API
+    /// routes alike.
+    InvalidPathRegex {
+        path: String,
+        reason: String,
+    },
     // Gateway API (Phase 2) — features Sōzu or this phase does not cover yet.
     UnsupportedTlsMode {
         mode: String,
@@ -389,6 +403,7 @@ impl Problem {
             Problem::NoReadyEndpoints { .. } => "NoReadyEndpoints",
             Problem::FqdnEndpointsUnsupported { .. } => "FqdnEndpointsUnsupported",
             Problem::RouteCollision { .. } => "RouteCollision",
+            Problem::InvalidPathRegex { .. } => "InvalidPathRegex",
             Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
             Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
             Problem::PortNotExposed { .. } => "PortNotExposed",
@@ -458,6 +473,11 @@ impl std::fmt::Display for Problem {
             } => write!(
                 f,
                 "host+path {hostname}{path} is already served by {winner}; this route was dropped"
+            ),
+            Problem::InvalidPathRegex { path, reason } => write!(
+                f,
+                "path {path:?} is not a regular expression Sōzu can compile ({reason}); no \
+                 route was programmed for it"
             ),
             Problem::UnsupportedTlsMode { mode } => {
                 write!(f, "TLS mode {mode:?} is not supported (Terminate only)")
@@ -606,15 +626,16 @@ pub fn is_ours(ingress: &Ingress, cfg: &BuildConfig) -> bool {
     cfg.class_is_default
 }
 
-/// Map a Kubernetes `pathType` + `path` to an IR path match.
-fn path_match(path_type: &str, path: Option<&str>) -> ir::PathMatch {
+/// Map a Kubernetes `pathType` + `path` to an IR path match. `Err` is a regex
+/// path Sōzu would refuse; the caller skips that path.
+fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Problem> {
     let value = match path {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => "/".to_string(),
     };
-    match path_type {
+    Ok(match path_type {
         "Exact" => ir::PathMatch::Exact(value),
-        "ImplementationSpecific" => ir::PathMatch::Regex(value),
+        "ImplementationSpecific" => regex_path(value)?,
         // "Prefix" and anything unknown default to Prefix — element-boundary
         // matching, which is narrower than a raw string prefix and never routes
         // more than the author asked for.
@@ -624,6 +645,32 @@ fn path_match(path_type: &str, path: Option<&str>) -> ir::PathMatch {
         // is what route-collision detection compares, and two Ingresses spelling
         // one path differently are a collision to report, not two routes.
         _ => ir::PathMatch::Prefix(canonical_prefix(&value)),
+    })
+}
+
+/// A user regex path, admitted into the IR only if Sōzu can compile it.
+///
+/// The pattern reaches Sōzu verbatim (the translator maps `Regex` one-to-one)
+/// and Sōzu compiles it with `regex::bytes::Regex::new` — default flags, no
+/// `RegexBuilder` limits — when the frontend is added, failing the whole
+/// request on error. This is the same call against the same `regex` version
+/// (pinned in the lock), so what compiles here compiles there; the compiled
+/// regex itself is discarded. This is the only place a user regex enters the
+/// IR, which is why the check lives here and not in the translator.
+pub(crate) fn regex_path(value: String) -> Result<ir::PathMatch, Problem> {
+    match regex::bytes::Regex::new(&value) {
+        Ok(_) => Ok(ir::PathMatch::Regex(value)),
+        Err(e) => Err(Problem::InvalidPathRegex {
+            path: value,
+            // A syntax error renders as a multi-line diagnostic with a caret
+            // line; condition messages and Events are single lines joined by
+            // `; `, so fold it onto one.
+            reason: e
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        }),
     }
 }
 
@@ -679,9 +726,6 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
     slice_service(slice).map(|(ns, svc)| format!("{ns}/{svc}"))
 }
 
-/// PEM labels we accept for `tls.key` (PKCS#8, PKCS#1 and SEC1).
-const KEY_PEM_LABELS: [&str; 3] = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"];
-
 /// Inferred names reach Sōzu's SNI trie directly, including its regex grammar.
 /// Validate before merging so an invalid inferred name cannot invalidate a
 /// certificate also used by a listener with an explicit hostname.
@@ -713,6 +757,9 @@ fn validate_inferred_certificate_names(names: &[String]) -> Result<(), String> {
 /// translator's whole diff (freezing convergence for every namespace), and a
 /// corrupt key would make Sōzu reject the `AddCertificate` at apply time —
 /// certificates tier before frontends, so that blocks every frontend add.
+/// The key is therefore parsed and loaded exactly as Sōzu loads it, and then
+/// checked against the leaf, which Sōzu does not do: a key that belongs to
+/// another certificate loads fine and fails every handshake.
 pub(crate) fn extract_cert(
     secret: &Secret,
     listener: SocketAddr,
@@ -761,15 +808,74 @@ pub(crate) fn extract_cert(
         sozu_command_lib::certificate::parse_x509(&pem.contents)
             .map_err(|e| format!("invalid chain certificate #{} in tls.crt: {e}", i + 1))?;
     }
-    // Sanity-check the key: it must at least be a well-formed PEM block with a
-    // plausible private-key label (full key/cert pairing is Sōzu's job).
-    let key_pem = sozu_command_lib::certificate::parse_pem(key.as_bytes())
+    // The key, the way Sōzu loads it when the AddCertificate is applied:
+    // `PrivateKeyDer::from_pem_slice` (PKCS#8, PKCS#1 or SEC1 — any other PEM
+    // label is "no key found"), then the ring provider's `load_private_key`
+    // (RSA, ECDSA P-256/P-384, Ed25519). A well-framed block whose body is
+    // not one of those was measured to pass a label check and be rejected by
+    // Sōzu with "failed to parse private key as RSA, ECDSA, or EdDSA".
+    //
+    // Loading an ECDSA key draws from OS randomness (ring seeds the signer).
+    // That is not socket or kube I/O: it stays within this crate's purity
+    // boundary, and the outcome is a pure function of the input.
+    let key_der = PrivateKeyDer::from_pem_slice(key.as_bytes())
         .map_err(|e| format!("invalid private key in tls.key: {e}"))?;
-    if !KEY_PEM_LABELS.contains(&key_pem.label.as_str()) {
-        return Err(format!(
-            "tls.key is not a private key (PEM label {:?})",
-            key_pem.label
-        ));
+    let signing_key = rustls::crypto::ring::default_provider()
+        .key_provider
+        .load_private_key(key_der)
+        .map_err(|e| format!("invalid private key in tls.key: {e}"))?;
+    // Sōzu stops at `CertifiedKey::new(chain, key)` and never checks that the
+    // key belongs to the leaf, so a mismatched pair loads and then fails every
+    // handshake for its names. Check the pairing the way a handshake does:
+    // sign a fixed message with the loaded key and verify it against the
+    // leaf's public key. This is cryptographic, so it is indifferent to how
+    // the two sides *spell* the same key — the leaf's SubjectPublicKeyInfo
+    // and the one ring derives from the private key can differ in encoding
+    // (absent vs `NULL` RSA parameters, and other DER variations) while being
+    // one key, which a byte comparison of the two DER encodings misreads as a
+    // mismatch and refuses a certificate Sōzu serves fine. It also stays as
+    // permissive as Sōzu about the leaf itself: the public key comes from the
+    // `x509` parsed above with Sōzu's own parser, not from webpki, which
+    // rejects an X509v1 leaf Sōzu would load and would leave such a mismatch
+    // unchecked. The verifier takes the `subjectPublicKey` bits and pairs
+    // them with the algorithm the chosen scheme implies.
+    let provider = rustls::crypto::ring::default_provider();
+    let schemes = provider
+        .signature_verification_algorithms
+        .supported_schemes();
+    let signer = signing_key
+        .choose_scheme(&schemes)
+        .ok_or_else(|| "tls.key offers no signature scheme this build can verify".to_string())?;
+    const PAIRING_MESSAGE: &[u8] = b"sozu-gateway: tls.key must match tls.crt";
+    let signature = signer
+        .sign(PAIRING_MESSAGE)
+        .map_err(|e| format!("tls.key cannot sign: {e}"))?;
+    let key_bits: &[u8] = &x509.public_key().subject_public_key.data;
+    // One encoding the verifier cannot take: an EC public point in compressed
+    // form (`02`/`03` prefix, RFC 5480 §2.2). ring's ECDSA verification
+    // accepts only the uncompressed `04` form, while Sōzu loads such a leaf
+    // without any pairing check and serves it to clients that decompress. The
+    // check here must never be stricter than the data plane, so that one
+    // encoding is admitted unpaired — a mismatch on a compressed-point
+    // certificate is the one case this proof does not cover.
+    const ID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
+    let compressed_ec_point = x509.public_key().algorithm.algorithm.to_id_string()
+        == ID_EC_PUBLIC_KEY
+        && matches!(key_bits.first(), Some(0x02) | Some(0x03));
+    let verifiers = provider
+        .signature_verification_algorithms
+        .mapping
+        .iter()
+        .find(|(scheme, _)| *scheme == signer.scheme())
+        .map(|(_, verifiers)| *verifiers)
+        .unwrap_or(&[]);
+    let paired = compressed_ec_point
+        || verifiers.iter().any(|v| {
+            v.verify_signature(key_bits, PAIRING_MESSAGE, &signature)
+                .is_ok()
+        });
+    if !paired {
+        return Err("tls.key does not match tls.crt".to_string());
     }
 
     Ok(FingerprintedCert {
@@ -1303,6 +1409,16 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             // it stays plain-HTTP (no `*`-named cert frontend).
             let host = rule.host.clone().unwrap_or_else(|| "*".to_string());
             for path in &http.paths {
+                // Settled before the backend is touched: a path Sōzu would
+                // refuse programs nothing, so its Service is neither resolved
+                // nor recorded as referenced. The sibling paths still are.
+                let pm = match path_match(&path.path_type, path.path.as_deref()) {
+                    Ok(pm) => pm,
+                    Err(problem) => {
+                        problems.push(problem);
+                        continue;
+                    }
+                };
                 let Some(svc_backend) = &path.backend.service else {
                     problems.push(Problem::NonServiceBackend);
                     continue;
@@ -1339,7 +1455,6 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                             });
                         }
 
-                        let pm = path_match(&path.path_type, path.path.as_deref());
                         let host_has_tls = tls_covers(&tls_ready_hosts, &host);
                         // The plain-HTTP frontend redirects to HTTPS when the host
                         // has a cert and the redirect isn't opted out; otherwise it
