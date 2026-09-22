@@ -633,9 +633,9 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
         Some(p) if !p.is_empty() => p.to_string(),
         _ => "/".to_string(),
     };
-    Ok(match path_type {
+    admit_path(match path_type {
         "Exact" => ir::PathMatch::Exact(value),
-        "ImplementationSpecific" => regex_path(value)?,
+        "ImplementationSpecific" => ir::PathMatch::Regex(value),
         // "Prefix" and anything unknown default to Prefix — element-boundary
         // matching, which is narrower than a raw string prefix and never routes
         // more than the author asked for.
@@ -648,20 +648,31 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
     })
 }
 
-/// A user regex path, admitted into the IR only if Sōzu can compile it.
+/// Admit a path match into the IR only if the Sōzu rule it compiles to is one
+/// Sōzu can load.
 ///
-/// The pattern reaches Sōzu verbatim (the translator maps `Regex` one-to-one)
-/// and Sōzu compiles it with `regex::bytes::Regex::new` — default flags, no
-/// `RegexBuilder` limits — when the frontend is added, failing the whole
-/// request on error. This is the same call against the same `regex` version
-/// (pinned in the lock), so what compiles here compiles there; the compiled
-/// regex itself is discarded. This is the only place a user regex enters the
-/// IR, which is why the check lives here and not in the translator.
-pub(crate) fn regex_path(value: String) -> Result<ir::PathMatch, Problem> {
-    match regex::bytes::Regex::new(&value) {
-        Ok(_) => Ok(ir::PathMatch::Regex(value)),
+/// Every variant is checked, not only a user regex: a non-root `Prefix` and an
+/// `Exact` compile to anchored regexes too (`ir::PathMatch::sozu_rule`), and
+/// the `regex` crate refuses a compiled program above its 10 MiB size limit —
+/// reached by a literal path of a few hundred kilobytes, which Kubernetes
+/// accepts on an Ingress (no length bound on `path`). The rule reaches Sōzu
+/// verbatim and Sōzu compiles it with `regex::bytes::Regex::new` — default
+/// flags, no `RegexBuilder` limits — when the frontend is added, failing the
+/// whole request on error and, since translation is all-or-nothing, every
+/// reconcile of the shared instance. This is the same call against the same
+/// `regex` version (pinned in the lock), so what compiles here compiles there;
+/// the compiled regex itself is discarded. Paths enter the IR only through
+/// here, which is why the check lives here and not in the translator.
+pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> {
+    let pattern = match path.sozu_rule() {
+        // The root `/` is a plain prefix rule: nothing to compile.
+        ir::SozuPathRule::Prefix(_) => return Ok(path),
+        ir::SozuPathRule::Regex(pattern) => pattern,
+    };
+    match regex::bytes::Regex::new(&pattern) {
+        Ok(_) => Ok(path),
         Err(e) => Err(Problem::InvalidPathRegex {
-            path: value,
+            path: display_path(path_value(&path)),
             // A syntax error renders as a multi-line diagnostic with a caret
             // line; condition messages and Events are single lines joined by
             // `; `, so fold it onto one.
@@ -672,6 +683,18 @@ pub(crate) fn regex_path(value: String) -> Result<ir::PathMatch, Problem> {
                 .join(" "),
         }),
     }
+}
+
+/// A path as it may appear in a condition message or an Event: the apiserver
+/// caps those at about a kilobyte, and the path that trips the size limit is
+/// hundreds of kilobytes long. Keep the head, say how long it really was.
+fn display_path(path: &str) -> String {
+    const KEEP: usize = 64;
+    if path.chars().count() <= KEEP {
+        return path.to_string();
+    }
+    let head: String = path.chars().take(KEEP).collect();
+    format!("{head}… ({} bytes)", path.len())
 }
 
 /// Drop a prefix path's insignificant trailing slash, keeping the root `/`.
@@ -1167,7 +1190,11 @@ pub(crate) struct SourcedFrontend {
 /// Mirror of Sōzu's route key: the listener a frontend binds to (`tls` picks
 /// the HTTPS vs HTTP listener), hostname, path match, optional method. The
 /// target cluster is *not* part of the key.
-type RouteKey = (bool, SocketAddr, String, ir::PathMatch, Option<String>);
+/// The route identity Sōzu keys on — the *compiled* path rule, not the IR
+/// spelling, so an `Exact` and a user regex that spell the same anchored
+/// pattern collide here exactly as they do in Sōzu, and the loser is reported
+/// rather than silently dropped downstream.
+type RouteKey = (bool, SocketAddr, String, ir::SozuPathRule, Option<String>);
 
 /// The raw path value of a match, for problem context.
 fn path_value(p: &ir::PathMatch) -> &str {
@@ -1181,7 +1208,7 @@ fn route_key(frontend: &ir::Frontend) -> RouteKey {
         frontend.tls,
         frontend.listener,
         frontend.hostname.clone(),
-        frontend.path.clone(),
+        frontend.path.sozu_rule(),
         frontend.method.clone(),
     )
 }

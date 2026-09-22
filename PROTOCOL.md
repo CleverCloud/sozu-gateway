@@ -288,7 +288,7 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 | Ingress rule `host` (exact) | `RequestHttpFrontend.hostname` |
 | Ingress rule `host` wildcard `*.x` | `hostname` wildcard (Sōzu supports `*.` prefix) — to confirm in Étape 2 |
 | `pathType: Prefix` | `PathRule { Regex, "^<value>(/\|\\?\|$)" }` — element-boundary matching (raw `Prefix` also matches `/foobar`); the root `/` stays `PathRule { Prefix, "/" }` |
-| `pathType: Exact` | `PathRule { Equals, value }` |
+| `pathType: Exact` | `PathRule { Regex, "^<value>(?:\\?\|$)" }` — never `Equals`: 2.2.x compares `Equals` against the query-bearing target (`/get?x=1` misses), and cannot remove an `Equals` rule it holds (`PathRule::eq` has no `Equals` arm), so a removed route kept serving — both measured live 2026-09-21 |
 | `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (2.x does **not** anchor regexes — measured; anchor yours) |
 | backend `Service` → `EndpointSlice` pod IPs | one `Cluster` + N `AddBackend` (pod `IP:port`) |
 | `spec.tls[].secretName` (`tls.crt`/`tls.key`) | `AddCertificate` on the `:443` listener address |
@@ -307,8 +307,11 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 3. **Regex path semantics** are now measured against a live Sōzu 2.1.0: rules are matched
    against the request target with the **query string still attached** (so `Equals("/foo")`
    does not match `/foo?page=2`), and regexes are **not anchored** (`/foo(/|$)` also matches
-   `/xx/foo`). Both drive the `pathType: Prefix` mapping above. Wildcard host semantics still
-   want their own probe.
+   `/xx/foo`). Both drive the `pathType: Prefix` and `Exact` mappings above. Re-measured on
+   2.2.1 (2026-09-21): a `RemoveHttpFrontend` for an `Equals` rule is acknowledged but the
+   worker keeps matching it — the isolated-host control answered 503 on the removed path
+   against 404 on a sibling — which is why `Exact` is a regex too. Wildcard host semantics
+   still want their own probe.
 4. **Multi-worker fan-in**: with `worker_count > 1`, confirm whether to inspect per-worker
    `WorkerResponses` for partial failure (we'll add defensive handling in `sozu-agent`).
 

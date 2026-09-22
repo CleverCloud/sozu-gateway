@@ -442,6 +442,65 @@ fn a_regex_path_sozu_cannot_compile_is_skipped_and_reported() {
 }
 
 #[test]
+fn a_literal_path_too_long_for_the_compiled_rule_is_refused_not_forwarded() {
+    // A path Kubernetes accepts without a length bound compiles, as an Exact
+    // or a non-root Prefix, to an anchored regex — and the `regex` crate Sōzu
+    // uses refuses a compiled program past its 10 MiB limit, which a literal
+    // of a few hundred kilobytes reaches (measured: 100 000 bytes compile,
+    // 500 001 do not). Forwarded, that one path would fail every reconcile of
+    // the shared instance. It must be refused here, per path, with its
+    // siblings untouched — and the report must not carry the whole path, or
+    // the Event itself would exceed what the apiserver stores.
+    let huge = format!("/{}", "a".repeat(500_000));
+    for path_type in ["Exact", "Prefix"] {
+        let ing: Ingress = from_json(json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": { "name": "paths", "namespace": "demo" },
+            "spec": {
+                "ingressClassName": "sozu",
+                "rules": [{
+                    "host": "app.example.com",
+                    "http": { "paths": [
+                        { "path": huge, "pathType": path_type,
+                          "backend": { "service": { "name": "web", "port": { "number": 80 } } } },
+                        { "path": "/ok", "pathType": path_type,
+                          "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                    ]}
+                }]
+            }
+        }));
+        let inputs = Inputs {
+            ingresses: arcs(vec![ing]),
+            services: arcs(vec![web_service()]),
+            endpointslices: arcs(vec![web_slice()]),
+            ..Default::default()
+        };
+        let out = build(&BuildConfig::default(), &inputs);
+        let paths: Vec<&str> = out
+            .ir
+            .frontends
+            .iter()
+            .map(|f| match &f.path {
+                ir::PathMatch::Prefix(v) | ir::PathMatch::Exact(v) | ir::PathMatch::Regex(v) => {
+                    v.as_str()
+                }
+            })
+            .collect();
+        assert_eq!(paths, vec!["/ok"], "{path_type}: only the sibling programs");
+        match &out.results[0].problems[..] {
+            [Problem::InvalidPathRegex { path, reason }] => {
+                assert!(
+                    path.len() < 200 && path.ends_with("(500001 bytes)"),
+                    "{path_type}: the report names the length, not the whole path: {path:?}"
+                );
+                assert!(reason.contains("size limit"), "{path_type}: {reason}");
+            }
+            other => panic!("{path_type}: expected InvalidPathRegex, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_valid_regex_path_reaches_the_ir_unchanged() {
     // Regression guard for the compile check: validation must not rewrite,
     // anchor or escape a pattern Sōzu accepts.
@@ -1068,6 +1127,70 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
             path: "/".to_string(),
             winner: "aaa.web.80".to_string(),
         }]
+    );
+}
+
+#[test]
+fn an_exact_path_collides_with_a_user_regex_spelling_the_same_rule() {
+    // `Exact("/foo")` compiles to the same Sōzu rule as the user regex
+    // `^/foo(?:\?|$)`; Sōzu holds that route once. The collision must be
+    // arbitrated and reported here, on the compiled rule, not silently
+    // dropped by the translator's dedup.
+    let (svc_a, slice_a) = web_service_in("aaa");
+    let (svc_b, slice_b) = web_service_in("bbb");
+    let exact: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "exact", "namespace": "aaa" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": "clash.example.com",
+                "http": { "paths": [
+                    { "path": "/foo", "pathType": "Exact",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let regex: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "regex", "namespace": "bbb" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": "clash.example.com",
+                "http": { "paths": [
+                    { "path": "^/foo(?:\\?|$)", "pathType": "ImplementationSpecific",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![regex, exact]),
+        services: arcs(vec![svc_a, svc_b]),
+        endpointslices: arcs(vec![slice_a, slice_b]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(
+        out.ir.frontends.len(),
+        1,
+        "one frontend per compiled route key"
+    );
+    let loser = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "bbb")
+        .expect("bbb result");
+    assert!(
+        matches!(
+            loser.problems.as_slice(),
+            [Problem::RouteCollision { hostname, winner, .. }]
+                if hostname == "clash.example.com" && winner == "aaa.web.80"
+        ),
+        "{loser:?}"
     );
 }
 

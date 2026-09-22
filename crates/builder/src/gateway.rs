@@ -43,7 +43,7 @@ use sozu_gw_ir as ir;
 
 use crate::selector::NamespaceSelector;
 use crate::{
-    add_service_route, extract_cert, meta_nn, regex_path, BuildConfig, ExposedProtocol,
+    add_service_route, admit_path, extract_cert, meta_nn, BuildConfig, ExposedProtocol,
     FingerprintedCert, FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
 };
 
@@ -1148,9 +1148,9 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> Result<ir::PathMatch,
         .clone()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/".to_string());
-    Ok(match path.r#type {
+    admit_path(match path.r#type {
         Some(HttpRouteRulesMatchesPathType::Exact) => ir::PathMatch::Exact(value),
-        Some(HttpRouteRulesMatchesPathType::RegularExpression) => regex_path(value)?,
+        Some(HttpRouteRulesMatchesPathType::RegularExpression) => ir::PathMatch::Regex(value),
         // PathPrefix (the default) or unset.
         _ => ir::PathMatch::Prefix(crate::canonical_prefix(&value)),
     })
