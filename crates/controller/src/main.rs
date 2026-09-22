@@ -53,6 +53,18 @@ mod status;
 
 const DEFAULT_CLASS_ANNOTATION: &str = "ingressclass.kubernetes.io/is-default-class";
 
+/// Default `--watch-timeout-secs`. Measured, not chosen: see the flag's doc.
+const DEFAULT_WATCH_TIMEOUT_SECS: u32 = 60;
+
+/// kube-core's own ceiling on a watch `timeoutSeconds` (`WatchParams::timeout
+/// must be < 295s`, from the apiserver's watch limits). It is enforced on every
+/// watch *start*, after the initial LIST has already filled the cache: the
+/// refused watch surfaces as a retried `WatchStartFailed`, which the watch loop
+/// only warns about, so every cache freezes on its LIST snapshot with `/readyz`
+/// green. That is the blindness the flag exists to bound, so it is refused
+/// here instead.
+const MAX_WATCH_TIMEOUT_SECS: u32 = 295;
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "sozu-gw-controller",
@@ -146,7 +158,8 @@ struct Args {
     ingress_status_writes: bool,
     /// Server-side `timeoutSeconds` on every watch, which also sets kube-rs's
     /// **client-side** idle timeout (that timeout is derived from this value
-    /// plus a margin). `0` keeps kube-rs's default of 290 s.
+    /// plus a margin). `0` opts out and keeps kube-rs's default of 290 s;
+    /// kube-rs refuses 295 and above, so that is refused at startup too.
     ///
     /// This is the bound on how long a watch can be silently dead before the
     /// client gives up and re-lists. A control plane replaced underneath us
@@ -154,13 +167,23 @@ struct Args {
     /// errors, no event arrives, and the reflector simply stops advancing while
     /// every reconcile still "succeeds" against a frozen cache.
     ///
+    /// The default is the binary's, not the chart's: measured across three
+    /// managed-cluster upgrades, the kube-rs bound cost 14.7-19.7% of fresh
+    /// requests during node replacement and 60 cost 0.000%, and an install
+    /// whose values predate the chart key would otherwise silently run
+    /// unbounded.
+    ///
     /// The bound is nominal and measures worse than it reads. Cutting
     /// controllers off from the apiserver and timing each to its first logged
-    /// watch error gave 336-364 s at the default and 117-132 s at 60. Idle
-    /// expiry logs only at DEBUG, so what those figures time is the failed
+    /// watch error gave 336-364 s at the kube-rs default and 117-132 s at 60.
+    /// Idle expiry logs only at DEBUG, so what those figures time is the failed
     /// reconnect that follows it, and why both exceed their nominal bound is
     /// not established here — only that they do.
-    #[arg(long, env = "SOZU_GW_WATCH_TIMEOUT_SECS", default_value = "0")]
+    #[arg(
+        long,
+        env = "SOZU_GW_WATCH_TIMEOUT_SECS",
+        default_value_t = DEFAULT_WATCH_TIMEOUT_SECS
+    )]
     watch_timeout_secs: u32,
     /// Read timeout applied to the kube client's connections. `0` keeps
     /// kube-rs's default, which is **no timeout at all**.
@@ -335,6 +358,32 @@ where
         store.wait_until_ready().await
     } else {
         Ok(())
+    }
+}
+
+/// Refuse a `--watch-timeout-secs` kube-rs would refuse on every watch start,
+/// so it fails the process at startup (a CrashLoopBackOff with this message)
+/// rather than freezing every cache behind a green `/readyz`.
+fn validate_watch_timeout(secs: u32) -> Result<()> {
+    anyhow::ensure!(
+        secs < MAX_WATCH_TIMEOUT_SECS,
+        "--watch-timeout-secs {secs} is not below kube-rs's limit of {MAX_WATCH_TIMEOUT_SECS} \
+         (`WatchParams::timeout must be < 295s`): every watch would be refused before it \
+         starts and the caches would never advance past their initial LIST; use 0 to opt \
+         out and keep kube-rs's default"
+    );
+    Ok(())
+}
+
+/// The config every watch starts from: `timeoutSeconds` bounded by
+/// `--watch-timeout-secs`, or left to kube-rs's own default when that is the
+/// explicit `0` opt-out. Both the worker and the provisioner read it this way.
+fn watch_config(watch_timeout_secs: u32) -> watcher::Config {
+    let cfg = watcher::Config::default();
+    if watch_timeout_secs > 0 {
+        cfg.timeout(watch_timeout_secs)
+    } else {
+        cfg
     }
 }
 
@@ -615,17 +664,10 @@ async fn run_provisioner(
             .context("parse the provisioning template")?;
     let provisioner = provision::Provisioner::new(ops_client, config).await?;
     let (tx, mut rx) = mpsc::channel(64);
-    let watch_config = || {
-        watcher::Config::default().timeout(if args.watch_timeout_secs == 0 {
-            60
-        } else {
-            args.watch_timeout_secs
-        })
-    };
     let (gateways, writer) = reflector::store();
     spawn_watch(
         Api::<Gateway>::all(watch_client.clone()),
-        watch_config(),
+        watch_config(args.watch_timeout_secs),
         writer,
         tx.clone(),
         "provisioner Gateway",
@@ -633,7 +675,7 @@ async fn run_provisioner(
     let (classes, writer) = reflector::store();
     spawn_watch(
         Api::<GatewayClass>::all(watch_client),
-        watch_config(),
+        watch_config(args.watch_timeout_secs),
         writer,
         tx,
         "provisioner GatewayClass",
@@ -864,6 +906,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     args.gateway_scope.validate().map_err(anyhow::Error::msg)?;
+    validate_watch_timeout(args.watch_timeout_secs)?;
     info!(?args, "starting sozu gateway controller");
 
     // The exposure table decides both what a Gateway listener may declare and
@@ -967,14 +1010,7 @@ async fn main() -> Result<()> {
     // kube-rs derives its client-side idle timeout from — the only bound on how
     // long a silently-dead watch can keep a reflector frozen.
     let watch_timeout_secs = args.watch_timeout_secs;
-    let watch_all = move || {
-        let cfg = watcher::Config::default();
-        if watch_timeout_secs > 0 {
-            cfg.timeout(watch_timeout_secs)
-        } else {
-            cfg
-        }
-    };
+    let watch_all = move || watch_config(watch_timeout_secs);
     // A scoped instance serves one Gateway and `GatewayScope::filter_inputs`
     // discards every Ingress, so watching them cluster-wide would only hold a
     // cache it never reads and wake this worker on changes it must ignore.
@@ -1758,6 +1794,37 @@ mod tests {
         assert!(args.gateway_status_writes);
         let args = Args::parse_from(["sozu-gw-controller", "--gateway-status-writes", "false"]);
         assert!(!args.gateway_status_writes);
+    }
+
+    #[test]
+    fn watch_timeout_defaults_to_60_and_explicit_zero_opts_out() {
+        // The measured bound must hold for an install whose values predate the
+        // chart key: the default is the binary's, and the chart only mirrors
+        // it. `0` stays the documented opt-out, in both the worker and the
+        // provisioner, which used to silently map it to 60.
+        let args = Args::parse_from(["sozu-gw-controller"]);
+        assert_eq!(args.watch_timeout_secs, 60);
+        assert_eq!(watch_config(args.watch_timeout_secs).timeout, Some(60));
+        let args = Args::parse_from(["sozu-gw-controller", "--watch-timeout-secs", "0"]);
+        assert_eq!(args.watch_timeout_secs, 0);
+        assert_eq!(watch_config(args.watch_timeout_secs).timeout, None);
+    }
+
+    #[test]
+    fn watch_timeout_at_or_past_the_kube_limit_is_refused_at_startup() {
+        // kube-core rejects `timeoutSeconds >= 295` on every watch start, after
+        // the LIST has filled the cache — a silent freeze, not a crash. Refusing
+        // it here is what turns it into one.
+        for ok in [0, 60, 294] {
+            assert!(validate_watch_timeout(ok).is_ok(), "{ok} must be accepted");
+        }
+        for refused in [295, 600] {
+            let err = validate_watch_timeout(refused).unwrap_err().to_string();
+            assert!(
+                err.contains("295") && err.contains(&refused.to_string()),
+                "{refused} must be refused naming the limit, got: {err}"
+            );
+        }
     }
 
     #[test]

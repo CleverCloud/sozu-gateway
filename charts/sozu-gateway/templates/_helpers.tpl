@@ -323,6 +323,20 @@ number the user never wrote.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Whether `controller.watchTimeoutSecs` is set at all — presence, not truthiness.
+The binary defaults the watch bound to 60 and reads `0` as the opt-out, so an
+explicit `0` has to reach the container as `SOZU_GW_WATCH_TIMEOUT_SECS=0`; a
+truthiness test would drop it and the container would inherit 60. An absent key
+(an old values file replayed by `--reuse-values`) renders nothing, and the
+binary's default applies. `hasKey` on nil is a template error, hence the
+`default dict`.
+*/}}
+{{- define "sozu-gateway.watchTimeoutSet" -}}
+{{- $controller := .Values.controller | default dict -}}
+{{- if and (hasKey $controller "watchTimeoutSecs") (not (kindIs "invalid" $controller.watchTimeoutSecs)) -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
 {{/* Automatic provisioning is opt-in so an upgrade does not move existing
      Gateway addresses. Old unreleased static entries must not disappear silently. */}}
 {{- define "sozu-gateway.gatewayProvisioningEnabled" -}}

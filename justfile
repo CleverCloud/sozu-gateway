@@ -67,6 +67,13 @@ chart-lint:
     # Both sides of the metrics switch, asserted rather than merely rendered.
     helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN
     ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false | grep -q SOZU_GW_METRICS_LISTEN
+    # The watch bound is rendered on presence, not truthiness: the binary
+    # defaults to 60 and reads 0 as the opt-out, so an explicit 0 must reach
+    # the container, while an absent key (`null` removes it, as
+    # --reuse-values from a pre-key release would) leaves the binary default.
+    helm template {{HELM_RELEASE}} {{CHART}} | grep -A1 SOZU_GW_WATCH_TIMEOUT_SECS | grep -q '"60"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set controller.watchTimeoutSecs=0 | grep -A1 SOZU_GW_WATCH_TIMEOUT_SECS | grep -q '"0"'
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.watchTimeoutSecs=null | grep -q SOZU_GW_WATCH_TIMEOUT_SECS
     # The Pod's own ports are not up for grabs by an exposure entry.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1
