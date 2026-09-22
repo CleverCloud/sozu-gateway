@@ -5,7 +5,9 @@
 #   - a host without a cert proxies plain HTTP (200) and reaches whoami;
 #   - a cert-covered host redirects HTTP to HTTPS (301) and serves *our* cert
 #     over HTTPS (200); `sozu.io/ssl-redirect: "false"` opts out, hot;
-#   - `pathType: Prefix` matches on element boundaries (/foo/bar, not /foobar);
+#   - `pathType: Prefix` matches on element boundaries (/foo/bar, not /foobar),
+#     `Exact` takes the query string and nothing else, and an
+#     `ImplementationSpecific` regex is applied as written;
 #   - rotating the TLS Secret swaps the served cert;
 #   - deleting the Ingress withdraws its routes (404) and its cert, and leaves
 #     the other Ingress serving.
@@ -21,7 +23,7 @@ source "$(dirname "$0")/e2e-lib.sh"
 
 HOST="app.example.com"           # the shipped demo Ingress: TLS + auto redirect
 PLAIN_HOST="plain.example.com"   # no cert, so plain HTTP proxies
-PREFIX_HOST="prefix.example.com" # routes only /foo, to observe the boundary
+PREFIX_HOST="prefix.example.com" # routes /foo (Prefix), /exact (Exact), a regex
 HTTP="http://127.0.0.1:18080"
 HTTPS_PORT=18443
 # The TLS host: SNI and Host pinned to $HOST while the socket goes to the
@@ -129,8 +131,12 @@ kubectl apply -f "$ROOT/examples/ingress/demo-app.yaml" >/dev/null
 WORK="$(mktemp -d)"
 issue_cert "$WORK/first"
 # A second Ingress on the same Service: a host with no cert, where plain HTTP
-# must proxy rather than redirect, and a host routing only /foo, where the
-# prefix boundary can be observed (with / routed too, /foobar would match it).
+# must proxy rather than redirect, and a host routing only /foo, /exact and a
+# regex, where each path type's boundary can be observed (with / routed too,
+# /foobar would match it). The regex is the documented Ingress spelling: the
+# apiserver requires the path to begin with `/`, so the start anchor sits
+# behind a slash matched zero times (`/{0}^`), and the pattern is full-span so
+# it reads the same on Sōzu 2.2.1 (unanchored) and its successor (anchored).
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -155,6 +161,20 @@ spec:
         paths:
           - path: /foo
             pathType: Prefix
+            backend:
+              service:
+                name: whoami
+                port:
+                  number: 80
+          - path: /exact
+            pathType: Exact
+            backend:
+              service:
+                name: whoami
+                port:
+                  number: 80
+          - path: /{0}^/re(?:[/?](?-u:.*))?$
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: whoami
@@ -187,6 +207,18 @@ assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/foo/bar")" 200 "/foo cover
 assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/foo?q=1")" 200 "/foo covers /foo?q=1"
 assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/foobar")" 404 "/foo does not cover /foobar"
 assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/")" 404 "/foo does not cover /"
+
+echo "==> pathType: Exact takes the query string and nothing else"
+wait_for 200 "GET $PREFIX_HOST/exact" http_code -H "Host: $PREFIX_HOST" "$HTTP/exact"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/exact?x=1")" 200 "/exact covers /exact?x=1"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/exact/")" 404 "/exact does not cover /exact/"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/exactly")" 404 "/exact does not cover /exactly"
+
+echo "==> pathType: ImplementationSpecific applies the regex as written"
+wait_for 200 "GET $PREFIX_HOST/re" http_code -H "Host: $PREFIX_HOST" "$HTTP/re"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/re/x?y=1")" 200 "the regex covers /re/x?y=1"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/rex")" 404 "the regex does not cover /rex"
+assert_eq "$(http_code -H "Host: $PREFIX_HOST" "$HTTP/x/re")" 404 "the regex is anchored at the start"
 
 echo "==> sozu.io/ssl-redirect: \"false\" keeps serving plain HTTP, hot"
 kubectl -n "$DEMO_NS" annotate ingress/whoami sozu.io/ssl-redirect=false --overwrite >/dev/null

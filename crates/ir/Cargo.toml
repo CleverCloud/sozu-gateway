@@ -10,3 +10,9 @@ license.workspace = true
 # MUST stay free of I/O: no kube, no socket, no sozu-command-lib.
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+# The equivalence test compiles each generated rule the way Sōzu does, on the
+# `regex` version Sōzu 2.2.1 builds against (pinned in the lock, see the
+# builder's manifest).
+regex = "1"

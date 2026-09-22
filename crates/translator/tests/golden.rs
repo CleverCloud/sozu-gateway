@@ -202,11 +202,15 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
     // Both halves of the pattern are load-bearing and were measured against a
     // live Sōzu: the `\?` branch because Sōzu matches path rules against the
     // request target with the query string still attached, and the `^` because
-    // Sōzu does not anchor regexes itself (an unanchored rule also matches
-    // `/xx/foo`).
+    // Full-span on purpose: Sōzu 2.2.1 does not anchor regexes itself (an
+    // unanchored rule would also match `/xx/foo`) and its successor anchors
+    // every one, so the rule carries both anchors and consumes the remainder.
     assert_eq!(
         emitted_path(&one_prefix_route("/foo")),
-        (PathRuleKind::Regex as i32, r"^/foo(/|\?|$)".to_string())
+        (
+            PathRuleKind::Regex as i32,
+            r"^/foo(?:[/?](?-u:.*))?$".to_string()
+        )
     );
 
     // A trailing slash is insignificant in Kubernetes, so `/foo/` compiles to
@@ -220,7 +224,10 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
     // become a wildcard that also matches `/v1x0`.
     assert_eq!(
         emitted_path(&one_prefix_route("/v1.0")),
-        (PathRuleKind::Regex as i32, r"^/v1\.0(/|\?|$)".to_string())
+        (
+            PathRuleKind::Regex as i32,
+            r"^/v1\.0(?:[/?](?-u:.*))?$".to_string()
+        )
     );
 
     // The root prefix stays a plain rule: every target starts with "/", so the
@@ -257,24 +264,34 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
     // `/get?x=1` (the rule is compared against the query-bearing target), and
     // a removed `Equals` rule keeps matching after Sōzu acknowledged the
     // removal (its rule equality has no `Equals` arm), so the route stayed
-    // exposed as a zombie. An anchored regex has neither defect.
+    // exposed as a zombie. A full-span regex has neither defect, and reads
+    // the same under Sōzu's next, anchoring router.
     let mut exact = one_prefix_route("/foo");
     exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
     assert_eq!(
         emitted_path(&exact),
-        (PathRuleKind::Regex as i32, "^/foo(?:\\?|$)".to_string())
+        (
+            PathRuleKind::Regex as i32,
+            "^/foo(?:\\?(?-u:.*))?$".to_string()
+        )
     );
     // No `/` alternative: `/foo/bar` is not `/foo`. And the trailing slash is
     // kept literal — Exact means exact, unlike Prefix's canonicalisation.
     exact.frontends[0].path = ir::PathMatch::Exact("/foo/".into());
     assert_eq!(
         emitted_path(&exact),
-        (PathRuleKind::Regex as i32, "^/foo/(?:\\?|$)".to_string())
+        (
+            PathRuleKind::Regex as i32,
+            "^/foo/(?:\\?(?-u:.*))?$".to_string()
+        )
     );
     exact.frontends[0].path = ir::PathMatch::Exact("/".into());
     assert_eq!(
         emitted_path(&exact),
-        (PathRuleKind::Regex as i32, "^/(?:\\?|$)".to_string())
+        (
+            PathRuleKind::Regex as i32,
+            "^/(?:\\?(?-u:.*))?$".to_string()
+        )
     );
     // Regex metacharacters in the literal path are escaped.
     exact.frontends[0].path = ir::PathMatch::Exact("/a.b+c".into());
@@ -282,7 +299,7 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
         emitted_path(&exact),
         (
             PathRuleKind::Regex as i32,
-            "^/a\\.b\\+c(?:\\?|$)".to_string()
+            "^/a\\.b\\+c(?:\\?(?-u:.*))?$".to_string()
         )
     );
 }
@@ -307,7 +324,7 @@ fn an_exact_route_and_an_identical_user_regex_are_one_route() {
             ),
             frontend(
                 "h.example.com",
-                ir::PathMatch::Regex("^/foo(?:\\?|$)".into()),
+                ir::PathMatch::Regex("^/foo(?:\\?(?-u:.*))?$".into()),
                 "regex",
                 false,
             ),

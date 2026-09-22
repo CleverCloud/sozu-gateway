@@ -4,6 +4,58 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Path rules are written for Sōzu's next router as well as 2.2.1
+
+Sōzu 2.2.1 matches a `Regex` path rule unanchored; its unreleased successor
+wraps every such rule in `\A(?:…)\z` (upstream 47eb07c, marked BREAKING), so a
+rule must span the whole request target, query string included. The rules a
+`Prefix` and an `Exact` path compile to were written for the first behaviour
+only — `^/foo(/|\?|$)` stops at the boundary — and would have matched neither
+`/foo/bar` nor `/v1?x=1` on the new router: a data-plane bump would have turned
+most routes into 404s. They are now **full-span**, `^/foo(?:[/?](?-u:.*))?$` and
+`^/v1(?:\?(?-u:.*))?$`, which mean the same thing under both routers; the tail
+is raw bytes (`-u`) so a target Sōzu's tolerant HTTP/1 parser admits is not
+narrower than before. Routing on 2.2.1 is unchanged for every request one
+rule decides. Where a user regex overlaps a `Prefix` or `Exact` on the same
+host — both match `/foo` — 2.2.1 applies whichever rule was added last, the
+add order follows the rule text, and the text changed, so such a pair can swap
+winners. That precedence was never defined here; a configuration that leans on
+it should give one of the two a path the other does not match.
+
+**Roll the gateway Pods after upgrading**, for the reason the `Exact` entry
+below gives: the persisted state holds the Kubernetes path, not the compiled
+rule, so an unchanged route produces no migration request and keeps its old
+spelling in Sōzu. That spelling still routes on 2.2.1 — but a later removal
+is issued in the new spelling, finds nothing, and is tolerated as already
+gone, leaving the old rule serving. A fresh Sōzu starts clean.
+
+**User regexes are handed to Sōzu verbatim and change meaning with it.** An
+`ImplementationSpecific` path or an HTTPRoute `RegularExpression` match written
+for 2.2.1 as `/api` (substring) or `\.js$` (suffix) will stop matching on the
+next release. Write full-span patterns now — `^/api(?:[/?](?-u:.*))?$`,
+`^(?-u:.*)\.js(?:\?(?-u:.*))?$` — and they behave identically before and
+after; `(?-u:.*)` rather than `.*` so a remainder that is not valid UTF-8
+reads the same both ways too. An Ingress path must start with `/`; a regex
+still anchors its start behind a slash matched zero times, `/{0}^/api…`,
+which the apiserver accepts. See [features.md](features.md).
+
+One consequence of the new spelling: a user regex that spelled the *previous*
+internal form of an `Exact` or `Prefix` rule (`^/foo(?:\?|$)`, `^/foo(/|\?|$)`)
+was one Sōzu route with that path and arbitrated as a `RouteCollision`; it is
+now a second, overlapping route, and which one answers `/foo` is Sōzu's rule
+order rather than the collision policy. Rewrite it as the plain `Exact` or
+`Prefix` path it meant.
+
+Inferred certificate names (a Gateway listener without `hostname`) are now
+stored **lowercase**, as rustls presents the SNI: a SAN spelled
+`MiXeD.Example.COM` was previously programmed verbatim and selected by no
+handshake on 2.2.1 (upstream fixed the same way after 2.2.1). The name set of
+such a certificate changes, so its `ReplaceCertificate` is emitted on the
+first reconcile after the upgrade — a same-fingerprint replace, which 2.2.1's
+worker ignores, so the mapping takes effect on the Pod roll above.
+
+---
+
 ## `pathType: Exact` is an anchored regex, no longer Sōzu's `Equals`
 
 Measured on Sōzu 2.2.1: an `Equals` rule is compared against the request
@@ -11,7 +63,8 @@ target with its query string, so `/get?x=1` did not match an `Exact /get`
 route (404); and the worker's rule equality has no `Equals` arm, so a
 `RemoveHttpFrontend` for such a route was acknowledged while the rule kept
 matching — a deleted `Exact` route stayed reachable. `Exact` now compiles to
-`^<escaped path>(?:\?|$)`, which has neither defect. The trailing slash is
+a whole-path regex (`^<escaped path>(?:\?(?-u:.*))?$` since the entry above),
+which has neither defect. The trailing slash is
 kept literal (Exact means exact). Because the rule is now a regex, an `Exact`
 path long enough to exceed the regex engine's compiled-size limit (a few
 hundred kilobytes, which Kubernetes does not bound) is refused and reported

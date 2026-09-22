@@ -16,7 +16,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | Host match — wildcard (`*.example.com`) | ✅ | one extra label |
 | Ingress | `pathType: Prefix` | ✅ | |
 | Ingress | `pathType: Exact` | ✅ | compiled to an anchored whole-path regex, query string allowed (Sōzu's `Equals` misses `/get?x=1` and cannot be removed once added) |
-| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex, verbatim — Sōzu 2.x does **not** anchor regexes, so anchor yours; a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
+| Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex, verbatim — Sōzu 2.2.1 does **not** anchor regexes and its next release anchors them at both ends, so write a full-span pattern; the apiserver requires the path to start with `/`, which `/{0}^/api(?:[/?](?-u:.*))?$` satisfies while still anchoring the start; a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
 | Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a contested `host+path` is won by the oldest claimant (`creationTimestamp`, then `namespace/name`), Ingress and HTTPRoute alike, and the loser is reported with `RouteCollision` |
 | Ingress | Rule without a host (catch-all) | ✅ | one plain-HTTP `*` frontend (Sōzu `DomainRule::Any`), emitted in `POST` position so it never shadows a specific-host route. No HTTPS frontend: a `*` is not covered by any certificate, so the host stays plain HTTP |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
@@ -84,10 +84,23 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   changes to an already loaded certificate with the same fingerprint; roll the gateway
   Pods to apply such changes until [#81](https://github.com/CleverCloud/sozu-gateway/issues/81)
   provides native support. See [Upgrading](UPGRADING.md#gateway-certificate-name-inference).
-- **Regex paths (`ImplementationSpecific`).** Sōzu 2.x does **not** anchor regexes (measured, see
-  PROTOCOL.md): `/api` also matches `/x/api`. Anchor your pattern (`^/api(/|$)`) unless you mean
-  a substring match. A pattern that spells the same rule as a `Prefix`/`Exact` path on the same
-  host is one route to Sōzu and is arbitrated as a collision.
+- **Regex paths (`ImplementationSpecific`, HTTPRoute `RegularExpression`).** The pattern is
+  handed to Sōzu verbatim, and what Sōzu does with it is about to change: 2.2.1 does **not**
+  anchor regexes (measured, see PROTOCOL.md — `/api` also matches `/x/api`), while the next
+  release wraps every rule in `\A(?:…)\z`, so `/api` will match **only** `/api` and, since the
+  query string is part of the target, not `/api?x=1`. Write patterns that mean the same under
+  both: anchor both ends yourself and spell out the tail — `^/api(?:[/?](?-u:.*))?$` for an
+  element-boundary prefix, `^/api(?:\?(?-u:.*))?$` for an exact path with a query. A
+  suffix-shaped pattern such as `\.js$` needs a leading `(?-u:.*)` to survive the change. The
+  tail is `(?-u:.*)` rather than `.*` because Sōzu compiles with `regex::bytes`, whose Unicode
+  `.` skips a byte that is not valid UTF-8 — a remainder its tolerant HTTP/1 parser can admit —
+  so a plain `.*` would read differently before and after. **An Ingress path must start with
+  `/`** (apiserver validation, every `pathType`); a regex still anchors its start behind a slash
+  matched zero times, `/{0}^/api(?:[/?](?-u:.*))?$`, which the apiserver accepts and Sōzu
+  compiles. An HTTPRoute `RegularExpression` value has no such constraint. A pattern that
+  spells the same rule as a `Prefix`/`Exact` path on the same host is one route to Sōzu and is
+  arbitrated as a collision; one that merely overlaps it is a second route, and which of the two
+  Sōzu 2.2.1 applies is the order they were added — undefined here, do not lean on it.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
   and Gateway API HTTPRoute filters (Phase 3). A Gateway `set` deletes existing occurrences before
   appending its value; `add` appends and `remove` deletes, on requests and responses. Empty `set`
