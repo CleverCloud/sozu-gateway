@@ -76,6 +76,27 @@ LIST has already filled the cache — and the controller's watch loop only
 warned about it, so such a value did not crash: every cache froze on its LIST
 snapshot behind a green `/readyz`, the exact blindness the flag bounds. The
 controller now exits with an error naming the limit instead.
+## Teardown failures are no longer all tolerated
+
+The agent used to skip *any* `Failure` on a `Remove*`/`DeactivateListener`,
+so a removal Sōzu refused for a real reason — a request it could not
+interpret, a worker that could not act — still advanced the shadow over an
+object Sōzu kept serving. Only the "no longer held" answers are skipped now
+(`Did not find`, `did not bring any change`, `found no listener`, `the
+listener is not activated`, `no TCP|UDP listener to remove`, `Could not
+remove route`), checked per worker so one worker's benign answer cannot hide
+another's failure — and an aggregate in which every worker says `OK` is a
+worker timeout, not an absent object, so it fails too. Any other teardown failure fails the reconcile, which is
+then retried from the unchanged shadow.
+
+Two related changes in the same release: a command-socket connection is
+dropped after *every* channel error, including one on the reconnect-and-retry
+(the protocol has no request ids, so a late reply on a kept connection would
+be read as the next request's ack), and a batch the controller has given up
+on stops between two requests instead of landing its remainder on the socket.
+The agent's per-read deadline is 20 s (was 30 s) so that a request's usual
+worst case stays under the controller's 60 s apply deadline and the real
+error is what gets logged.
 
 ---
 

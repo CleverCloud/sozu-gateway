@@ -81,7 +81,8 @@ then a no-op that still counts as a successful reconcile.
 - The shadow advances **only on a fully successful apply**. On failure it stays put, and
   re-diffing from the unchanged shadow converges — NOT because the requests are idempotent
   (frontend/listener `Add*` verbs reject duplicates with `StateError::Exists`), but because
-  `AddCluster`/`AddBackend` upsert and the agent tolerates already-gone teardowns and *repairs*
+  `AddCluster`/`AddBackend` upsert and the agent tolerates teardowns of objects Sōzu says it no
+  longer holds (only those: a teardown refused for any other reason fails the batch) and *repairs*
   duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`).
 - **Fail-fast philosophy:** if a watch stream ends or caches don't sync within the timeout, the
   process exits so Kubernetes restarts it rather than silently going blind. Never `panic!`.
