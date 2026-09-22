@@ -1193,11 +1193,48 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
 }
 
 #[test]
+fn the_documented_ingress_regex_spelling_is_admitted() {
+    // An Ingress path must start with `/` (apiserver validation), so the
+    // documented way to start-anchor an Ingress regex is a slash matched zero
+    // times before the anchor. It has to compile on Sōzu's regex version, or
+    // the documentation recommends a path the builder then refuses.
+    let ingress: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "re", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": "re.example.com",
+                "http": { "paths": [
+                    { "path": "/{0}^/api(?:[/?](?-u:.*))?$", "pathType": "ImplementationSpecific",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ingress]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+    assert_eq!(
+        out.ir.frontends[0].path,
+        ir::PathMatch::Regex("/{0}^/api(?:[/?](?-u:.*))?$".into())
+    );
+}
+
+#[test]
 fn an_exact_path_collides_with_a_user_regex_spelling_the_same_rule() {
     // `Exact("/foo")` compiles to the same Sōzu rule as the user regex
-    // `^/foo(?:\?|$)`; Sōzu holds that route once. The collision must be
+    // `^/foo(?:\?(?-u:.*))?$`; Sōzu holds that route once. The collision must be
     // arbitrated and reported here, on the compiled rule, not silently
-    // dropped by the translator's dedup.
+    // dropped by the translator's dedup. (The apiserver requires an Ingress
+    // path to start with `/`, so in a cluster only an HTTPRoute
+    // `RegularExpression` can spell this; the builder does not know that, and
+    // the arbitration is the same for both kinds.)
     let (svc_a, slice_a) = web_service_in("aaa");
     let (svc_b, slice_b) = web_service_in("bbb");
     let exact: Ingress = from_json(json!({
@@ -1222,7 +1259,7 @@ fn an_exact_path_collides_with_a_user_regex_spelling_the_same_rule() {
             "rules": [{
                 "host": "clash.example.com",
                 "http": { "paths": [
-                    { "path": "^/foo(?:\\?|$)", "pathType": "ImplementationSpecific",
+                    { "path": "^/foo(?:\\?(?-u:.*))?$", "pathType": "ImplementationSpecific",
                       "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
                 ]}
             }]

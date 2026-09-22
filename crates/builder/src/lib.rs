@@ -759,22 +759,39 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
 
 /// Inferred names reach Sōzu's SNI trie directly, including its regex grammar.
 /// Validate before merging so an invalid inferred name cannot invalidate a
-/// certificate also used by a listener with an explicit hostname.
-fn validate_inferred_certificate_names(names: &[String]) -> Result<(), String> {
+/// certificate also used by a listener with an explicit hostname — and keep
+/// the **normalised** spelling Sōzu's validator returns, which lowercases.
+/// rustls lowercases the SNI before the resolver sees it, while Sōzu 2.2.1
+/// stores a certificate's names verbatim, so a SAN written `MiXeD.Example.COM`
+/// is reachable by no handshake at all and every one for it falls back to the
+/// default certificate (fixed upstream after 2.2.1, at the same construction
+/// point, by the same fold). Explicit names never need this: an Ingress
+/// `tls.hosts` entry and a Gateway listener `hostname` are lowercase by
+/// apiserver validation.
+fn validate_inferred_certificate_names(names: &[String]) -> Result<Vec<String>, String> {
     if names.is_empty() {
         return Err("tls.crt has no DNS SAN or common name to infer for the listener".into());
     }
+    let mut normalised = Vec::with_capacity(names.len());
     for name in names {
         // Sōzu's TLS resolver caps names at MAX_HOSTNAME_LENGTH (4096 bytes).
-        // Its public SNI validator excludes malformed labels and regex syntax;
-        // the bare wildcard is also supported by certificate name inference.
-        if name.len() > 4096
-            || (name != "*" && sozu_command_lib::config::validate_sni_pattern(name).is_err())
-        {
+        // Its public SNI validator excludes malformed labels, regex syntax
+        // and any `/` (a hostname cannot carry one, and the trie would read
+        // `/…/` as a regex segment); the bare wildcard is also supported by
+        // certificate name inference.
+        if name.len() > 4096 {
             return Err("tls.crt contains an unsupported inferred SNI name".into());
         }
+        if name == "*" {
+            normalised.push(name.clone());
+            continue;
+        }
+        match sozu_command_lib::config::validate_sni_pattern(name) {
+            Ok(valid) => normalised.push(valid),
+            Err(_) => return Err("tls.crt contains an unsupported inferred SNI name".into()),
+        }
     }
-    Ok(())
+    Ok(normalised)
 }
 
 /// Extract **and validate** leaf + chain + key PEM from a TLS Secret
@@ -826,8 +843,8 @@ pub(crate) fn extract_cert(
     let x509 = sozu_command_lib::certificate::parse_x509(&leaf_pem.contents)
         .map_err(|e| format!("invalid certificate in tls.crt: {e}"))?;
     if names.is_empty() {
-        names = sozu_command_lib::certificate::get_cn_and_san_attributes(&x509);
-        validate_inferred_certificate_names(&names)?;
+        let inferred = sozu_command_lib::certificate::get_cn_and_san_attributes(&x509);
+        names = validate_inferred_certificate_names(&inferred)?;
     }
     let fingerprint =
         sozu_command_lib::certificate::calculate_fingerprint_from_der(&leaf_pem.contents);
@@ -1708,6 +1725,7 @@ mod certificate_name_tests {
             "example..org",
             "example.org/",
             "/example.*/",
+            "a/b.example.org",
             "*.",
             "a.*.org",
             "éxample.org",
@@ -1734,6 +1752,17 @@ mod certificate_name_tests {
         .map(String::from);
         assert!(validate_inferred_certificate_names(&names).is_ok());
         assert!(validate_inferred_certificate_names(&["a".repeat(4096)]).is_ok());
+    }
+
+    #[test]
+    fn inferred_names_are_lowercased_the_way_a_handshake_presents_them() {
+        // rustls lowercases the SNI before Sōzu's resolver sees it; a name
+        // stored as the certificate spells it would never be selected.
+        let names = ["MiXeD.Example.COM", "*.Wild.ORG", "*", "plain.example.org"].map(String::from);
+        assert_eq!(
+            validate_inferred_certificate_names(&names).unwrap(),
+            ["mixed.example.com", "*.wild.org", "*", "plain.example.org"].map(String::from)
+        );
     }
 }
 

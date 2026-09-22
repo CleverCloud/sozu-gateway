@@ -190,7 +190,8 @@ retired an earlier `408` result taken against 2.1.0. Two measured conditions gat
 literal `$` in a rewrite value makes Sōzu **reject the frontend** (and translation is
 all-or-nothing, so one such route fails every reconcile), and a path rewrite **drops the query
 string** that `ReplaceFullPath` keeps. `ReplacePrefixMatch` is a real limit — the compiled prefix
-regex's only capture group is the element boundary, so `$PATH[1]` yields `/`, not the remainder.
+regex has no capture group at all (boundary and tail are non-capturing), so `$PATH[1]` is
+undefined; capturing the remainder is a change to that shared regex in `ir::PathMatch::sozu_rule`.
 The translator already maps `ir::Rewrite`, so the builder side is the only piece missing.
 
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
@@ -251,11 +252,17 @@ changes.
   when there is exactly one (don't guess `first()`).
 - **`pathType: Prefix` is element-boundary matching, not a string prefix.** `/foo` covers `/foo`,
   `/foo?q=1` and `/foo/bar` but never `/foobar`, so the translator compiles a non-root prefix to an
-  anchored regex — Sōzu's own `Prefix` rule is a raw `starts_with`. Two measured facts drive the
+  regex — Sōzu's own `Prefix` rule is a raw `starts_with`. Two measured facts drive the
   pattern: Sōzu matches path rules against the request target with the **query string attached**,
-  and it does **not** anchor regexes. The root `/` stays a plain prefix. The builder canonicalises
-  `/foo/` to `/foo` first, so one path has one IR spelling. **`pathType: Exact` is an anchored
-  regex too** (`^<escaped>(?:\?|$)`, trailing slash kept literal), never Sōzu's `Equals`: measured
+  and 2.2.1 does **not** anchor regexes — while its unreleased successor wraps every `Regex` rule
+  in `\A(?:…)\z` (upstream 47eb07c, BREAKING). **Every generated pattern is therefore full-span:**
+  `^<escaped>(?:[/?](?-u:.*))?$` for a prefix, so it reads the same under both routers, and the
+  `(?-u:.*)` tail is bytes, not UTF-8 characters, because Sōzu compiles with `regex::bytes` whose
+  Unicode `.` skips a byte that is not valid UTF-8 (the `ir` crate's
+  `sozu_rules_match_the_same_targets_unanchored_and_anchored` pins both properties on Sōzu's own
+  `regex` version). The root `/` stays a plain prefix. The builder canonicalises
+  `/foo/` to `/foo` first, so one path has one IR spelling. **`pathType: Exact` is a full-span
+  regex too** (`^<escaped>(?:\?(?-u:.*))?$`, trailing slash kept literal), never Sōzu's `Equals`: measured
   on 2.2.1, `Equals` misses a query-bearing target and cannot be removed once added (the worker's
   rule equality has no `Equals` arm), so a removed `Exact` route kept serving. The compilation
   lives in `ir::PathMatch::sozu_rule` and both the builder's collision key and the translator use
@@ -305,6 +312,20 @@ The library and data-plane image are aligned at 2.2.1. The library redacts
 certificate and key material from `Debug`, and its `command.proto`, `ConfigState::diff`
 and channel framing are byte-identical to 2.2.0. If the versions diverge again,
 verify that the wire format still agrees before upgrading either side.
+
+Upstream `main` was read against this codebase on 2026-09-22 (a4f0953, 131 commits past 2.2.1,
+none released). What it changes for us, so the next bump starts from here: path `Regex` rules
+become anchored `\A(?:…)\z` (47eb07c, BREAKING — the generated rules are already full-span, user
+patterns are documented); `PathRule::eq` gains its `Equals` arm (795b95d — `Exact` stays a regex
+for the query string; an installed `Equals` rule then *could* be removed by a request, but both
+diff sides compile to a regex so nothing emits one, and the Pod roll in UPGRADING.md stands);
+hostnames match case-insensitively and
+certificate names are lowercased at load (704b60d — inferred names are already lowercased here);
+a certificate name with `/` is refused (e4aac48 — already refused via `validate_sni_pattern`); a
+UDP frontend address becomes exclusive across clusters with a new `StateError` text (044efef —
+re-verify `sozu-agent`'s teardown-tolerance list, which keys on failure text); and the worker's
+same-fingerprint `ReplaceCertificate` short-circuit is **kept on purpose**, so
+[#81](https://github.com/CleverCloud/sozu-gateway/issues/81) stays open.
 
 ## Deployment model
 

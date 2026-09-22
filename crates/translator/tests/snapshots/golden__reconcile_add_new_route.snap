@@ -1,5 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
+
 expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
 ---
 [
@@ -136,7 +137,7 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         "hostname": "api.example.com",
         "path": {
           "kind": 1,
-          "value": "^/v1(?:\\?|$)"
+          "value": "^/v1(?:\\?(?-u:.*))?$"
         },
         "method": null,
         "position": 2,

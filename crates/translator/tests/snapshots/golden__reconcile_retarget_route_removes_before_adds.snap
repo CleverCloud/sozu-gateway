@@ -1,6 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
-assertion_line: 260
+
 expression: reqs
 ---
 [

@@ -56,39 +56,63 @@ pub enum SozuPathRule {
 }
 
 impl PathMatch {
-    /// Compile to the Sōzu rule with **Kubernetes** semantics, measured against
-    /// a live Sōzu 2.2.x: path rules are matched against the request target
-    /// with the query string still attached, and regexes are not anchored by
-    /// Sōzu, so the `^` and the `(?:\?|$)` are both load-bearing.
+    /// Compile to the Sōzu rule with **Kubernetes** semantics. Two measured
+    /// facts about Sōzu 2.2.x drive the shape: path rules are matched against
+    /// the request target with the query string still attached, and a `Regex`
+    /// rule is `is_match`ed unanchored. Sōzu's next router (unreleased, `main`
+    /// at 47eb07c) instead wraps every `Regex` value in `\A(?:…)\z`, so a rule
+    /// must span the whole target. Every pattern emitted here is therefore
+    /// written **full-span** — anchored at both ends by us, with an explicit
+    /// tail consuming the remainder — so it matches the same targets under
+    /// both routers and the data-plane upgrade needs no translator change
+    /// (see `sozu_rules_match_the_same_targets_unanchored_and_anchored`).
+    ///
+    /// The tail is `(?-u:.*)`: any byte but LF, not any *UTF-8 character*.
+    /// Sōzu compiles with `regex::bytes`, whose `.` in the default Unicode
+    /// mode skips a byte that is not valid UTF-8, and a request target may
+    /// carry one (kawa's `tolerant-http1-parser` admits `0xA0`–`0xFF`). The
+    /// previous patterns stopped at the boundary and so never looked at the
+    /// remainder; the tail must not be narrower than that. LF is the one byte
+    /// it still excludes, and neither HTTP parser lets one into a target.
     ///
     /// - `Prefix`: element-boundary matching. `/foo` covers `/foo`, `/foo?q`
-    ///   and `/foo/bar` but never `/foobar`, so a non-root prefix is an anchored
-    ///   regex — Sōzu's own `Prefix` is a raw `starts_with`. The root `/` stays
-    ///   a plain prefix (every target starts with it, and it is cheaper). A
-    ///   trailing slash is insignificant and trimmed, so `/foo/` ≡ `/foo`.
+    ///   and `/foo/bar` but never `/foobar`, so a non-root prefix is a regex
+    ///   whose remainder starts with `/` or `?` — Sōzu's own `Prefix` is a raw
+    ///   `starts_with`. The root `/` stays a plain prefix (every target starts
+    ///   with it, and it is cheaper). A trailing slash is insignificant and
+    ///   trimmed, so `/foo/` ≡ `/foo`.
     /// - `Exact`: the whole path, query string allowed. Sōzu's `Equals` compares
     ///   the query-bearing target literally, so `/get?x=1` would not match
     ///   `Equals("/get")` — and Sōzu 2.2.x cannot remove an `Equals` rule it
-    ///   holds (its rule equality has no `Equals` arm), so a route once added as
-    ///   `Equals` kept matching after its removal was acknowledged. An anchored
-    ///   regex has neither problem. The trailing slash is kept literal: Exact
-    ///   means exact.
+    ///   holds (its rule equality has no `Equals` arm; fixed upstream after
+    ///   2.2.1), so a route once added as `Equals` kept matching after its
+    ///   removal was acknowledged. A regex has neither problem. The trailing
+    ///   slash is kept literal: Exact means exact.
     /// - `Regex`: the user's own pattern, verbatim (validated by the builder).
+    ///   Its meaning *does* change with the router: unanchored today,
+    ///   full-span tomorrow. That is documented for users, not papered over.
     pub fn sozu_rule(&self) -> SozuPathRule {
         match self {
             PathMatch::Regex(v) => SozuPathRule::Regex(v.clone()),
-            PathMatch::Exact(v) => SozuPathRule::Regex(format!("^{}(?:\\?|$)", regex_escape(v))),
+            PathMatch::Exact(v) => {
+                SozuPathRule::Regex(format!("^{}(?:\\?{REMAINDER})?$", regex_escape(v)))
+            }
             PathMatch::Prefix(v) => {
                 let trimmed = v.trim_end_matches('/');
                 if trimmed.is_empty() {
                     SozuPathRule::Prefix("/".to_string())
                 } else {
-                    SozuPathRule::Regex(format!("^{}(/|\\?|$)", regex_escape(trimmed)))
+                    SozuPathRule::Regex(format!("^{}(?:[/?]{REMAINDER})?$", regex_escape(trimmed)))
                 }
             }
         }
     }
 }
+
+/// The rest of a request target after a matched boundary: any bytes but LF,
+/// in Sōzu's `regex::bytes` flavour (`-u` so `.` is one byte, not one UTF-8
+/// character; see [`PathMatch::sozu_rule`]).
+const REMAINDER: &str = "(?-u:.*)";
 
 /// Escape every regex metacharacter so a literal path is matched literally.
 fn regex_escape(literal: &str) -> String {
@@ -283,29 +307,103 @@ mod tests {
         );
         assert_eq!(
             PathMatch::Prefix("/foo".into()).sozu_rule(),
-            regex("^/foo(/|\\?|$)")
+            regex("^/foo(?:[/?](?-u:.*))?$")
         );
         assert_eq!(
             PathMatch::Prefix("/foo/".into()).sozu_rule(),
-            regex("^/foo(/|\\?|$)")
+            regex("^/foo(?:[/?](?-u:.*))?$")
         );
         assert_eq!(
             PathMatch::Exact("/foo".into()).sozu_rule(),
-            regex("^/foo(?:\\?|$)")
+            regex("^/foo(?:\\?(?-u:.*))?$")
         );
         assert_eq!(
             PathMatch::Exact("/foo/".into()).sozu_rule(),
-            regex("^/foo/(?:\\?|$)")
+            regex("^/foo/(?:\\?(?-u:.*))?$")
         );
         assert_eq!(
             PathMatch::Exact("/".into()).sozu_rule(),
-            regex("^/(?:\\?|$)")
+            regex("^/(?:\\?(?-u:.*))?$")
         );
         assert_eq!(PathMatch::Regex("^/x$".into()).sozu_rule(), regex("^/x$"));
         assert_eq!(
             PathMatch::Exact("/a.b(c)".into()).sozu_rule(),
-            regex("^/a\\.b\\(c\\)(?:\\?|$)")
+            regex("^/a\\.b\\(c\\)(?:\\?(?-u:.*))?$")
         );
+    }
+
+    /// The two routers a generated rule must satisfy: Sōzu 2.2.1 runs
+    /// `regex::bytes::Regex::new(value).is_match(target)` unanchored, and its
+    /// successor wraps the value as `\A(?:value)\z` first (47eb07c). Each
+    /// pattern is compiled both ways, on the `regex` version Sōzu builds
+    /// against, and must give the same answer on every target — including a
+    /// remainder that is not valid UTF-8, which Sōzu's HTTP/1 parser can admit.
+    #[test]
+    fn sozu_rules_match_the_same_targets_unanchored_and_anchored() {
+        /// A request target and whether the rule must match it.
+        type Expectation = (&'static [u8], bool);
+        let cases: &[(PathMatch, &[Expectation])] = &[
+            (
+                PathMatch::Prefix("/foo".into()),
+                &[
+                    (b"/foo", true),
+                    (b"/foo/", true),
+                    (b"/foo/bar", true),
+                    (b"/foo?q=1", true),
+                    (b"/foo/bar?q=1", true),
+                    (b"/foo/\xff\xfe", true),
+                    (b"/foo?\xff", true),
+                    (b"/foobar", false),
+                    (b"/fo", false),
+                    (b"/", false),
+                    (b"/x/foo", false),
+                    (b"/foo.bar", false),
+                ],
+            ),
+            (
+                PathMatch::Exact("/v1".into()),
+                &[
+                    (b"/v1", true),
+                    (b"/v1?x=1", true),
+                    (b"/v1?\xff", true),
+                    (b"/v1/", false),
+                    (b"/v1/x", false),
+                    (b"/v1x", false),
+                    (b"/v10", false),
+                    (b"/", false),
+                    (b"/x/v1", false),
+                ],
+            ),
+            (
+                PathMatch::Exact("/v1/".into()),
+                &[(b"/v1/", true), (b"/v1/?a", true), (b"/v1", false)],
+            ),
+            (
+                PathMatch::Exact("/a.b(c)".into()),
+                &[(b"/a.b(c)", true), (b"/aXb(c)", false), (b"/a.bc", false)],
+            ),
+        ];
+        for (path, targets) in cases {
+            let SozuPathRule::Regex(value) = path.sozu_rule() else {
+                panic!("{path:?} must compile to a regex");
+            };
+            let unanchored = regex::bytes::Regex::new(&value).expect("2.2.1 accepts the rule");
+            let anchored = regex::bytes::Regex::new(&format!("\\A(?:{value})\\z"))
+                .expect("the anchored router accepts the rule");
+            for (target, expected) in *targets {
+                let shown = String::from_utf8_lossy(target);
+                assert_eq!(
+                    unanchored.is_match(target),
+                    *expected,
+                    "{path:?} on {shown:?}, unanchored (Sōzu 2.2.1)"
+                );
+                assert_eq!(
+                    anchored.is_match(target),
+                    *expected,
+                    "{path:?} on {shown:?}, anchored (Sōzu main)"
+                );
+            }
+        }
     }
 
     #[test]

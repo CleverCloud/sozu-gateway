@@ -287,9 +287,9 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 |---|---|
 | Ingress rule `host` (exact) | `RequestHttpFrontend.hostname` |
 | Ingress rule `host` wildcard `*.x` | `hostname` wildcard (Sōzu supports `*.` prefix) — to confirm in Étape 2 |
-| `pathType: Prefix` | `PathRule { Regex, "^<value>(/\|\\?\|$)" }` — element-boundary matching (raw `Prefix` also matches `/foobar`); the root `/` stays `PathRule { Prefix, "/" }` |
-| `pathType: Exact` | `PathRule { Regex, "^<value>(?:\\?\|$)" }` — never `Equals`: 2.2.x compares `Equals` against the query-bearing target (`/get?x=1` misses), and cannot remove an `Equals` rule it holds (`PathRule::eq` has no `Equals` arm), so a removed route kept serving — both measured live 2026-09-21 |
-| `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (2.x does **not** anchor regexes — measured; anchor yours) |
+| `pathType: Prefix` | `PathRule { Regex, "^<value>(?:[/?](?-u:.*))?$" }` — element-boundary matching (raw `Prefix` also matches `/foobar`), full-span so it reads the same once Sōzu anchors regexes (§13 item 3); the root `/` stays `PathRule { Prefix, "/" }` |
+| `pathType: Exact` | `PathRule { Regex, "^<value>(?:\\?(?-u:.*))?$" }` — never `Equals`: 2.2.x compares `Equals` against the query-bearing target (`/get?x=1` misses), and cannot remove an `Equals` rule it holds (`PathRule::eq` has no `Equals` arm), so a removed route kept serving — both measured live 2026-09-21 |
+| `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (2.2.1 does **not** anchor regexes — measured; the next release anchors them at both ends — write full-span patterns) |
 | backend `Service` → `EndpointSlice` pod IPs | one `Cluster` + N `AddBackend` (pod `IP:port`) |
 | `spec.tls[].secretName` (`tls.crt`/`tls.key`) | `AddCertificate` on the `:443` listener address |
 | HTTP rule | `AddHttpFrontend` on `:80` listener address |
@@ -307,7 +307,13 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 3. **Regex path semantics** are now measured against a live Sōzu 2.1.0: rules are matched
    against the request target with the **query string still attached** (so `Equals("/foo")`
    does not match `/foo?page=2`), and regexes are **not anchored** (`/foo(/|$)` also matches
-   `/xx/foo`). Both drive the `pathType: Prefix` and `Exact` mappings above. Re-measured on
+   `/xx/foo`). Both drive the `pathType: Prefix` and `Exact` mappings above. **Unreleased Sōzu
+   `main` (47eb07c, 2026-09-19) reverses the second fact**: every `Regex` path rule is wrapped in
+   `\A(?:value)\z` and must span the whole target, query string included (the commit is marked
+   BREAKING upstream). The generated rules are written full-span for that reason — both anchors
+   ours, plus a `(?-u:.*)` tail consuming the remainder as raw bytes, since Sōzu compiles with
+   `regex::bytes` and kawa's `tolerant-http1-parser` admits `0xA0`–`0xFF` in a target — and the
+   `ir` crate tests each rule compiled both ways on Sōzu's `regex` version. Re-measured on
    2.2.1 (2026-09-21): a `RemoveHttpFrontend` for an `Equals` rule is acknowledged but the
    worker keeps matching it — the isolated-host control answered 503 on the removed path
    against 404 on a sibling — which is why `Exact` is a regex too. Wildcard host semantics
@@ -358,10 +364,11 @@ What that settles:
    route whose rewrite value contains a stray `$` would fail *every* reconcile. Any mapping onto
    these fields has to escape or refuse `$` in the builder.
 4. **`$PATH[n]` indexes the path-rule regex's capture groups**, `[0]` being the whole match. The
-   regex a Kubernetes `pathType: Prefix` compiles to (§ the path mapping above) has exactly one
-   group — the element boundary `(/|\?|$)` — so `$PATH[1]` yields `/`, not the remainder after
-   the prefix. There is nothing there to graft a `ReplacePrefixMatch` onto without changing that
-   shared, load-bearing regex.
+   regex a Kubernetes `pathType: Prefix` compiles to (§ the path mapping above) has **no**
+   capture group — its boundary and tail are non-capturing — so `$PATH[1]` is undefined. A
+   `ReplacePrefixMatch` would need the remainder captured, e.g. `^/foo(?:[/?]((?-u:.*)))?$`,
+   which is a change to that shared, load-bearing regex, to be made in `ir::PathMatch::sozu_rule`
+   for every prefix at once, not grafted on per route.
 5. **A path rewrite discards the query string** — on the *forwarding* path. Gateway API's
    `ReplaceFullPath` replaces the path and leaves the query alone, so this is a real deviation,
    not a detail.

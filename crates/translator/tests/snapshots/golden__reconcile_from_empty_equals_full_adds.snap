@@ -1,5 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
+
 expression: reqs
 ---
 [
@@ -177,7 +178,7 @@ expression: reqs
         "hostname": "api.example.com",
         "path": {
           "kind": 1,
-          "value": "^/v1(?:\\?|$)"
+          "value": "^/v1(?:\\?(?-u:.*))?$"
         },
         "method": null,
         "position": 2,
