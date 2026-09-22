@@ -33,7 +33,7 @@ jobs:
       RUN_TEST: ${{ inputs.run_test }}
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@v5
         with:
           version: v1.36.1
       - uses: azure/setup-helm@v4
