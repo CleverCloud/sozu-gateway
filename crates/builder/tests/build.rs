@@ -1083,6 +1083,68 @@ fn plain_ingress(ns: &str, name: &str, host: &str) -> Ingress {
     }))
 }
 
+fn timed_ingress(ns: &str, name: &str, host: &str, created: &str) -> Ingress {
+    from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": name, "namespace": ns, "creationTimestamp": created },
+        "spec": {
+            "ingressClassName": "sozu",
+            "rules": [{
+                "host": host,
+                "http": { "paths": [
+                    { "path": "/", "pathType": "Prefix",
+                      "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                ]}
+            }]
+        }
+    }))
+}
+
+#[test]
+fn the_older_ingress_wins_a_host_collision_regardless_of_cluster_id_order() {
+    // The fix for cross-namespace host takeover: the winner is the OLDEST
+    // claimant, not the smallest backend cluster id. Here the older Ingress is
+    // in namespace "zzz" (cluster id "zzz.web.80"), which the previous
+    // lexicographic policy would have made lose to the newer "aaa.web.80".
+    let (svc_z, slice_z) = web_service_in("zzz");
+    let (svc_a, slice_a) = web_service_in("aaa");
+    let inputs = Inputs {
+        ingresses: arcs(vec![
+            timed_ingress("aaa", "web", "clash.example.com", "2024-01-01T00:00:00Z"),
+            timed_ingress("zzz", "web", "clash.example.com", "2020-01-01T00:00:00Z"),
+        ]),
+        services: arcs(vec![svc_a, svc_z]),
+        endpointslices: arcs(vec![slice_a, slice_z]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "one frontend per route key");
+    assert_eq!(
+        out.ir.frontends[0].cluster_id.as_deref(),
+        Some("zzz.web.80"),
+        "the older Ingress wins even though its cluster id sorts last"
+    );
+    let loser = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "aaa")
+        .expect("aaa result");
+    assert!(
+        matches!(
+            loser.problems.as_slice(),
+            [Problem::RouteCollision { winner, .. }] if winner == "zzz.web.80"
+        ),
+        "the newer Ingress is told it lost to the older one: {loser:?}"
+    );
+    let winner = out
+        .results
+        .iter()
+        .find(|r| r.namespace == "zzz")
+        .expect("zzz result");
+    assert!(winner.problems.is_empty(), "{winner:?}");
+}
+
 #[test]
 fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
     // Two Ingresses in different namespaces claim the same host+path with
@@ -1107,7 +1169,7 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
     assert_eq!(
         out.ir.frontends[0].cluster_id.as_deref(),
         Some("aaa.web.80"),
-        "the translator's winner (smallest cluster id) is kept"
+        "with no timestamps, the tie-break is namespace/name: aaa before bbb"
     );
     let winner = out
         .results

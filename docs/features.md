@@ -17,7 +17,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | `pathType: Prefix` | ✅ | |
 | Ingress | `pathType: Exact` | ✅ | compiled to an anchored whole-path regex, query string allowed (Sōzu's `Equals` misses `/get?x=1` and cannot be removed once added) |
 | Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex, verbatim — Sōzu 2.x does **not** anchor regexes, so anchor yours; a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
-| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a conflicting owner of the same host+path is reported (`RouteCollision` on the loser; the winner is deterministic) |
+| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a contested `host+path` is won by the oldest claimant (`creationTimestamp`, then `namespace/name`), Ingress and HTTPRoute alike, and the loser is reported with `RouteCollision` |
 | Ingress | Rule without a host (catch-all) | ✅ | one plain-HTTP `*` frontend (Sōzu `DomainRule::Any`), emitted in `POST` position so it never shadows a specific-host route. No HTTPS frontend: a `*` is not covered by any certificate, so the host stays plain HTTP |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |

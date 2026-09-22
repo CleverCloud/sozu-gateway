@@ -603,6 +603,14 @@ pub(crate) fn obj_uid(
     meta.uid.clone()
 }
 
+/// `metadata.creationTimestamp` as its RFC 3339 spelling (fixed-width, UTC,
+/// `Z`-suffixed), which sorts chronologically as a plain string.
+pub(crate) fn creation_key(
+    meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+) -> Option<String> {
+    meta.creation_timestamp.as_ref().map(|t| t.0.to_string())
+}
+
 pub(crate) fn meta_nn(namespace: &Option<String>, name: &Option<String>) -> (String, String) {
     (
         namespace.clone().unwrap_or_else(|| "default".to_string()),
@@ -1213,48 +1221,77 @@ fn route_key(frontend: &ir::Frontend) -> RouteKey {
     )
 }
 
+/// A source object's claim on a hostname, for arbitrating who wins a contested
+/// route key or SNI name: oldest `creationTimestamp` first (absent sorts last),
+/// then `namespace/name`. This is the Gateway API's own tie-break, applied
+/// uniformly to Ingress and HTTPRoute so no tenant can take a host+path from an
+/// older one by having a "smaller" backend name — the previous policy, which
+/// sorted on the cluster id (`{ns}.{svc}.{port}`) and so followed the *backend*
+/// namespace's spelling. `creationTimestamp` is compared as its fixed-width,
+/// UTC, `Z`-suffixed RFC 3339 string, which sorts chronologically. The
+/// namespace and name are compared as the single `namespace/name` spelling,
+/// not as a `(namespace, name)` tuple: `-` sorts before `/`, so `a-b/z` must
+/// beat `a/a`, which a tuple comparison reverses.
+type OwnerClaim = (bool, Option<String>, String);
+
+/// `(kind, namespace, name)` — a source object's identity, kind distinguishing
+/// an Ingress from an HTTPRoute so two of different kinds sharing a name are
+/// still separate owners.
+type OwnerIdent = (u8, String, String);
+
+fn owner_ident(source: &FrontendSource) -> OwnerIdent {
+    match source {
+        FrontendSource::Ingress { namespace, name } => (0, namespace.clone(), name.clone()),
+        FrontendSource::HttpRoute {
+            namespace, name, ..
+        } => (1, namespace.clone(), name.clone()),
+    }
+}
+
+/// The claim recorded for a source, or a last-place fallback (absent timestamp,
+/// its own namespace/name) when the caller supplied no map entry — only tests
+/// build frontends with no backing object.
+fn claim_of(source: &FrontendSource, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> OwnerClaim {
+    let ident = owner_ident(source);
+    claims
+        .get(&ident)
+        .cloned()
+        .unwrap_or_else(|| (true, None, format!("{}/{}", ident.1, ident.2)))
+}
+
 /// Keep exactly one frontend per Sōzu route key and report the losers.
 ///
-/// The Gateway builder emits HTTPRoutes by creation time, namespace/name and
-/// rule order. Only the first HTTPRoute candidate for a key remains eligible;
-/// backend names, redirects and rejection backends cannot change that winner.
-/// Ingress candidates keep their existing cluster-id ordering, including when
-/// competing with the chosen HTTPRoute. Mixing those two policies in one
-/// comparator would be non-transitive, so selection has two explicit stages.
+/// The winner is the **oldest claimant** of the contested key (`creationTimestamp`,
+/// then `namespace/name`; see [`OwnerClaim`]), Ingress and HTTPRoute alike, with
+/// emission order breaking a tie between two frontends of the *same* object (an
+/// HTTPRoute's own rules, in rule order). Backend names, redirects and rejection
+/// backends never determine the winner.
 ///
 /// Sōzu keys include protocol, listener, hostname, path kind/value and method,
 /// never the target cluster. Prefixes must already have their trailing slash
-/// canonicalised. Identical effects stay benign; a different effect produces
-/// a collision on the losing object's own source and parentRef.
+/// canonicalised. Two frontends from the *same* object are legal input (an
+/// HTTPRoute's repeated matches, an Ingress's own rules) and stay benign;
+/// otherwise an identical effect stays benign and a different one is a collision
+/// on the losing object's own source and parentRef.
 fn resolve_frontend_collisions(
     frontends: Vec<SourcedFrontend>,
+    claims: &BTreeMap<OwnerIdent, OwnerClaim>,
 ) -> (Vec<ir::Frontend>, Vec<(FrontendSource, Problem)>) {
-    let mut first_http = BTreeMap::new();
-    for (order, sf) in frontends.iter().enumerate() {
-        if matches!(sf.source, FrontendSource::HttpRoute { .. }) {
-            first_http.entry(route_key(&sf.frontend)).or_insert(order);
-        }
-    }
+    // Sort by the owner's claim, then by emission order so an object's own
+    // frontends keep their rule order. The tuple comparator is transitive, so
+    // one policy covers every Ingress/HTTPRoute pairing.
     let mut frontends: Vec<_> = frontends.into_iter().enumerate().collect();
-    // Retain the existing IR ordering and the Ingress tie-break policy.
-    frontends.sort_by(|(_, a), (_, b)| {
-        (a.frontend.tls, &a.frontend.hostname, &a.frontend.cluster_id).cmp(&(
-            b.frontend.tls,
-            &b.frontend.hostname,
-            &b.frontend.cluster_id,
-        ))
+    frontends.sort_by(|(a_order, a), (b_order, b)| {
+        claim_of(&a.source, claims)
+            .cmp(&claim_of(&b.source, claims))
+            .then(a_order.cmp(b_order))
     });
 
     let mut kept: Vec<ir::Frontend> = Vec::new();
     let mut sources = Vec::new();
     let mut winners: BTreeMap<RouteKey, usize> = BTreeMap::new();
-    for (order, sf) in &frontends {
+    for (_, sf) in &frontends {
         let key = route_key(&sf.frontend);
-        if matches!(sf.source, FrontendSource::HttpRoute { .. })
-            && first_http.get(&key) != Some(order)
-        {
-            continue;
-        }
         if let std::collections::btree_map::Entry::Vacant(entry) = winners.entry(key) {
             entry.insert(kept.len());
             kept.push(sf.frontend.clone());
@@ -1262,19 +1299,15 @@ fn resolve_frontend_collisions(
         }
     }
 
-    // Resolve all candidates against the final winner, including an HTTPRoute
-    // eliminated before an Ingress won. Events must name the actual backend.
+    // Resolve all candidates against the final winner. Events must name the
+    // actual winning backend.
     let mut collisions = Vec::new();
     for (_, sf) in frontends {
         let index = winners[&route_key(&sf.frontend)];
         let winner = &kept[index];
-        // Repeated matches within one HTTPRoute are resolved by rule order,
-        // not a rejection of the route itself. They are legal API input.
-        if matches!((&sources[index], &sf.source),
-            (FrontendSource::HttpRoute { namespace: a_ns, name: a_name, .. },
-             FrontendSource::HttpRoute { namespace: b_ns, name: b_name, .. })
-            if a_ns == b_ns && a_name == b_name
-        ) {
+        // Two frontends from the same object are its own rules/matches,
+        // resolved by emission order — legal API input, never a collision.
+        if owner_ident(&sources[index]) == owner_ident(&sf.source) {
             continue;
         }
         if winner.cluster_id == sf.frontend.cluster_id && winner.filters == sf.frontend.filters {
@@ -1562,7 +1595,27 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     // + one frontend per Sōzu route key: a route-key collision with a
     // different effect is reported on the losing owner's result instead of
     // silently letting the winner steal the traffic.
-    let (frontends, collisions) = resolve_frontend_collisions(frontends);
+    //
+    // Every object that produced a frontend gets a claim (oldest
+    // `creationTimestamp`, then `namespace/name`), so arbitration follows who
+    // asked first — Ingress and HTTPRoute alike — not the backend's spelling.
+    let mut owner_claims: BTreeMap<OwnerIdent, OwnerClaim> = BTreeMap::new();
+    for ingress in &inputs.ingresses {
+        if !is_ours(ingress, cfg) {
+            continue;
+        }
+        let (ns, name) = meta_nn(&ingress.metadata.namespace, &ingress.metadata.name);
+        let ts = creation_key(&ingress.metadata);
+        let nn = format!("{ns}/{name}");
+        owner_claims.insert((0, ns, name), (ts.is_none(), ts, nn));
+    }
+    for route in &inputs.http_routes {
+        let (ns, name) = meta_nn(&route.metadata.namespace, &route.metadata.name);
+        let ts = creation_key(&route.metadata);
+        let nn = format!("{ns}/{name}");
+        owner_claims.insert((1, ns, name), (ts.is_none(), ts, nn));
+    }
+    let (frontends, collisions) = resolve_frontend_collisions(frontends, &owner_claims);
     for (source, problem) in collisions {
         // Dedup: the HTTP and HTTPS frontends of one host+path lose as a pair
         // to the same winner — one problem carries the same information.
@@ -1710,6 +1763,21 @@ mod http_route_collisions {
         }
     }
 
+    /// A claims map with explicit ages, so a test states who is older rather
+    /// than relying on emission order. `(kind, namespace, name, timestamp)`;
+    /// kind 0 = Ingress, 1 = HTTPRoute.
+    fn claims(entries: &[(u8, &str, &str, &str)]) -> BTreeMap<OwnerIdent, OwnerClaim> {
+        entries
+            .iter()
+            .map(|(kind, ns, name, ts)| {
+                (
+                    (*kind, ns.to_string(), name.to_string()),
+                    (false, Some(ts.to_string()), format!("{ns}/{name}")),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn a_rejection_backend_has_no_special_collision_priority() {
         // Gateway emission order already encodes route/rule precedence. A
@@ -1721,7 +1789,12 @@ mod http_route_collisions {
             let first = route("older", older);
             let second = route("newer", newer);
             let loser = second.source.clone();
-            let (kept, collisions) = resolve_frontend_collisions(vec![first, second]);
+            // "older" is the older object; the backend string never decides.
+            let claims = claims(&[
+                (1, "demo", "older", "2020-01-01T00:00:00Z"),
+                (1, "demo", "newer", "2021-01-01T00:00:00Z"),
+            ]);
+            let (kept, collisions) = resolve_frontend_collisions(vec![first, second], &claims);
             assert_eq!(kept.len(), 1);
             assert_eq!(kept[0].cluster_id.as_deref(), Some(older));
             assert_eq!(collisions.len(), 1);
@@ -1739,11 +1812,17 @@ mod http_route_collisions {
             namespace: "demo".into(),
             name: "ingress".into(),
         };
-        let (kept, collisions) = resolve_frontend_collisions(vec![
-            ingress,
-            route("older", "zzzz"),
-            route("newer", "aaaa"),
+        // The Ingress is the oldest claimant, so it wins over both HTTPRoutes
+        // regardless of their (smaller) backend cluster ids.
+        let claims = claims(&[
+            (0, "demo", "ingress", "2019-01-01T00:00:00Z"),
+            (1, "demo", "older", "2020-01-01T00:00:00Z"),
+            (1, "demo", "newer", "2021-01-01T00:00:00Z"),
         ]);
+        let (kept, collisions) = resolve_frontend_collisions(
+            vec![ingress, route("older", "zzzz"), route("newer", "aaaa")],
+            &claims,
+        );
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].cluster_id.as_deref(), Some("middle"));
         assert_eq!(collisions.len(), 2);
@@ -1770,7 +1849,7 @@ mod http_route_collisions {
         let mut exact = route("exact", "exact");
         exact.frontend.path = ir::PathMatch::Exact("/".into());
         frontends.push(exact);
-        let (kept, collisions) = resolve_frontend_collisions(frontends);
+        let (kept, collisions) = resolve_frontend_collisions(frontends, &BTreeMap::new());
         assert_eq!(kept.len(), 6);
         assert!(collisions.is_empty());
     }
