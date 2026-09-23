@@ -40,7 +40,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Redirects — scheme + status | ✅ | `RequestRedirect`, 301/302/308 (303 and 307 have no Sōzu policy and are refused) |
 | API gateway | Redirects — hostname / path / port target | ✅ | `hostname`, `path.replaceFullPath` and `port`, under 301/302/308. An unset target keeps the request's own value, and the query string is preserved. Refused, with the reason: `path.replacePrefixMatch`, a literal `$` (Sōzu reads it as a rewrite template and rejects the frontend), a redirect that changes nothing, and combining with `URLRewrite` |
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
-| API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota) |
+| API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota); chart-wide default `sozu.maxConnectionsPerIp`, `0` (unlimited). Counted per Service port and per worker, on the client IP the Service preserves; its `429` rejections appear in `/metrics` only with `metrics.perCluster: true` |
 | API gateway | Match on header value / query param | ❌ | not supported by Sōzu |
 | API gateway | Weighted split across multiple Services | ❌ | not supported by Sōzu |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
@@ -66,6 +66,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Protocols | HTTP / HTTPS (L7) | ✅ | |
 | Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
+| Operations | Connection capacity | ✅ | Sōzu's buffer pool (`sozu.maxBuffers`, default 20000 per worker) covers its 10,000-connection limit for HTTP/1 and TCP; an HTTP/2 connection needs one buffer plus two per allocated stream slot (finished slots are kept for reuse). Buffer-pool memory up to `maxBuffers × 16 KiB` per worker, committed only as connections arrive; TLS and other connection state need headroom on top |
 | Operations | Structured logs (`tracing`) | ✅ | |
 | Operations | Prometheus `/metrics` (controller + proxy-wide Sōzu series) | ✅ | pulled over the command socket on each scrape; `metrics.enabled` |
 | Operations | Per-Service / per-backend Sōzu metrics | ✅ | opt-in only, `metrics.perCluster`: on Sōzu 2.2.1 a scrape can wedge the workers of a large gateway, see [Upgrading](UPGRADING.md#metrics-exports-proxy-wide-sōzu-series-only) |
@@ -134,8 +135,8 @@ Service, so both an Ingress and a Gateway route to that Service share one config
 | ---------- | ------ | ------- | ------ |
 | `sozu.io/load-balancing` | `round-robin`, `random`, `least-loaded`, `power-of-two` | `round-robin` | Sōzu load-balancing algorithm for the cluster. Unknown values fall back to the default. |
 | `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via a Sōzu sticky cookie. |
-| `sozu.io/max-connections-per-ip` | integer | global default | Cap simultaneous connections from one source IP to this cluster. Over the cap → `429`. A non-numeric value is ignored. |
-| `sozu.io/retry-after` | integer (seconds) | unset | `Retry-After` header sent on that `429`. |
+| `sozu.io/max-connections-per-ip` | integer | `sozu.maxConnectionsPerIp` (`0`, unlimited) | Cap simultaneous connections from one source IP to each port of this Service. Over the cap → `429`. A non-numeric value is ignored. Rejections are counted per Service port: they show in `/metrics` only with `metrics.perCluster: true`, or in the access logs. |
+| `sozu.io/retry-after` | integer (seconds) | `60` (Sōzu's default) | `Retry-After` header sent on that `429`; `0` omits it. |
 
 One annotation is read from the **Ingress** instead (it depends on that Ingress's TLS, not the Service):
 

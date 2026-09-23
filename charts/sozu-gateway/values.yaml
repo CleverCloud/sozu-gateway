@@ -251,6 +251,38 @@ sozu:
     # socket spends the whole budget before being replaced.
     gracePeriodSeconds: 40
   logLevel: info
+  # Buffers in each worker's pool. Every HTTP/1 connection and every TCPRoute
+  # session holds 2 for as long as it stays open, idle keep-alives included.
+  # With the pool empty a new connection is accepted and closed at once while
+  # the Pod stays Ready. Sōzu's own default, 1000, caps a worker near 500
+  # connections — far below the 10,000 `max_connections` each worker is
+  # configured for. 20000 is twice that, so for HTTP/1 and TCP traffic the
+  # connection cap is the limit that binds.
+  # HTTP/2 is not covered by that ratio: an HTTP/2 connection holds 1 buffer
+  # plus 2 per stream slot it has allocated, and a finished stream's slot is
+  # kept for reuse, so a connection that once ran N concurrent streams can
+  # keep holding 1 + 2N. Raise this value if many clients speak HTTP/2.
+  #
+  # Memory: a buffer is ~16 KiB and is committed only the first time it is
+  # used, but the pool never shrinks. The buffer pool alone can therefore
+  # reach maxBuffers x 16 KiB per worker — ~315 MiB at 20000, ~630 MiB for the
+  # Pod's two default workers — at that many concurrent connections. That is
+  # not the process ceiling: TLS sessions and other per-connection state live
+  # outside the pool, so leave headroom on top. Size `resources.sozu` against
+  # your real peak. Empty or removed renders 20000, never Sōzu's 1000.
+  maxBuffers: 20000
+  # Default cap on simultaneous connections from one source IP to one backend
+  # Service port (Sōzu counts per (Service port, client IP), per worker); a
+  # Service overrides it with the `sozu.io/max-connections-per-ip` annotation. Over the
+  # cap an HTTP request is answered 429 and a TCPRoute session is closed. 0 is
+  # unlimited and Sōzu's own default. The IP is the client's only while the
+  # Service preserves it (`externalTrafficPolicy: Local`, below); under
+  # `Cluster` clients arrive as node IPs and share one budget.
+  # An HTTP request over the cap is answered 429 and Sōzu counts it per Service
+  # port, so these rejections show in /metrics only with metrics.perCluster:
+  # true, or in the access logs; a TCPRoute session over the cap is closed
+  # without being counted.
+  maxConnectionsPerIp: 0
   # Listener-level knobs Sōzu parses from its own config.toml. None of these
   # reach the IR: the HTTP/HTTPS listeners are declared at boot and re-creating
   # one would drop its certificate store, so they are set here or not at all.
@@ -342,6 +374,12 @@ resources:
     requests:
       cpu: 100m
       memory: 128Mi
+  # Sōzu's memory grows with concurrent connections. Its buffer pool alone can
+  # reach sozu.maxBuffers x 16 KiB per worker (~315 MiB each at the default
+  # 20000), held once reached; TLS sessions and other connection state come on
+  # top. A memory limit below workerCount x that pool budget, plus runtime
+  # headroom, turns a connection surge into an OOM kill instead of refused
+  # connections.
   sozu:
     requests:
       cpu: 250m

@@ -21,6 +21,7 @@ data:
 
     buffer_size = 16_393
     max_connections = 10_000
+    {{- include "sozu-gateway.connectionLimits" . | nindent 4 }}
 
     pid_file_path = "/run/sozu/sozu.pid"
     activate_listeners = true

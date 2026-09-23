@@ -21,6 +21,17 @@ handle_process_affinity = false
 # HTTP/2 minimum frame size; HTTPS listeners advertising h2 reject smaller.
 buffer_size = 16_393
 max_connections = 10_000
+# Per worker. Every HTTP/1 connection or TCP session holds two buffers while
+# open, idle keep-alives included; Sōzu's default of 1000 would stall each
+# worker near 500 connections. An HTTP/2 connection holds one plus two per
+# stream slot it has allocated (finished slots are kept for reuse). Committed
+# on first use and kept until the worker restarts: the pool alone reaches
+# max_buffers x ~16 KiB per worker, TLS and connection state come on top. The
+# chart renders `sozu.maxBuffers`.
+max_buffers = 20000
+# Default per-(cluster, client IP) cap; 0 is unlimited, Sōzu's own default.
+# The chart renders `sozu.maxConnectionsPerIp`.
+max_connections_per_ip = 0
 
 pid_file_path = "/run/sozu/sozu.pid"
 
