@@ -7,6 +7,16 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    # The builder refuses tenant input with the crates Sōzu parses it with, so
+    # these must stay at the versions Sōzu 2.2.1 resolves; they move with the
+    # Sōzu version (crates/builder/tests/sozu_lock_pins.rs fails on drift).
+    ignore:
+      - dependency-name: "regex"
+      - dependency-name: "regex-syntax"
+      - dependency-name: "regex-automata"
+      - dependency-name: "idna"
+      - dependency-name: "idna_adapter"
+      - dependency-name: "icu_*"
 
   - package-ecosystem: github-actions
     directory: "/"
