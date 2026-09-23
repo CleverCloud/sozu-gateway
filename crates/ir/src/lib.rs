@@ -42,11 +42,10 @@ pub enum PathMatch {
     Regex(String),
 }
 
-/// The Sōzu path rule a [`PathMatch`] compiles to. This is the identity Sōzu
-/// keys a route on (with the listener, hostname and method), so it is what
-/// the builder must compare when it arbitrates two objects claiming one
-/// route, and what the translator emits — one definition, two callers, so
-/// they can never disagree about what collides.
+/// The Sōzu path rule a [`PathMatch`] compiles to: what the translator emits,
+/// and the rule half of the key Sōzu stores a route under
+/// ([`Frontend::sozu_route_key`]) — one definition, so the builder's collision
+/// arbitration and the translator can never disagree about what collides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SozuPathRule {
     /// A plain string prefix — only ever the root `/`.
@@ -168,6 +167,47 @@ pub struct Frontend {
     /// Per-route filters (Phase 3): header edits, redirect, rewrite.
     #[serde(default)]
     pub filters: FrontendFilters,
+}
+
+/// The identity Sōzu stores an HTTP(S) frontend under: which frontend map it
+/// lands in (`https`, one map per protocol) and the map key itself.
+///
+/// Sōzu 2.2.1 keys the map on `RequestHttpFrontend`'s `Display`, the
+/// **unescaped** string `{address};{hostname};{kind}{rule}[;{method}]`, and
+/// rejects an add on an occupied key. Because the rule and method are joined
+/// with a bare `;`, two routes that differ as tuples can share one key: a regex
+/// `/x;GET` with no method and a regex `/x` restricted to `GET` both key as
+/// `…;R/x;GET`. Anything that decides whether two frontends collide must
+/// therefore compare this, never a tuple of their fields. The translator's
+/// tests pin it to `RequestHttpFrontend::to_string()`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SozuRouteKey {
+    /// `true` for Sōzu's HTTPS frontend map, `false` for the HTTP one.
+    pub https: bool,
+    /// The map key, spelled exactly as Sōzu spells it.
+    pub key: String,
+}
+
+impl Frontend {
+    /// The key Sōzu stores this frontend under; see [`SozuRouteKey`].
+    pub fn sozu_route_key(&self) -> SozuRouteKey {
+        // Sōzu's wire address carries only the IP and port, so its `Display`
+        // never shows an IPv6 flow label or scope id; drop them here too.
+        let address = SocketAddr::new(self.listener.ip(), self.listener.port());
+        let (kind, rule) = match self.path.sozu_rule() {
+            SozuPathRule::Prefix(v) => ('P', v),
+            SozuPathRule::Regex(v) => ('R', v),
+        };
+        let mut key = format!("{address};{};{kind}{rule}", self.hostname);
+        if let Some(method) = &self.method {
+            key.push(';');
+            key.push_str(method);
+        }
+        SozuRouteKey {
+            https: self.tls,
+            key,
+        }
+    }
 }
 
 /// Request/response transformations applied to a frontend (Phase 3). Maps onto

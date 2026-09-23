@@ -674,6 +674,7 @@ fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
             hostname: "app.example.com".to_string(),
             path: "/".to_string(),
             winner: "<redirect>".to_string(),
+            key_only: false,
         }],
         "the losing Ingress carries the collision"
     );
@@ -727,6 +728,7 @@ fn losing_route_parent_is_not_accepted_with_route_collision_reason() {
         hostname: "app.example.com".to_string(),
         path: "/".to_string(),
         winner: "<redirect>".to_string(),
+        key_only: false,
     }));
     let winner = out
         .routes
@@ -807,6 +809,7 @@ fn collision_lands_on_the_parent_ref_that_produced_the_frontend() {
         hostname: "b.example.com".to_string(),
         path: "/".to_string(),
         winner: "<redirect>".to_string(),
+        key_only: false,
     }));
 }
 
@@ -2987,6 +2990,7 @@ fn oldest_http_route_wins_regardless_of_backend_and_cache_order() {
                     hostname: "app.example.com".into(),
                     path: "/".into(),
                     winner: expected,
+                    key_only: false,
                 }));
         }
     }
@@ -3057,6 +3061,7 @@ fn equivalent_prefix_spellings_obey_route_precedence() {
                 hostname: "app.example.com".into(),
                 path: "/api".into(),
                 winner: "demo.z.80".into(),
+                key_only: false,
             }));
     }
     // Exact paths retain their significant trailing slash and do not collide.
@@ -3076,6 +3081,142 @@ fn equivalent_prefix_spellings_obey_route_precedence() {
     );
     assert_eq!(out.ir.frontends.len(), 2);
     assert!(out.routes.iter().all(|r| r.parents[0].problems.is_empty()));
+}
+
+/// Replace a route's single rule matches with `matches`.
+fn with_matches(mut route: HttpRoute, matches: serde_json::Value) -> HttpRoute {
+    route.spec.rules.as_mut().unwrap()[0].matches = Some(from_json(matches));
+    route
+}
+
+/// Sōzu stores a frontend under `{address};{hostname};R{regex}[;{method}]`,
+/// unescaped, so a regex `/x;GET` with no method and a regex `/x` restricted
+/// to GET are one key to it. Unarbitrated, both reach Sōzu's state and the
+/// translation of the whole shared instance fails on every pass.
+#[test]
+fn a_semicolon_regex_and_a_method_match_on_one_sozu_key_are_arbitrated() {
+    let older = with_matches(
+        collision_route("demo", "z-old", Some("2026-01-01T00:00:00Z"), Some("z")),
+        json!([{ "path": { "type": "RegularExpression", "value": "/x" }, "method": "GET" }]),
+    );
+    let newer = with_matches(
+        collision_route("demo", "a-new", Some("2026-01-01T00:00:01Z"), Some("a")),
+        json!([{ "path": { "type": "RegularExpression", "value": "/x;GET" } }]),
+    );
+    for routes in [
+        vec![newer.clone(), older.clone()],
+        vec![older.clone(), newer.clone()],
+    ] {
+        let out = build(&BuildConfig::default(), &colliding_routes(routes));
+        assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+        assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some("demo.z.80"));
+        assert_eq!(out.ir.frontends[0].method.as_deref(), Some("GET"));
+        let loser = out.routes.iter().find(|r| r.name == "a-new").unwrap();
+        assert!(!loser.parents[0].accepted);
+        assert_eq!(loser.parents[0].accepted_reason, "RouteCollision");
+        assert!(loser.parents[0]
+            .problems
+            .contains(&Problem::RouteCollision {
+                hostname: "app.example.com".into(),
+                path: "/x;GET".into(),
+                winner: "demo.z.80".into(),
+                key_only: true,
+            }));
+        let winner = out.routes.iter().find(|r| r.name == "z-old").unwrap();
+        assert!(winner.parents[0].problems.is_empty());
+        sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir)
+            .expect("the arbitrated IR translates");
+    }
+}
+
+#[test]
+fn one_routes_matches_on_one_sozu_key_report_the_dropped_match() {
+    // Two matches of a single route that differ as matches but not as Sōzu's
+    // key: the second is not served, so it is reported rather than folded
+    // away like a repeated match — and the rest of the instance still applies.
+    let route = with_matches(
+        collision_route("demo", "r", Some("2026-01-01T00:00:00Z"), Some("z")),
+        json!([
+            { "path": { "type": "RegularExpression", "value": "/x;GET" } },
+            { "path": { "type": "RegularExpression", "value": "/x" }, "method": "GET" }
+        ]),
+    );
+    let out = build(&BuildConfig::default(), &colliding_routes(vec![route]));
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert_eq!(out.ir.frontends[0].method, None, "rule order decides");
+    assert!(out.routes[0].parents[0]
+        .problems
+        .contains(&Problem::RouteCollision {
+            hostname: "app.example.com".into(),
+            path: "/x".into(),
+            winner: "demo.z.80".into(),
+            key_only: true,
+        }));
+    // The dropped match covers other requests than the kept one, so the
+    // message must not claim they are served.
+    let message = out.routes[0].parents[0].problems[0].to_string();
+    assert_eq!(
+        message,
+        "the match on host+path app.example.com/x shares Sōzu's route key with the \
+         frontend of demo.z.80 and was dropped"
+    );
+    assert!(!message.contains("already served"), "{message}");
+    sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir)
+        .expect("the arbitrated IR translates");
+
+    // A regex that merely contains `;` and a repeated identical match stay
+    // benign: one frontend each, no problem.
+    let route = with_matches(
+        collision_route("demo", "r", Some("2026-01-01T00:00:00Z"), Some("z")),
+        json!([
+            { "path": { "type": "RegularExpression", "value": "/x;v=1" } },
+            { "path": { "type": "RegularExpression", "value": "/x;v=1" } },
+            { "path": { "type": "RegularExpression", "value": "/x" }, "method": "GET" }
+        ]),
+    );
+    let out = build(&BuildConfig::default(), &colliding_routes(vec![route]));
+    assert_eq!(out.ir.frontends.len(), 2, "{:?}", out.ir.frontends);
+    assert!(out.routes[0].parents[0].problems.is_empty());
+    assert!(out.routes[0].parents[0].accepted);
+    sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir).expect("both keys translate");
+}
+
+#[test]
+fn an_ingress_regex_and_a_method_route_on_one_sozu_key_are_arbitrated() {
+    // An Ingress `ImplementationSpecific` path is a user regex too, so an
+    // Ingress can spell the key of an HTTPRoute method match. The older
+    // claimant wins whichever kind it is.
+    let ingress: Ingress = from_json(json!({
+        "metadata": { "name": "legacy", "namespace": "demo",
+            "creationTimestamp": "2025-01-01T00:00:00Z" },
+        "spec": { "ingressClassName": "sozu", "rules": [{
+            "host": "app.example.com",
+            "http": { "paths": [{ "path": "/x;GET", "pathType": "ImplementationSpecific",
+                "backend": { "service": { "name": "a", "port": { "number": 80 } } } }] }
+        }]}
+    }));
+    let route = with_matches(
+        collision_route("demo", "r", Some("2026-01-01T00:00:00Z"), Some("z")),
+        json!([{ "path": { "type": "RegularExpression", "value": "/x" }, "method": "GET" }]),
+    );
+    let mut inputs = colliding_routes(vec![route]);
+    inputs.ingresses = arcs(vec![ingress]);
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert_eq!(out.ir.frontends[0].cluster_id.as_deref(), Some("demo.a.80"));
+    assert!(out.results[0].problems.is_empty(), "the Ingress wins");
+    assert!(!out.routes[0].parents[0].accepted);
+    assert!(out.routes[0].parents[0]
+        .problems
+        .contains(&Problem::RouteCollision {
+            hostname: "app.example.com".into(),
+            path: "/x".into(),
+            winner: "demo.a.80".into(),
+            key_only: true,
+        }));
+    sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir)
+        .expect("the arbitrated IR translates");
 }
 
 #[test]

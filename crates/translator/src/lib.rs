@@ -122,7 +122,7 @@ fn backend_request(b: &ir::Backend) -> Request {
     .into()
 }
 
-fn frontend_request(f: &ir::Frontend) -> Request {
+fn frontend_payload(f: &ir::Frontend) -> RequestHttpFrontend {
     // A bare "*" catch-all goes in POST so it is a fallback and never shadows
     // specific-host (TREE) frontends. Sōzu parses "*" as DomainRule::Any.
     let position = if f.hostname == "*" {
@@ -140,7 +140,11 @@ fn frontend_request(f: &ir::Frontend) -> Request {
         ..Default::default()
     };
     apply_filters(&mut payload, &f.filters);
-    if f.tls {
+    payload
+}
+
+fn frontend_request(tls: bool, payload: RequestHttpFrontend) -> Request {
+    if tls {
         RequestType::AddHttpsFrontend(payload).into()
     } else {
         RequestType::AddHttpFrontend(payload).into()
@@ -194,54 +198,38 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
     }
 }
 
-/// Frontends deduplicated by the route identity Sōzu keys on: tls, listener,
-/// hostname, the *compiled* path rule and method. Sōzu rejects a duplicate
-/// AddHttpFrontend, so a benign duplicate produced by overlapping objects must
-/// not become a hard reconcile failure. Comparing the compiled rule rather
-/// than the IR spelling is what makes `Exact("/foo")` and a user regex that
-/// spells the same anchored pattern one route here, exactly as they are to
-/// Sōzu — and it is the same rule the builder keys its collision report on,
-/// so the loser is the one it named. First occurrence wins, as everywhere else.
+/// Frontends deduplicated by the key Sōzu stores them under
+/// ([`ir::Frontend::sozu_route_key`]): the frontend map (HTTP or HTTPS) and the
+/// `;`-joined string of listener, hostname, *compiled* path rule and method.
+/// Sōzu rejects an add on an occupied key, so a duplicate produced by
+/// overlapping objects must not become a hard reconcile failure. Comparing the
+/// compiled rule makes `Exact("/foo")` and a user regex that spells the same
+/// anchored pattern one route here; comparing the joined string makes a regex
+/// `/x;GET` and a regex `/x` with `method: GET` one route, exactly as they are
+/// to Sōzu. It is the key the builder arbitrates on, so the loser is the one it
+/// named. First occurrence wins, as everywhere else.
 fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
-    let mut seen: BTreeSet<(bool, SocketAddr, &str, ir::SozuPathRule, Option<&str>)> =
-        BTreeSet::new();
+    let mut seen: BTreeSet<ir::SozuRouteKey> = BTreeSet::new();
     ir.frontends
         .iter()
-        .filter(|f| {
-            seen.insert((
-                f.tls,
-                f.listener,
-                f.hostname.as_str(),
-                f.path.sozu_rule(),
-                f.method.as_deref(),
-            ))
-        })
+        .filter(|f| seen.insert(f.sozu_route_key()))
         .collect()
 }
 
-/// HTTP/HTTPS frontend requests, deduplicated a second time on the *emitted*
-/// wire key — a backstop for [`unique_frontends`], which keys on the same rule
-/// one step earlier: Sōzu holds a route key once, and because translation is
+/// HTTP/HTTPS frontend requests, deduplicated a second time on the key Sōzu
+/// derives from the *emitted* payload (`RequestHttpFrontend`'s `Display`) — a
+/// backstop for [`unique_frontends`], which computes the same key one step
+/// earlier: Sōzu holds a route key once, and because translation is
 /// all-or-nothing a single clash would fail *every* reconcile, taking unrelated
 /// routes down with it. Never let an IR, however it was produced, be able to do
 /// that. First occurrence wins.
 fn http_frontend_requests(ir: &ir::Ir) -> Vec<Request> {
-    let mut seen: BTreeSet<(bool, SocketAddr, String, i32, String, Option<String>)> =
-        BTreeSet::new();
+    let mut seen: BTreeSet<(bool, String)> = BTreeSet::new();
     unique_frontends(ir)
         .into_iter()
-        .filter(|f| {
-            let path = path_rule(&f.path);
-            seen.insert((
-                f.tls,
-                f.listener,
-                f.hostname.clone(),
-                path.kind,
-                path.value,
-                f.method.clone(),
-            ))
-        })
-        .map(frontend_request)
+        .map(|f| (f.tls, frontend_payload(f)))
+        .filter(|(tls, payload)| seen.insert((*tls, payload.to_string())))
+        .map(|(tls, payload)| frontend_request(tls, payload))
         .collect()
 }
 

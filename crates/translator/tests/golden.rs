@@ -381,6 +381,140 @@ fn a_prefix_route_never_takes_an_exact_route_key() {
     );
 }
 
+/// Every rule kind the IR can compile to (a plain root prefix, the regexes a
+/// non-root prefix and an exact path become, a user regex — `;` included),
+/// with and without a method, on the HTTP and HTTPS maps, IPv4 and IPv6.
+/// The IR never emits Sōzu's `Equals` kind (see `ir::PathMatch::sozu_rule`).
+fn route_key_matrix() -> Vec<ir::Frontend> {
+    let paths = [
+        ir::PathMatch::Prefix("/".into()),
+        ir::PathMatch::Prefix("/api".into()),
+        ir::PathMatch::Exact("/a;b".into()),
+        ir::PathMatch::Regex("/x;GET".into()),
+    ];
+    let v6_scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+        "fe80::1".parse().expect("valid v6"),
+        8443,
+        7,
+        3,
+    ));
+    let mut out = Vec::new();
+    for path in &paths {
+        for method in [None, Some("GET")] {
+            for tls in [false, true] {
+                for listener in [None, Some(addr("[::]:8080")), Some(v6_scoped)] {
+                    let mut f = frontend("h.example.com", path.clone(), "c", tls);
+                    f.method = method.map(str::to_string);
+                    if let Some(listener) = listener {
+                        f.listener = listener;
+                    }
+                    out.push(f);
+                }
+            }
+        }
+    }
+    let mut catch_all = frontend("*", ir::PathMatch::Prefix("/".into()), "c", false);
+    catch_all.cluster_id = None;
+    out.push(catch_all);
+    out
+}
+
+#[test]
+fn the_ir_route_key_is_the_key_sozu_stores_the_frontend_under() {
+    // The builder arbitrates collisions on `sozu_route_key` without calling
+    // Sōzu, so it must be byte-for-byte the key Sōzu's own ConfigState uses —
+    // `RequestHttpFrontend`'s `Display` — or a clash could slip past it.
+    for f in route_key_matrix() {
+        let model = ir::Ir {
+            clusters: vec![cluster("c", ir::LbAlgorithm::RoundRobin, false)],
+            frontends: vec![f.clone()],
+            ..Default::default()
+        };
+        let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("single frontend translates");
+        let expected = f.sozu_route_key();
+        let (https, payload) = reqs
+            .iter()
+            .find_map(|r| match &r.request_type {
+                Some(RequestType::AddHttpFrontend(p)) => Some((false, p)),
+                Some(RequestType::AddHttpsFrontend(p)) => Some((true, p)),
+                _ => None,
+            })
+            .expect("one frontend add");
+        assert_eq!(https, expected.https, "frontend map for {f:?}");
+        assert_eq!(payload.to_string(), expected.key, "Display key for {f:?}");
+
+        let mut state = ConfigState::new();
+        for r in &reqs {
+            state.dispatch(r).expect("request folds into ConfigState");
+        }
+        let stored = if expected.https {
+            &state.https_fronts
+        } else {
+            &state.http_fronts
+        };
+        assert_eq!(
+            stored.keys().collect::<Vec<_>>(),
+            vec![&expected.key],
+            "ConfigState key for {f:?}"
+        );
+    }
+}
+
+#[test]
+fn a_regex_whose_semicolon_spells_a_method_is_one_route_key() {
+    // Sōzu joins rule and method with a bare `;`, so a regex `/x;GET` with no
+    // method and a regex `/x` restricted to GET are one key to it: emitting
+    // both would fail the whole translation with `StateError::Exists`, for
+    // every tenant of the instance. The first is kept, and a `;` regex that
+    // spells no clash stays programmable.
+    let spelled = frontend(
+        "h.example.com",
+        ir::PathMatch::Regex("/x;GET".into()),
+        "a",
+        false,
+    );
+    let mut method = frontend(
+        "h.example.com",
+        ir::PathMatch::Regex("/x".into()),
+        "b",
+        false,
+    );
+    method.method = Some("GET".into());
+    let mut other_method = method.clone();
+    other_method.method = Some("POST".into());
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("a", ir::LbAlgorithm::RoundRobin, false),
+            cluster("b", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        frontends: vec![spelled, method, other_method],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
+    let adds: Vec<_> = reqs
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddHttpFrontend(p)) => Some((p.cluster_id.clone(), p.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        adds,
+        vec![
+            (
+                Some("a".to_string()),
+                "0.0.0.0:80;h.example.com;R/x;GET".to_string()
+            ),
+            (
+                Some("b".to_string()),
+                "0.0.0.0:80;h.example.com;R/x;POST".to_string()
+            ),
+        ],
+        "first claimant of the shared key wins, the distinct key stays: {dump}",
+        dump = dump(&reqs)
+    );
+}
+
 #[test]
 fn reconcile_from_empty_equals_full_adds() {
     let reqs = tr::reconcile(&ir::Ir::default(), &sample_ir()).expect("reconcile");

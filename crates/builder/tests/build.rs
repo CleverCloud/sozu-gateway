@@ -1188,7 +1188,12 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
             hostname: "clash.example.com".to_string(),
             path: "/".to_string(),
             winner: "aaa.web.80".to_string(),
+            key_only: false,
         }]
+    );
+    assert_eq!(
+        loser.problems[0].to_string(),
+        "host+path clash.example.com/ is already served by aaa.web.80; this route was dropped"
     );
 }
 
