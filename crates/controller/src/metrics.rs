@@ -8,6 +8,10 @@
 //! hiccup yields `503`, never a panic, and a bind failure simply disables the
 //! endpoint — routing is never affected.
 //!
+//! The query asks for process-level metrics only unless per-cluster series
+//! were opted into (see [`query_options`]): a per-cluster query can wedge the
+//! data plane, which no monitoring aid is worth.
+//!
 //! Hand-rolled on a `TcpListener` for the same reason as the health server, and
 //! it reuses that module's request-line parser.
 
@@ -103,10 +107,38 @@ impl SelfMetrics {
 /// *our* wait: a timed-out job still completes on the worker thread eventually.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The `QueryMetrics` options one scrape sends.
+///
+/// By default `no_clusters`: each worker answers with its proxy-level metrics
+/// only. A per-cluster query makes every worker put *all* of its cluster and
+/// backend metrics in a single response, and Sōzu 2.2.1's worker requeues a
+/// response larger than `max_command_buffer_size` forever instead of dropping
+/// it — that worker then stops serving traffic and commands, spinning a core,
+/// while every probe stays green. The size grows with the number of clusters
+/// that have seen traffic, so on a large enough cluster a routine scrape takes
+/// the gateway down. Filtering by `cluster_ids` does not bound it either: at
+/// backend detail (which `sozu top` switches on at runtime) one cluster grows
+/// with its backends. Hence opt-in only.
+pub fn query_options(per_cluster: bool) -> QueryMetricsOptions {
+    QueryMetricsOptions {
+        no_clusters: !per_cluster,
+        ..QueryMetricsOptions::default()
+    }
+}
+
+/// Where the `/metrics` endpoint listens and what each scrape asks Sōzu for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Endpoint {
+    pub addr: SocketAddr,
+    /// Ask the workers for per-cluster metrics too (see [`query_options`]).
+    pub per_cluster: bool,
+}
+
 /// Spawn the metrics server as a background task. On a bind failure it logs and
 /// gives up (metrics are an operability aid, never a reason to kill routing).
-pub fn spawn(addr: SocketAddr, agent: SozuAgentHandle, self_metrics: Arc<SelfMetrics>) {
+pub fn spawn(endpoint: Endpoint, agent: SozuAgentHandle, self_metrics: Arc<SelfMetrics>) {
     tokio::spawn(async move {
+        let addr = endpoint.addr;
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -115,29 +147,45 @@ pub fn spawn(addr: SocketAddr, agent: SozuAgentHandle, self_metrics: Arc<SelfMet
             }
         };
         debug!(%addr, "metrics endpoint listening (/metrics)");
-        // At most one scrape in flight: concurrent scrapers would stack
-        // `QueryMetrics` jobs in the socket-worker queue ahead of routing
-        // applies. A busy scrape gets an immediate 503 (Prometheus retries on
-        // its next cycle) instead of queueing.
-        let scrape_permit = Arc::new(Semaphore::new(1));
-        loop {
-            match listener.accept().await {
-                Ok((mut sock, _)) => {
-                    let agent = agent.clone();
-                    let scrape_permit = scrape_permit.clone();
-                    let self_metrics = self_metrics.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            serve_one(&mut sock, &agent, &scrape_permit, &self_metrics).await
-                        {
-                            debug!(error = %e, "metrics connection error");
-                        }
-                    });
-                }
-                Err(e) => warn!(error = %e, "metrics accept error"),
-            }
-        }
+        serve(listener, agent, self_metrics, endpoint.per_cluster).await;
     });
+}
+
+/// The accept loop behind [`spawn`], on an already-bound listener.
+async fn serve(
+    listener: TcpListener,
+    agent: SozuAgentHandle,
+    self_metrics: Arc<SelfMetrics>,
+    per_cluster: bool,
+) {
+    // At most one scrape in flight: concurrent scrapers would stack
+    // `QueryMetrics` jobs in the socket-worker queue ahead of routing
+    // applies. A busy scrape gets an immediate 503 (Prometheus retries on
+    // its next cycle) instead of queueing.
+    let scrape_permit = Arc::new(Semaphore::new(1));
+    loop {
+        match listener.accept().await {
+            Ok((mut sock, _)) => {
+                let agent = agent.clone();
+                let scrape_permit = scrape_permit.clone();
+                let self_metrics = self_metrics.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_one(
+                        &mut sock,
+                        &agent,
+                        &scrape_permit,
+                        &self_metrics,
+                        per_cluster,
+                    )
+                    .await
+                    {
+                        debug!(error = %e, "metrics connection error");
+                    }
+                });
+            }
+            Err(e) => warn!(error = %e, "metrics accept error"),
+        }
+    }
 }
 
 async fn serve_one(
@@ -145,12 +193,15 @@ async fn serve_one(
     agent: &SozuAgentHandle,
     scrape_permit: &Semaphore,
     self_metrics: &SelfMetrics,
+    per_cluster: bool,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 256];
     let n = crate::health::read_head(sock, &mut buf).await?;
     let (status, content_type, body): (&str, &str, String) =
         match crate::health::request_path(&buf[..n]) {
-            Some("/metrics") => metrics_response(agent, scrape_permit, self_metrics).await,
+            Some("/metrics") => {
+                metrics_response(agent, scrape_permit, self_metrics, per_cluster).await
+            }
             _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
         };
     let response = format!(
@@ -168,6 +219,7 @@ async fn metrics_response(
     agent: &SozuAgentHandle,
     scrape_permit: &Semaphore,
     self_metrics: &SelfMetrics,
+    per_cluster: bool,
 ) -> (&'static str, &'static str, String) {
     // `try_acquire`, not `acquire`: a second scraper must fail fast, not park
     // behind the first one (that queue growth is exactly the failure mode).
@@ -181,7 +233,7 @@ async fn metrics_response(
     };
     match tokio::time::timeout(
         QUERY_TIMEOUT,
-        agent.query_metrics(QueryMetricsOptions::default()),
+        agent.query_metrics(query_options(per_cluster)),
     )
     .await
     {
@@ -231,7 +283,8 @@ mod tests {
         let self_metrics = SelfMetrics::default();
 
         let held = scrape_permit.try_acquire().expect("hold the only permit");
-        let (status, _ct, body) = metrics_response(&agent, &scrape_permit, &self_metrics).await;
+        let (status, _ct, body) =
+            metrics_response(&agent, &scrape_permit, &self_metrics, false).await;
         assert_eq!(status, "503 Service Unavailable");
         assert_eq!(
             body, "another scrape is in flight\n",
@@ -239,7 +292,8 @@ mod tests {
         );
 
         drop(held);
-        let (status, _ct, body) = metrics_response(&agent, &scrape_permit, &self_metrics).await;
+        let (status, _ct, body) =
+            metrics_response(&agent, &scrape_permit, &self_metrics, false).await;
         assert_eq!(status, "503 Service Unavailable");
         assert_eq!(
             body, "metrics unavailable\n",
@@ -262,11 +316,130 @@ mod tests {
         let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let (mut sock, _) = listener.accept().await.expect("accept");
 
-        let err = serve_one(&mut sock, &agent, &scrape_permit, &self_metrics)
+        let err = serve_one(&mut sock, &agent, &scrape_permit, &self_metrics, false)
             .await
             .expect_err("a silent connection must not be served");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         drop(client);
+    }
+
+    /// The default scrape must never ask workers for per-cluster metrics: that
+    /// response is what grows past `max_command_buffer_size` and wedges them.
+    #[test]
+    fn default_scrape_queries_process_level_metrics_only() {
+        assert_eq!(
+            query_options(false),
+            QueryMetricsOptions {
+                no_clusters: true,
+                ..QueryMetricsOptions::default()
+            }
+        );
+    }
+
+    /// The opt-in restores the full, unfiltered query the endpoint used to send.
+    #[test]
+    fn per_cluster_opt_in_restores_the_full_query() {
+        assert_eq!(query_options(true), QueryMetricsOptions::default());
+        assert!(!query_options(true).no_clusters);
+    }
+
+    /// A fake Sōzu on `path`: accepts one connection, answers every request
+    /// with an empty metrics payload and returns the `QueryMetrics` options it
+    /// received once the client hangs up. Framed by the crate's own `Channel`,
+    /// so what it records is what the real socket would carry.
+    fn spawn_recording_fake_sozu(
+        path: &std::path::Path,
+    ) -> std::thread::JoinHandle<Vec<QueryMetricsOptions>> {
+        use sozu_command_lib::channel::Channel;
+        use sozu_command_lib::proto::command::{
+            request::RequestType, response_content::ContentType, Request, Response,
+            ResponseContent, ResponseStatus,
+        };
+
+        let listener = std::os::unix::net::UnixListener::bind(path).expect("bind fake sozu");
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            stream.set_nonblocking(true).expect("set nonblocking");
+            let mut channel: Channel<Response, Request> =
+                Channel::new(mio::net::UnixStream::from_std(stream), 16_384, 65_536);
+            channel.blocking().expect("set blocking");
+            let mut queries = Vec::new();
+            while let Ok(request) =
+                channel.read_message_blocking_timeout(Some(Duration::from_secs(5)))
+            {
+                if let Some(RequestType::QueryMetrics(options)) = request.request_type {
+                    queries.push(options);
+                }
+                let metrics = ContentType::Metrics(Default::default());
+                channel
+                    .write_message(&Response {
+                        status: ResponseStatus::Ok as i32,
+                        message: String::new(),
+                        content: Some(ResponseContent {
+                            content_type: Some(metrics),
+                        }),
+                    })
+                    .expect("write response");
+            }
+            queries
+        })
+    }
+
+    /// From the switch the server is started with to the query on the socket,
+    /// through the accept loop and the per-connection handler: a value dropped
+    /// or hard-coded anywhere in that path fails here. How the parsed flag
+    /// becomes that switch is pinned in `main`, by
+    /// `metrics_endpoint_carries_the_parsed_switch`; only the bind in [`spawn`]
+    /// is left out, since it would need a fixed port.
+    #[tokio::test]
+    async fn scrape_sends_the_query_the_switch_selects() {
+        use tokio::io::AsyncReadExt;
+
+        for per_cluster in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "sozu-gw-metrics-{per_cluster}-{}.sock",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let fake = spawn_recording_fake_sozu(&path);
+            let agent = SozuAgentHandle::spawn(path.to_string_lossy()).expect("spawn agent");
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(serve(
+                listener,
+                agent,
+                Arc::new(SelfMetrics::default()),
+                per_cluster,
+            ));
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            client
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .expect("send request");
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .await
+                .expect("read response");
+            assert!(
+                response.starts_with("HTTP/1.1 200"),
+                "per_cluster={per_cluster}: {response}"
+            );
+
+            // Stopping the server drops the last agent handle; hanging up ends
+            // the fake's read loop, which hands back its record.
+            server.abort();
+            let _ = server.await;
+            let queries = fake.join().expect("fake sozu");
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(
+                queries,
+                vec![query_options(per_cluster)],
+                "per_cluster={per_cluster}"
+            );
+            assert_eq!(queries[0].no_clusters, !per_cluster);
+        }
     }
 
     #[test]

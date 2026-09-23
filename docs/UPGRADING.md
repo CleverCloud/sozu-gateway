@@ -4,6 +4,59 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## `/metrics` exports proxy-wide Sōzu series only
+
+A scrape used to ask every Sōzu worker for all of its per-cluster and
+per-backend metrics, in one message per worker. On Sōzu 2.2.1 a worker whose
+message exceeds `max_command_buffer_size` (1 638 400 bytes in the chart)
+requeues it forever: it stops serving traffic and commands and spins a core,
+while `/readyz`, the container probes and `reconcile_failures_total` all stay
+green, until the Pod is restarted. The message grows with every routed
+Service port that has received traffic. On a laptop, with the chart's
+buffers, two workers and traffic on every cluster, the full query still
+answered at 2 000 clusters and wedged both workers at 2 500 and at 3 000
+([runs 3–5](probes/metrics-no-clusters_sozu-2.2.1_2026-09-23.txt)), which
+puts each cluster's share at 650–820 bytes with the probe's short cluster
+names. Take that as an order of magnitude, not a limit: longer
+`namespace.service.port` names, backend detail and how traffic spreads over
+the workers all move it, and no production gateway was measured. A routine
+scrape could therefore take a large gateway down.
+Filtering the query by cluster does not bound it either: at backend detail,
+which `sozu top` switches on at runtime, one cluster grows with its backends.
+Scrapes now ask for process-level metrics only
+([measured](probes/metrics-no-clusters_sozu-2.2.1_2026-09-23.txt)).
+
+**What disappears by default** — every series labelled `cluster_id`. At Sōzu's
+default detail level these families go entirely:
+
+- `sozu_requests`, and the status counters of *routed* requests:
+  `sozu_http_status_2xx`, `…_5xx`, per-code `sozu_http_status_<code>`,
+  `sozu_http_<code>_errors` (502, 503, 504, …);
+- `sozu_backend_response_time`, `sozu_backend_connection_time` (and their
+  `_histogram`), `sozu_backend_connections_error`,
+  `sozu_connections_per_backend`;
+- `sozu_cluster_available_backends`, `sozu_cluster_total_backends`;
+- `sozu_frontend_matching_time` (and `_histogram`).
+
+`sozu_bytes_in`/`_out`, `sozu_request_time`, `sozu_service_time` (and their
+`_histogram`) and `sozu_access_logs_count` keep their unlabelled proxy series
+and lose the per-cluster ones. What stays: the proxy series (connections,
+`sozu_http_requests`, buffers, event loop, and the 404s Sōzu answers itself as
+`sozu_http_status_404`), the `process="main"` configuration gauges, and every
+`sozu_gw_controller_*` signal. **An alert or dashboard built on the removed
+series now reads "no data", not zero** — a 5xx-rate alert on
+`sozu_http_status_5xx` goes silent. A side effect: the endpoint no longer
+lists every tenant's `namespace.service.port`.
+
+**To opt back in**, knowing the risk above, set `metrics.perCluster: true`
+(`--metrics-per-cluster`, `SOZU_GW_METRICS_PER_CLUSTER=true`). There is no
+safe Service count to aim for: the figures above only say that hundreds of
+Services are far from the edge and a few thousand are at it. If you enable it
+on a gateway that routes more than a few hundred, split the Services across
+Gateway instances rather than tuning against a number.
+
+---
+
 ## Routes are arbitrated on the key Sōzu stores them under
 
 Sōzu 2.2.1 stores an HTTP(S) route under the unescaped string
@@ -489,8 +542,11 @@ therefore adds a `ClusterIP` Service, opens a container port, and rolls the Pod.
 **What it exposes.** The endpoint has no authentication and no NetworkPolicy, and
 the series carry `cluster_id` as `namespace.service.port` — so any Pod that can
 reach the Service can enumerate the routed Services of every tenant. Backend Pod
-IPs are not exposed at Sōzu's default detail level. On a shared cluster, put a
-NetworkPolicy in front of it or turn it off:
+IPs are not exposed at Sōzu's default detail level. (Since
+[the entry above](#metrics-exports-proxy-wide-sōzu-series-only), the `cluster_id`
+series and the per-Service counters below exist only with
+`metrics.perCluster: true`.) On a shared cluster, put a NetworkPolicy in front
+of it or turn it off:
 
 ```yaml
 metrics:
@@ -506,7 +562,10 @@ Two known limits, neither of which the chart can fix on its own:
   keeps the socket busy for longer than that;
 - an `AggregatedMetrics` payload larger than `max_command_buffer_size`
   (1 638 400 bytes) is rejected by Sōzu, which closes the connection instead of
-  answering. Large clusters will see scrapes fail deterministically.
+  answering. Large clusters will see scrapes fail deterministically. (Worse, a
+  single worker's share over that limit wedges the worker — see
+  [the entry above](#metrics-exports-proxy-wide-sōzu-series-only), which made
+  the per-cluster query opt-in.)
 
 **What it is good for.** The controller's own signals — the
 last-successful-reconcile timestamp above all — plus Sōzu's request counters and

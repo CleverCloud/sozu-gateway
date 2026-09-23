@@ -163,6 +163,12 @@ spec:
             {{- if .Values.metrics.enabled }}
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"
+            {{- if .Values.metrics.perCluster }}
+            # Per-cluster series can wedge Sōzu workers on a large cluster;
+            # see metrics.perCluster in values.yaml.
+            - name: SOZU_GW_METRICS_PER_CLUSTER
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if .Values.rbac.allowStatusWrites }}
             # Publish this gateway's LoadBalancer address into managed Ingresses'

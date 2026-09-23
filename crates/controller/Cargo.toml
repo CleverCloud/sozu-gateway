@@ -32,6 +32,10 @@ http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 # `start_paused` tests for the resync interval (virtual time, instant runs).
 tokio = { workspace = true, features = ["test-util"] }
+# A fake Sōzu on a unix socket, framed by the crate's own `Channel`, so the
+# /metrics tests can assert the exact `QueryMetrics` request on the wire.
+sozu-command-lib = { workspace = true }
+mio = { workspace = true }
 
 [dependencies.kube]
 version = "4"

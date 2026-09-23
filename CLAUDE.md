@@ -299,7 +299,10 @@ changes.
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
   (`--metrics-listen`, off when the flag is absent; the chart sets it by default via
   `metrics.enabled`) by issuing a `QueryMetrics` over the command
-  socket on each scrape and rendering the returned `AggregatedMetrics` with the pure
+  socket on each scrape — **`no_clusters` unless `--metrics-per-cluster`** (chart
+  `metrics.perCluster`), because on 2.2.1 a worker whose per-cluster answer exceeds
+  `max_command_buffer_size` requeues it forever and stops serving (measured,
+  [docs/probes/](docs/probes/)) — and rendering the returned `AggregatedMetrics` with the pure
   [`prometheus` crate](crates/prometheus), prefixed by the controller's own health signals
   (`sozu_gw_controller_*`, incl. the last-successful-reconcile timestamp — the staleness alert).
   It is best-effort and orthogonal to routing: a socket

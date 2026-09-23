@@ -37,4 +37,5 @@ out of band are left alone.
 
 | Probe | Question |
 | ----- | -------- |
+| `metrics_probe` | What `QueryMetrics` returns with and without `no_clusters`, and whether the per-cluster query wedges the workers (pair it with a lowered `max_command_buffer_size`). It also runs against a local `sozu start`, with `SOZU_SOCK`/`PROBE_HTTP_*` pointed at it — see [Upgrading](../UPGRADING.md#metrics-exports-proxy-wide-sōzu-series-only) |
 | `rewrite_redirect_probe` | What `rewrite_host` / `rewrite_path` / `rewrite_port` actually do, on the forwarding path and under each redirect policy, plus whether a `Header` `set` replaces or appends — see [PROTOCOL.md §13](../../PROTOCOL.md) |
