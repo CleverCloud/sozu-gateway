@@ -2529,6 +2529,7 @@ dependencies = [
  "insta",
  "k8s-openapi",
  "regex",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

@@ -4,6 +4,37 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## `sozu.io/sticky-sessions` pins clients, with an opaque cookie
+
+The annotation never pinned anyone. Sōzu writes the backend's `sticky_id` into
+the `SOZUBALANCEID` cookie, or its backend id when there is none, but looks a
+returning cookie up by `sticky_id` alone; no backend carried one, so every
+request was load-balanced as usual and the cookie was re-issued whenever the
+backend changed. The cookie also exposed `<namespace>.<service>.<port>#<pod IP>:<port>`
+to every client. Each backend of a sticky Service now carries a 16-hex-character
+id, an HMAC of its backend id keyed by the Service UID: identical on every
+replica and across restarts, unique among the backends of one Service port, and
+opaque to a client, which never learns the UID. Pods joining or leaving leave
+the other backends' ids alone, barring a truncated-HMAC collision (odds around
+n²/2⁶⁵ per Service port), where the uniqueness rule can move one backend's id.
+
+The first reconcile after the upgrade re-sends every backend of a sticky
+Service once. Sōzu 2.2.1 applies it in place, in the main process and in each
+worker, keeping connections and retry state, so the change needs no Sōzu
+restart of its own; a chart upgrade that ships it rolls the gateway Pods
+anyway. The cookie follows more slowly: Sōzu issues it when it selects a
+backend, and a request on a connection whose backend connection is still open
+reuses that backend without selecting again, so such a client can keep, or be
+re-sent, its old cookie until that connection closes. The next request that
+does select a backend load-balances an old cookie, which no longer matches
+anything, and sets the new one. The id changes when the Service is deleted and
+recreated, which re-pins its clients the same way. Two sticky Services on
+different paths of one hostname share the single `SOZUBALANCEID` cookie
+(`Path=/`): switching between them can overwrite a client's pin and trigger
+fresh load balancing. Non-sticky Services are untouched.
+
+---
+
 ## Sōzu's buffer pool is sized to its connection limit
 
 Sōzu's config set `max_connections = 10_000` per worker but left `max_buffers`

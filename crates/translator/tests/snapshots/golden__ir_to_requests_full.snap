@@ -61,7 +61,7 @@ expression: "tr::ir_to_requests(&sample_ir())"
           },
           "port": 9090
         },
-        "sticky_id": null,
+        "sticky_id": "5f1c0a93d2e47b68",
         "load_balancing_parameters": {
           "weight": 5
         },

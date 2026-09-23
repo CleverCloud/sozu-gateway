@@ -115,7 +115,10 @@ fn backend_request(b: &ir::Backend) -> Request {
         backend_id: b.backend_id.clone(),
         // Always use the crate's conversion — never hand-pack the address.
         address: b.address.into(),
-        sticky_id: None,
+        // A sticky cluster's cookie selects a backend only through this id; see
+        // `ir::Backend::sticky_id`. A change is an in-place upsert in Sōzu, like
+        // a weight change.
+        sticky_id: b.sticky_id.clone(),
         load_balancing_parameters: b.weight.map(|weight| LoadBalancingParams { weight }),
         backup: None,
     })
@@ -516,9 +519,10 @@ fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
 /// Drop every `RemoveBackend` whose (cluster_id, backend_id, address) triple
 /// also appears as an `AddBackend` in the same batch.
 ///
-/// `ConfigState::diff` emits a *changed* backend (same key, e.g. a new weight)
-/// as Remove-then-Add, but `canonicalize` reorders backend adds (tier 3) before
-/// backend removes (tier 7), turning that pair into Add-then-Remove. Sōzu's
+/// `ConfigState::diff` emits a *changed* backend (same key, e.g. a new weight
+/// or sticky id) as Remove-then-Add, but `canonicalize` reorders backend adds
+/// (tier 3) before backend removes (tier 7), turning that pair into
+/// Add-then-Remove. Sōzu's
 /// `add_backend` is an upsert and `remove_backend` matches on
 /// (backend_id, address) only, so the trailing Remove would delete the backend
 /// the Add just updated — leaving the cluster short one live backend. The Add

@@ -30,6 +30,10 @@ regex = "1"
 # loaded with the ring provider; the pairing check against `tls.crt` is ours.
 # `ring` is what the lock already resolves rustls to (via kube): no aws-lc.
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# A sticky backend's cookie value is an HMAC of its backend id keyed by the
+# Service UID: stable wherever the same objects are read, opaque to clients.
+# The same `ring` the line above already builds.
+ring = { version = "0.17", default-features = false }
 # Every frontend hostname is parsed by Sōzu's router with
 # `idna::domain_to_ascii` (default features, UTS-46 with the compiled Unicode
 # data), and a failure rejects the whole `Add*Frontend` request. Pinned to the

@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
             backend_id: format!("{cluster_id}-0"),
             address: backend,
             weight: None,
+            sticky_id: None,
         }],
         frontends: vec![
             ir::Frontend {
