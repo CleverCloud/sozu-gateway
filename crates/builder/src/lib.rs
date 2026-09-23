@@ -278,15 +278,21 @@ pub enum Problem {
     FqdnEndpointsUnsupported {
         service: String,
     },
-    /// Another object already claims this exact route key (listener + host +
-    /// path + method) with a different effect. This route is dropped — never
-    /// silently applied on top — in favour of `winner` (a cluster id, or
-    /// `"<redirect>"` for a cluster-less redirect frontend). Applies to
-    /// Ingress and Gateway API routes alike.
+    /// Another route already holds the key Sōzu would store this one under
+    /// (listener + host + path + method, joined with `;`) with a different
+    /// match or effect. This route is dropped — never silently applied on top
+    /// — in favour of `winner` (a cluster id, or `"<redirect>"` for a
+    /// cluster-less redirect frontend). Applies to Ingress and Gateway API
+    /// routes alike.
     RouteCollision {
         hostname: String,
         path: String,
         winner: String,
+        /// `true` when the dropped match is *not* the winner's match — it
+        /// covers other requests and only Sōzu's `;`-joined key spelling
+        /// merges the two (a regex `/x;GET` against `/x` restricted to `GET`),
+        /// so those requests are served by nobody rather than by `winner`.
+        key_only: bool,
     },
     /// A user-supplied regex path (Ingress `ImplementationSpecific`, HTTPRoute
     /// `RegularExpression`) that Sōzu cannot compile. Sōzu compiles the
@@ -486,9 +492,20 @@ impl std::fmt::Display for Problem {
                 hostname,
                 path,
                 winner,
+                key_only: false,
             } => write!(
                 f,
                 "host+path {hostname}{path} is already served by {winner}; this route was dropped"
+            ),
+            Problem::RouteCollision {
+                hostname,
+                path,
+                winner,
+                key_only: true,
+            } => write!(
+                f,
+                "the match on host+path {hostname}{path} shares Sōzu's route key with the \
+                 frontend of {winner} and was dropped"
             ),
             Problem::InvalidPathRegex { path, reason } => write!(
                 f,
@@ -1304,14 +1321,15 @@ pub(crate) struct SourcedFrontend {
     pub(crate) source: FrontendSource,
 }
 
-/// Mirror of Sōzu's route key: the listener a frontend binds to (`tls` picks
-/// the HTTPS vs HTTP listener), hostname, path match, optional method. The
-/// target cluster is *not* part of the key.
-/// The route identity Sōzu keys on — the *compiled* path rule, not the IR
-/// spelling, so an `Exact` and a user regex that spell the same anchored
-/// pattern collide here exactly as they do in Sōzu, and the loser is reported
-/// rather than silently dropped downstream.
-type RouteKey = (bool, SocketAddr, String, ir::SozuPathRule, Option<String>);
+/// The route identity Sōzu keys on — the exact string its frontend map uses
+/// ([`ir::SozuRouteKey`]), built from the *compiled* path rule. So an `Exact`
+/// and a user regex that spell the same anchored pattern collide here exactly
+/// as they do in Sōzu, and so do two routes that differ as tuples but not as
+/// Sōzu's unescaped `;`-joined string (a regex `/x;GET` and a regex `/x` with
+/// `method: GET`). The loser is reported rather than left for Sōzu to refuse,
+/// which would fail every reconcile of the shared instance. The target cluster
+/// is *not* part of the key.
+type RouteKey = ir::SozuRouteKey;
 
 /// The raw path value of a match, for problem context.
 fn path_value(p: &ir::PathMatch) -> &str {
@@ -1321,13 +1339,19 @@ fn path_value(p: &ir::PathMatch) -> &str {
 }
 
 fn route_key(frontend: &ir::Frontend) -> RouteKey {
-    (
-        frontend.tls,
-        frontend.listener,
-        frontend.hostname.clone(),
-        frontend.path.sozu_rule(),
-        frontend.method.clone(),
-    )
+    frontend.sozu_route_key()
+}
+
+/// Whether two frontends sharing a [`RouteKey`] also *match* the same requests:
+/// same listener, hostname, compiled rule and method. Only then is the loser a
+/// true duplicate; otherwise it is a different route that Sōzu's key spelling
+/// cannot hold alongside the winner, and dropping it loses traffic.
+fn same_match(a: &ir::Frontend, b: &ir::Frontend) -> bool {
+    a.tls == b.tls
+        && a.listener == b.listener
+        && a.hostname == b.hostname
+        && a.path.sozu_rule() == b.path.sozu_rule()
+        && a.method == b.method
 }
 
 /// A source object's claim on a hostname, for arbitrating who wins a contested
@@ -1376,12 +1400,14 @@ fn claim_of(source: &FrontendSource, claims: &BTreeMap<OwnerIdent, OwnerClaim>) 
 /// HTTPRoute's own rules, in rule order). Backend names, redirects and rejection
 /// backends never determine the winner.
 ///
-/// Sōzu keys include protocol, listener, hostname, path kind/value and method,
-/// never the target cluster. Prefixes must already have their trailing slash
-/// canonicalised. Two frontends from the *same* object are legal input (an
-/// HTTPRoute's repeated matches, an Ingress's own rules) and stay benign;
-/// otherwise an identical effect stays benign and a different one is a collision
-/// on the losing object's own source and parentRef.
+/// Sōzu's key is the `;`-joined string of listener, hostname, path kind/value
+/// and method ([`RouteKey`]), never the target cluster. Prefixes must already
+/// have their trailing slash canonicalised. A repeated match from the *same*
+/// object is legal input (an HTTPRoute's repeated matches, an Ingress's own
+/// rules) and stays benign; so does an identical match with an identical
+/// effect from another object. Anything else sharing the key is a collision
+/// on the losing object's own source and parentRef — including two different
+/// matches of one object that only Sōzu's key spelling merges.
 fn resolve_frontend_collisions(
     frontends: Vec<SourcedFrontend>,
     claims: &BTreeMap<OwnerIdent, OwnerClaim>,
@@ -1414,12 +1440,17 @@ fn resolve_frontend_collisions(
     for (_, sf) in frontends {
         let index = winners[&route_key(&sf.frontend)];
         let winner = &kept[index];
-        // Two frontends from the same object are its own rules/matches,
-        // resolved by emission order — legal API input, never a collision.
-        if owner_ident(&sources[index]) == owner_ident(&sf.source) {
-            continue;
-        }
-        if winner.cluster_id == sf.frontend.cluster_id && winner.filters == sf.frontend.filters {
+        // A repeated match from the same object is its own rules/matches,
+        // resolved by emission order — legal API input, never a collision. An
+        // identical match with an identical effect is benign whoever owns it.
+        // A *different* match that only shares Sōzu's key spelling is always
+        // reported, even within one object: it is not served.
+        let same_match = same_match(winner, &sf.frontend);
+        if same_match
+            && (owner_ident(&sources[index]) == owner_ident(&sf.source)
+                || (winner.cluster_id == sf.frontend.cluster_id
+                    && winner.filters == sf.frontend.filters))
+        {
             continue;
         }
         collisions.push((
@@ -1431,6 +1462,7 @@ fn resolve_frontend_collisions(
                     .cluster_id
                     .clone()
                     .unwrap_or_else(|| "<redirect>".to_string()),
+                key_only: !same_match,
             },
         ));
     }

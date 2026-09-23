@@ -17,7 +17,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Ingress | `pathType: Prefix` | ✅ | |
 | Ingress | `pathType: Exact` | ✅ | compiled to an anchored whole-path regex, query string allowed (Sōzu's `Equals` misses `/get?x=1` and cannot be removed once added) |
 | Ingress | `pathType: ImplementationSpecific` | ✅ | mapped to a Sōzu regex, verbatim — Sōzu 2.2.1 does **not** anchor regexes and its next release anchors them at both ends, so write a full-span pattern; the apiserver requires the path to start with `/`, which `/{0}^/api(?:[/?](?-u:.*))?$` satisfies while still anchoring the start; a pattern Sōzu cannot compile is reported (`InvalidPathRegex`) and that path is skipped |
-| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by route key; a contested `host+path` is won by the oldest claimant (`creationTimestamp`, then `namespace/name`), Ingress and HTTPRoute alike, and the loser is reported with `RouteCollision` |
+| Ingress | Multiple Ingresses / hosts / paths | ✅ | de-duplicated by the key Sōzu stores a route under (`address;host;rule[;method]`, so a regex `/x;GET` and `/x` + `GET` contest one key); a contested key is won by the oldest claimant (`creationTimestamp`, then `namespace/name`), Ingress and HTTPRoute alike, and the loser is reported with `RouteCollision` |
 | Ingress | Rule without a host (catch-all) | ✅ | one plain-HTTP `*` frontend (Sōzu `DomainRule::Any`), emitted in `POST` position so it never shadows a specific-host route. No HTTPS frontend: a `*` is not covered by any certificate, so the host stays plain HTTP |
 | Ingress | `spec.defaultBackend` | ❌ | not routed; reported as a `DefaultBackendUnsupported` problem |
 | Ingress | `backend.resource` (non-Service backend) | ❌ | only Service backends |
@@ -48,7 +48,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `Gateway.spec.infrastructure.parametersRef` | ❌ | no parameter kinds are supported; an explicit reference rejects the Gateway with `Accepted: False` / `InvalidParameters`, without programming its routes or certificates |
 | Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare a port the chart's `exposure` table advertises for that protocol (default `80`/`443`); a mismatch is rejected with `PortUnavailable`. A Gateway with no accepted listeners reports `Accepted: False` / `ListenersNotValid`; a mix of accepted and rejected listeners reports `Accepted: True` / `ListenersNotValid`. An unresolved certificate affects `Programmed` and `ResolvedRefs`, without rejecting the Gateway. A listener `hostname` Sōzu cannot parse (IDNA) is rejected with `UnsupportedValue` and reported (`InvalidHostname`) |
 | Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent. A `RegularExpression` match Sōzu cannot compile is dropped and reported (`InvalidPathRegex`, a Warning Event), like an unsupported header/query match; the rule's other matches still program and the route stays `Accepted`. A hostname Sōzu cannot parse (IDNA) is dropped the same way (`InvalidHostname`). A route whose hostnames intersect none of the listener's is `Accepted: False` / `NoMatchingListenerHostname` and does not count toward `attachedRoutes` — it is attached to nothing |
-| Gateway API | HTTPRoute collision precedence | ✅ | among emitted frontends sharing one route key: oldest creation timestamp, then alphabetical `namespace/name`, then first rule. Skipped rules do not reserve a match. See [mixed Ingress collisions](UPGRADING.md#httproute-collision-precedence) |
+| Gateway API | HTTPRoute collision precedence | ✅ | among emitted frontends sharing one Sōzu route key (the `;`-joined listener, host, rule and method string): oldest creation timestamp, then alphabetical `namespace/name`, then first rule; two different matches of one route that share the key report the second as `RouteCollision`. Skipped rules do not reserve a match. See [mixed Ingress collisions](UPGRADING.md#httproute-collision-precedence) |
 | Gateway API | Separate Gateway addresses and routing tables | ✅ | `gatewayProvisioning.enabled` automatically provisions a Deployment and Service per owned Gateway; the default instance serves Ingress. Local routing controllers remain per Pod. See [UPGRADING](UPGRADING.md#automatic-gateway-instances) |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
 | Gateway API | `allowedRoutes.namespaces` — `from: All`/`Same` | ✅ | |
@@ -100,7 +100,11 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   compiles. An HTTPRoute `RegularExpression` value has no such constraint. A pattern that
   spells the same rule as a `Prefix`/`Exact` path on the same host is one route to Sōzu and is
   arbitrated as a collision; one that merely overlaps it is a second route, and which of the two
-  Sōzu 2.2.1 applies is the order they were added — undefined here, do not lean on it.
+  Sōzu 2.2.1 applies is the order they were added — undefined here, do not lean on it. Sōzu
+  appends the method to the complete pattern with a bare `;`, so a pattern ending in `;GET`
+  shares the key of that pattern *without* the `;GET` suffix restricted to `GET` (`/x;GET`
+  against `/x` + `GET`) and the two are arbitrated as a collision; write a literal `;` as
+  `[;]` to avoid that.
 - **API-gateway filters.** Header edits and redirects (scheme + status) are exposed through the IR
   and Gateway API HTTPRoute filters (Phase 3). A Gateway `set` deletes existing occurrences before
   appending its value; `add` appends and `remove` deletes, on requests and responses. Empty `set`

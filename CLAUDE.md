@@ -266,7 +266,11 @@ changes.
   on 2.2.1, `Equals` misses a query-bearing target and cannot be removed once added (the worker's
   rule equality has no `Equals` arm), so a removed `Exact` route kept serving. The compilation
   lives in `ir::PathMatch::sozu_rule` and both the builder's collision key and the translator use
-  it, so two spellings of one Sōzu rule are one route everywhere.
+  it, so two spellings of one Sōzu rule are one route everywhere. That collision key is
+  `ir::Frontend::sozu_route_key`, Sōzu's own unescaped `address;hostname;rule[;method]` string
+  (pinned to `RequestHttpFrontend::to_string()` by a translator test), never a tuple: a regex
+  `/x;GET` and `/x` + `GET` differ as tuples but are one key, and one unarbitrated clash fails
+  every reconcile.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **Tenant input Sōzu would reject is refused in the builder, with the calls Sōzu makes.** A

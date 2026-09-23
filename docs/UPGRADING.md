@@ -4,6 +4,28 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Routes are arbitrated on the key Sōzu stores them under
+
+Sōzu 2.2.1 stores an HTTP(S) route under the unescaped string
+`{address};{hostname};{rule}[;{method}]`, so a regex path containing `;` can
+spell another route's method: an HTTPRoute `RegularExpression` `/x;GET` with no
+method and a `/x` match restricted to `GET` on the same host are two routes to
+the gateway but one to Sōzu. Such a pair used to reach the translator
+unarbitrated and fail **every** reconcile of the shared instance — no route,
+endpoint or certificate change applied for any tenant — until one of the two
+was deleted. The collision identity is now that exact string: the oldest
+claimant wins, as for any `RouteCollision`, and the loser is reported
+(`Accepted: False`, reason `RouteCollision`, plus a Warning Event). Two
+matches of **one** route that only share the key are reported the same way,
+since the second is not served.
+
+Nothing to do unless such a pair exists; on upgrade the stuck instance
+converges and the loser shows up in its status. A regex that needs a literal
+`;` without clashing can write it `[;]` or `\x3B`. The IR and shadow format
+are unchanged.
+
+---
+
 ## Hostnames Sōzu cannot parse are refused per object
 
 Kubernetes checks a hostname against the RFC 1123 label grammar only; Sōzu also
