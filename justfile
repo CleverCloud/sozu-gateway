@@ -63,6 +63,29 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts.front=true > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts.connect=5000000000 > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.timeouts=5 > /dev/null 2>&1
+    # The buffer pool is always rendered — left to Sōzu it is 1000, about 500
+    # connections per worker — and a removed key (as --reuse-values from a
+    # pre-key release replays) still gets the chart default. A values-file
+    # number is a float, so a large one must not reach TOML as `1e+06`.
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml | grep -qx '    max_buffers = 20000'
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.maxBuffers=null | grep -qx '    max_buffers = 20000'
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set-json sozu.maxBuffers=1000000 | grep -qx '    max_buffers = 1000000'
+    # The per-IP default keeps Sōzu's unlimited 0, is rendered on presence, and
+    # an override reaches the file.
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml | grep -qx '    max_connections_per_ip = 0'
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.maxConnectionsPerIp=64 | grep -qx '    max_connections_per_ip = 64'
+    out="$(helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.maxConnectionsPerIp=null)" && ! printf '%s\n' "$out" | grep -q max_connections_per_ip
+    # A value Sōzu cannot parse fails the whole config file and the proxy's
+    # boot, so it must fail the render instead.
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxBuffers=1 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxBuffers=20k > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set-json sozu.maxBuffers=1.5 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=-1 > /dev/null 2>&1
+    # A string must fail on its type: coerced, "abc" would become 0 and pass
+    # the lower bound as "unlimited". The upper bound is the chart's sanity
+    # ceiling, well below what Sōzu's u64 fields could parse.
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=abc > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=4294967296 > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.serviceMonitor.enabled=true > /dev/null
     # Both sides of the metrics switch, asserted rather than merely rendered.
     helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN

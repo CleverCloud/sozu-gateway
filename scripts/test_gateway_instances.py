@@ -132,13 +132,18 @@ class GatewayProvisioning(unittest.TestCase):
         resources = self.render(gatewayProvisioning={"enabled": True}, replicaCount=3,
             image={"controller": {"repository": "registry.example/controller", "digest": "sha256:" + "a" * 64}},
             resources={"sozu": {"requests": {"cpu": "350m"}}, "controller": {"limits": {"memory": "256Mi"}}},
-            sozu={"workerCount": 4, "timeouts": {"connect": 8}, "drain": {"delaySeconds": 8, "gracePeriodSeconds": 45}},
+            sozu={"workerCount": 4, "timeouts": {"connect": 8}, "drain": {"delaySeconds": 8, "gracePeriodSeconds": 45},
+                  "maxBuffers": 50000, "maxConnectionsPerIp": 64},
             nodeSelector={"pool": "gateways"}, tolerations=[{"key": "gateway", "operator": "Exists"}])
         template = config(resources)
         parent = select(resources, "Deployment", "sozu")
         worker = template["deployment"]
         self.assertEqual(worker["spec"]["replicas"], 3)
         self.assertEqual(template["config_map"]["data"], select(resources, "ConfigMap", "sozu-sozu")["data"])
+        # A provisioned instance gets the release's connection ceiling, not Sōzu's own.
+        lines = template["config_map"]["data"]["config.toml"].splitlines()
+        self.assertIn("max_buffers = 50000", lines)
+        self.assertIn("max_connections_per_ip = 64", lines)
         parent_spec = parent["spec"]["template"]["spec"]
         worker_spec = worker["spec"]["template"]["spec"]
         for field in ["securityContext", "nodeSelector", "tolerations", "terminationGracePeriodSeconds", "serviceAccountName"]:

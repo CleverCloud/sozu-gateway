@@ -4,6 +4,46 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu's buffer pool is sized to its connection limit
+
+Sōzu's config set `max_connections = 10_000` per worker but left `max_buffers`
+at Sōzu's default of 1000, and every HTTP/1 connection or TCPRoute session
+holds two buffers for as long as it is open, idle keep-alives included. A
+worker therefore stopped near 500 connections: past that, a new connection was
+accepted and closed at once while the Pod stayed Ready. Measured on 2.2.1 with
+two workers: 1,000 idle keep-alive clients made every fresh request fail; at
+the new default, 6,000 were held and fresh requests were still served.
+
+The chart now renders `max_buffers` from **`sozu.maxBuffers`, default 20000**
+(twice the connection limit), so for HTTP/1 and TCP traffic `max_connections`
+is the limit that binds. HTTP/2 needs more: a connection holds one buffer plus
+two per stream slot it has allocated, and a finished stream's slot is kept for
+reuse, so a connection that once ran N concurrent streams can keep holding
+1 + 2N. Raise `sozu.maxBuffers` if many clients speak HTTP/2.
+
+**What it costs: memory under load.** A buffer is ~16 KiB, committed the first
+time it is used and kept until the worker restarts, so the buffer pool can now
+grow to `workerCount × maxBuffers × 16 KiB` — about 630 MiB with the defaults;
+the previous buffer-pool capacity was about 32 MiB. That is the pool's budget,
+not Sōzu's ceiling: TLS sessions and other connection state are allocated
+outside it and need headroom on top. Idle memory is unchanged. If
+`resources.sozu` carries a memory limit, size it against your real peak or
+lower `sozu.maxBuffers`; otherwise a connection surge becomes an OOM kill.
+
+Sōzu reads the value only at boot. The rendered config changes, so
+`helm upgrade` rolls the gateway Pods; `--reuse-values` from an older release
+gets the new default too.
+
+`sozu.maxConnectionsPerIp` is new as well: the default for the per-(Service
+port, client IP) cap that the `sozu.io/max-connections-per-ip` annotation
+overrides.
+It defaults to `0`, unlimited — Sōzu's own default — so nothing changes unless
+you set it. An HTTP request over the cap is answered `429`, which Sōzu counts
+per Service port: the default `/metrics` (proxy-wide series only) does not show
+these rejections; the access logs do, and so does `metrics.perCluster: true`.
+
+---
+
 ## `/metrics` exports proxy-wide Sōzu series only
 
 A scrape used to ask every Sōzu worker for all of its per-cluster and

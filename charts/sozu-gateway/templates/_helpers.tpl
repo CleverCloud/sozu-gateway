@@ -271,6 +271,62 @@ simply never happens.
 {{- end -}}
 
 {{/*
+Sōzu's buffer pool and its default per-source-IP connection cap, as top-level
+TOML keys.
+
+`max_buffers` is always rendered. Left to Sōzu it is 1000 per worker, and every
+HTTP/1 connection or TCPRoute session holds two buffers while it stays open, so
+each worker stalls near 500 connections although `max_connections` says 10,000.
+An absent or null key — which is also what `helm upgrade --reuse-values` from a
+release predating it replays — therefore renders the chart default rather than
+falling back to Sōzu's. Rendered through `int64` because a number read from a
+values file is a float, and `%v` spells 1000000 as `1e+06`, which is not TOML.
+
+`max_connections_per_ip` is rendered only when set, 0 included; absent or null
+leaves Sōzu's own default (0, unlimited).
+*/}}
+{{- define "sozu-gateway.connectionLimits" -}}
+{{- $sozu := .Values.sozu | default dict -}}
+{{- $buffers := get $sozu "maxBuffers" -}}
+{{- if or (not (hasKey $sozu "maxBuffers")) (kindIs "invalid" $buffers) -}}
+max_buffers = 20000
+{{- else -}}
+max_buffers = {{ int64 $buffers }}
+{{- end -}}
+{{- if and (hasKey $sozu "maxConnectionsPerIp") (not (kindIs "invalid" $sozu.maxConnectionsPerIp)) }}
+max_connections_per_ip = {{ int64 $sozu.maxConnectionsPerIp }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Reject, while rendering, a pool size or per-IP cap Sōzu could not use. Both are
+parsed as unsigned integers from the config file, and a value that does not
+parse fails the whole file: `sozu start` exits and the Pod crash-loops instead
+of serving. Validated on the raw value, not its `int64` coercion, which would
+turn "20k" into 0 and 1.5 into 1 and hide the mistake.
+*/}}
+{{- define "sozu-gateway.validateConnectionLimits" -}}
+{{- $sozu := .Values.sozu | default dict -}}
+{{- range $key, $min := dict "maxBuffers" 2 "maxConnectionsPerIp" 0 -}}
+  {{- $value := get $sozu $key -}}
+  {{- if and (hasKey $sozu $key) (not (kindIs "invalid" $value)) -}}
+    {{- if not (or (kindIs "int" $value) (kindIs "int64" $value) (kindIs "float64" $value)) -}}
+      {{- fail (printf "sozu.%s must be a whole number, got %v (%s)" $key $value (kindOf $value)) -}}
+    {{- end -}}
+    {{- if ne (float64 $value) (float64 (int64 $value)) -}}
+      {{- fail (printf "sozu.%s must be a whole number, got %v" $key $value) -}}
+    {{- end -}}
+    {{- if lt (int64 $value) (int64 $min) -}}
+      {{- fail (printf "sozu.%s must be at least %d, got %v%s" $key $min $value (ternary " — every connection holds two buffers; leave it empty for the chart default" "" (eq $key "maxBuffers"))) -}}
+    {{- end -}}
+    {{- if gt (int64 $value) 4294967295 -}}
+      {{- fail (printf "sozu.%s is %v, far past anything a worker could hold — likely a typo" $key $value) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The drain's effective settings, defaulted here rather than read straight from
 values: `helm upgrade --reuse-values` replays the previous release's values over
 the new chart and does not pick up keys the chart has since added, so an existing

@@ -93,6 +93,8 @@ The controller is configured entirely through the Helm chart
 | `metrics.enabled` | `true` | Serve Prometheus `/metrics` (pulled from Sōzu over the command socket) |
 | `metrics.perCluster` | `false` | Also export per-Service / per-backend Sōzu series. Can wedge Sōzu workers on a large gateway — [read this first](docs/UPGRADING.md#metrics-exports-proxy-wide-sōzu-series-only) |
 | `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor`; needs the Prometheus Operator |
+| `sozu.maxBuffers` | `20000` | Buffers per Sōzu worker: two per open HTTP/1 connection or TCP session, idle keep-alives included, so those reach each worker's 10,000-connection limit. An HTTP/2 connection holds one plus two per stream slot it has allocated, finished slots kept for reuse. Buffer-pool memory up to `maxBuffers × 16 KiB` per worker, with TLS and runtime headroom on top |
+| `sozu.maxConnectionsPerIp` | `0` | Default cap on simultaneous connections from one client IP to one Service port, per worker (`0` = unlimited); a Service overrides it with `sozu.io/max-connections-per-ip` |
 | `sozu.timeouts.connect` | `2` | Seconds Sōzu waits for a backend to accept, on the HTTP/HTTPS listeners. Below Sōzu's own 3 so a silent backend fails inside the proxy, where it is answered and logged |
 
 A few behaviours worth knowing:
