@@ -32,7 +32,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Routing | Hot reload — no proxy restart | ✅ | see [E2E-RESULTS.md](E2E-RESULTS.md) |
 | Routing | Idempotent reconcile + periodic resync | ✅ | |
 | Routing | Load-balancing algorithm selection | ✅ | Service annotation `sozu.io/load-balancing` (round-robin/random/least-loaded/power-of-two) |
-| Routing | Sticky sessions | ✅ | Service annotation `sozu.io/sticky-sessions: "true"` |
+| Routing | Sticky sessions | ✅ | Service annotation `sozu.io/sticky-sessions: "true"`; the `SOZUBALANCEID` cookie holds an opaque per-backend id |
 | Routing | Per-endpoint weights | 🟡 | IR + translator support it; no standard K8s per-endpoint weight to map from |
 | API gateway | Request/response header edits | ✅ | via HTTPRoute `RequestHeaderModifier`/`ResponseHeaderModifier`: `set` replaces, `add` appends, `remove` deletes; empty `set`/`add` values are rejected |
 | API gateway | URL rewrite — `ReplaceFullPath` / `hostname` | 🟡 | **measured expressible** on Sōzu 2.2.0 ([E2E-RESULTS §5c](E2E-RESULTS.md)), not wired: reported as `FilterUnsupported`. Wiring it must first refuse a literal `$` (Sōzu rejects the frontend outright) and answer for the query string, which a path rewrite drops |
@@ -134,7 +134,7 @@ Service, so both an Ingress and a Gateway route to that Service share one config
 | Annotation | Values | Default | Effect |
 | ---------- | ------ | ------- | ------ |
 | `sozu.io/load-balancing` | `round-robin`, `random`, `least-loaded`, `power-of-two` | `round-robin` | Sōzu load-balancing algorithm for the cluster. Unknown values fall back to the default. |
-| `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via a Sōzu sticky cookie. |
+| `sozu.io/sticky-sessions` | `"true"` / `"false"` | `"false"` | Pin a client to one backend via Sōzu's `SOZUBALANCEID` cookie. Its value is an opaque id, the same on every gateway replica; a client whose backend is gone is load-balanced and re-pinned. Two sticky Services on different paths of one host share the cookie (`Path=/`) and can overwrite each other's pin. |
 | `sozu.io/max-connections-per-ip` | integer | `sozu.maxConnectionsPerIp` (`0`, unlimited) | Cap simultaneous connections from one source IP to each port of this Service. Over the cap → `429`. A non-numeric value is ignored. Rejections are counted per Service port: they show in `/metrics` only with `metrics.perCluster: true`, or in the access logs. |
 | `sozu.io/retry-after` | integer (seconds) | `60` (Sōzu's default) | `Retry-After` header sent on that `429`; `0` omits it. |
 

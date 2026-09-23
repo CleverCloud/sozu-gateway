@@ -525,9 +525,13 @@ fn a_valid_regex_path_reaches_the_ir_unchanged() {
 
 /// `web` Service carrying the load-balancing + sticky-session annotations.
 fn annotated_service(lb: &str, sticky: &str) -> Service {
+    annotated_service_with_uid(lb, sticky, "22222222-2222-2222-2222-222222222222")
+}
+
+fn annotated_service_with_uid(lb: &str, sticky: &str, uid: &str) -> Service {
     from_json(json!({
         "apiVersion": "v1", "kind": "Service",
-        "metadata": { "name": "web", "namespace": "demo",
+        "metadata": { "name": "web", "namespace": "demo", "uid": uid,
             "annotations": {
                 "sozu.io/load-balancing": lb,
                 "sozu.io/sticky-sessions": sticky,
@@ -552,6 +556,179 @@ fn service_annotations_set_cluster_lb_and_sticky() {
         ir::LbAlgorithm::LeastLoaded
     ));
     assert!(out.ir.clusters[0].sticky_session);
+}
+
+fn sticky_inputs(service: Service, slice: EndpointSlice) -> Inputs {
+    Inputs {
+        ingresses: arcs(vec![ingress_tls()]),
+        services: arcs(vec![service]),
+        endpointslices: arcs(vec![slice]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    }
+}
+
+/// Backend id → sticky id.
+fn sticky_ids_of(out: &sozu_gw_builder::BuildOutput) -> BTreeMap<String, Option<String>> {
+    out.ir
+        .backends
+        .iter()
+        .map(|b| (b.backend_id.clone(), b.sticky_id.clone()))
+        .collect()
+}
+
+#[test]
+fn sticky_cluster_backends_carry_distinct_opaque_sticky_ids() {
+    // Sōzu finds a sticky backend only by `sticky_id`; without one the cookie
+    // it hands out never selects anything. The value reaches every client, so
+    // it must not spell the namespace, Service or pod address.
+    let out = build(
+        &BuildConfig::default(),
+        &sticky_inputs(annotated_service("round-robin", "true"), web_slice()),
+    );
+    assert_eq!(out.ir.backends.len(), 2);
+    let ids: Vec<String> = out
+        .ir
+        .backends
+        .iter()
+        .map(|b| b.sticky_id.clone().expect("a sticky cluster's backend"))
+        .collect();
+    for (id, backend) in ids.iter().zip(&out.ir.backends) {
+        assert_eq!(id.len(), 16, "{id:?}");
+        assert!(id.bytes().all(|c| c.is_ascii_hexdigit()), "{id:?}");
+        let ip = backend.address.ip().to_string();
+        for leak in ["demo", "web", ip.as_str()] {
+            assert!(!id.contains(leak), "{id:?} leaks {leak:?}");
+        }
+    }
+    assert_ne!(ids[0], ids[1], "sticky ids must be unique in a cluster");
+}
+
+#[test]
+fn sticky_ids_are_stable_across_builds_and_endpoint_changes() {
+    // A client's cookie must keep naming its backend across reconciles,
+    // controller restarts and replicas (all rebuild from the same objects),
+    // and when another pod joins or leaves.
+    let service = || annotated_service("round-robin", "true");
+    let first = sticky_ids_of(&build(
+        &BuildConfig::default(),
+        &sticky_inputs(service(), web_slice()),
+    ));
+    let again = sticky_ids_of(&build(
+        &BuildConfig::default(),
+        &sticky_inputs(service(), web_slice()),
+    ));
+    assert_eq!(first, again);
+
+    let mut scaled = web_slice();
+    scaled
+        .endpoints
+        .get_or_insert_with(Vec::new)
+        .push(from_json(
+            json!({ "addresses": ["10.244.0.9"], "conditions": { "ready": true } }),
+        ));
+    let scaled = sticky_ids_of(&build(
+        &BuildConfig::default(),
+        &sticky_inputs(service(), scaled),
+    ));
+    assert_eq!(scaled.len(), 3);
+    for (backend, id) in &first {
+        assert_eq!(scaled.get(backend), Some(id), "{backend} was re-pinned");
+    }
+}
+
+#[test]
+fn sticky_ids_survive_earlier_addresses_joining_leaving_and_reordering() {
+    // The builder hands backends to the id derivation sorted by address, so
+    // the cases that could shift ids are the ones at the front of that order:
+    // a pod sorting first joins, the first pod leaves, the slice is reordered.
+    let service = || annotated_service("round-robin", "true");
+    let ids = |slice: EndpointSlice| {
+        sticky_ids_of(&build(
+            &BuildConfig::default(),
+            &sticky_inputs(service(), slice),
+        ))
+    };
+    let base = ids(web_slice());
+    let endpoints =
+        |slice: &mut EndpointSlice| slice.endpoints.get_or_insert_with(Vec::new).clone();
+
+    let mut joined = web_slice();
+    let mut list = endpoints(&mut joined);
+    list.insert(
+        0,
+        from_json(json!({ "addresses": ["10.244.0.1"], "conditions": { "ready": true } })),
+    );
+    joined.endpoints = Some(list);
+
+    let mut left = web_slice();
+    let mut list = endpoints(&mut left);
+    list.remove(0);
+    left.endpoints = Some(list);
+
+    let mut reordered = web_slice();
+    let mut list = endpoints(&mut reordered);
+    list.reverse();
+    reordered.endpoints = Some(list);
+
+    let joined = ids(joined);
+    let left = ids(left);
+    assert_eq!(joined.len(), 3);
+    assert_eq!(left.len(), 1);
+    assert_eq!(ids(reordered), base);
+    for variant in [&joined, &left] {
+        for (backend, id) in variant {
+            if let Some(before) = base.get(backend) {
+                assert_eq!(id, before, "{backend} was re-pinned");
+            }
+        }
+    }
+}
+
+#[test]
+fn sticky_ids_are_keyed_by_the_service_uid() {
+    // Unkeyed, a hash of `<ns>.<svc>.<port>#<ip>:<port>` is reversible by
+    // enumerating the pod CIDR. The Service UID never reaches a client.
+    let a = sticky_ids_of(&build(
+        &BuildConfig::default(),
+        &sticky_inputs(
+            annotated_service_with_uid(
+                "round-robin",
+                "true",
+                "aaaaaaaa-0000-0000-0000-000000000000",
+            ),
+            web_slice(),
+        ),
+    ));
+    let b = sticky_ids_of(&build(
+        &BuildConfig::default(),
+        &sticky_inputs(
+            annotated_service_with_uid(
+                "round-robin",
+                "true",
+                "bbbbbbbb-0000-0000-0000-000000000000",
+            ),
+            web_slice(),
+        ),
+    ));
+    assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+    for (backend, id) in &a {
+        assert_ne!(b.get(backend), Some(id), "{backend}");
+    }
+}
+
+#[test]
+fn non_sticky_cluster_backends_have_no_sticky_id() {
+    // Anything else would re-send every backend of every installation on
+    // upgrade for no behaviour change.
+    for service in [annotated_service("round-robin", "false"), web_service()] {
+        let out = build(
+            &BuildConfig::default(),
+            &sticky_inputs(service, web_slice()),
+        );
+        assert!(!out.ir.backends.is_empty());
+        assert!(out.ir.backends.iter().all(|b| b.sticky_id.is_none()));
+    }
 }
 
 #[test]

@@ -150,6 +150,15 @@ pub struct Backend {
     pub address: SocketAddr,
     /// Optional weight; `None` means equal weighting (Sōzu default).
     pub weight: Option<i32>,
+    /// Value of Sōzu's sticky-session cookie for this backend; set only when
+    /// the cluster is sticky. Sōzu writes `sticky_id` (or, when absent, the
+    /// `backend_id`) into the cookie but finds a backend only by `sticky_id`,
+    /// so a sticky cluster needs it for a returning client to land anywhere.
+    /// It must be opaque (the cookie is client-visible) and stable across
+    /// reconciles, restarts and replicas. Skipped when `None`, so a
+    /// non-sticky backend serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_id: Option<String>,
 }
 
 /// A route: hostname + path (+ method) → cluster, on the HTTP or HTTPS listener.

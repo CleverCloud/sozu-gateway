@@ -73,6 +73,15 @@ fn backend(cluster_id: &str, addr_s: &str, weight: Option<i32>) -> ir::Backend {
         backend_id: format!("{cluster_id}-{}", addr_s.replace([':', '.'], "-")),
         address: addr(addr_s),
         weight,
+        sticky_id: None,
+    }
+}
+
+/// A backend of a sticky cluster, carrying the id the builder derives.
+fn sticky_backend(cluster_id: &str, addr_s: &str, weight: Option<i32>, id: &str) -> ir::Backend {
+    ir::Backend {
+        sticky_id: Some(id.to_string()),
+        ..backend(cluster_id, addr_s, weight)
     }
 }
 
@@ -109,7 +118,7 @@ fn sample_ir() -> ir::Ir {
         backends: vec![
             backend("app", "10.0.0.1:8080", None),
             backend("app", "10.0.0.2:8080", None),
-            backend("api", "10.0.1.1:9090", Some(5)),
+            sticky_backend("api", "10.0.1.1:9090", Some(5), "5f1c0a93d2e47b68"),
         ],
         frontends: vec![
             frontend(
@@ -600,6 +609,81 @@ fn reconcile_weight_change_keeps_backend_alive() {
         Some(LoadBalancingParams { weight: 7 }),
         "the surviving backend must carry the new weight"
     );
+}
+
+#[test]
+fn sticky_backends_carry_their_sticky_id_and_others_do_not() {
+    let reqs = tr::ir_to_requests(&sample_ir());
+    let sticky_ids: Vec<(&str, Option<&str>)> = reqs
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddBackend(b)) => {
+                Some((b.cluster_id.as_str(), b.sticky_id.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sticky_ids,
+        [
+            ("api", Some("5f1c0a93d2e47b68")),
+            ("app", None),
+            ("app", None)
+        ],
+        "{dump}",
+        dump = dump(&reqs)
+    );
+}
+
+#[test]
+fn reconcile_from_a_shadow_without_sticky_ids_upserts_the_sticky_backends() {
+    // A shadow written before backends carried a sticky id reads back with
+    // none, which is also what Sōzu holds: the diff must re-send exactly the
+    // sticky cluster's backends so an existing install converges in place,
+    // with no RemoveBackend (it would delete the backend the upsert updates).
+    let mut old: serde_json::Value = serde_json::to_value(sample_ir()).expect("serialise");
+    for backend in old["backends"].as_array_mut().expect("backends") {
+        backend
+            .as_object_mut()
+            .expect("backend object")
+            .remove("sticky_id");
+    }
+    let old: ir::Ir = serde_json::from_value(old).expect("a pre-sticky-id shadow still loads");
+    assert!(old.backends.iter().all(|b| b.sticky_id.is_none()));
+
+    let reqs = tr::reconcile(&old, &sample_ir()).expect("reconcile");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "only the sticky backend changes: {}",
+        dump(&reqs)
+    );
+    assert!(
+        matches!(
+            &reqs[0].request_type,
+            Some(RequestType::AddBackend(b))
+                if b.cluster_id == "api" && b.sticky_id.as_deref() == Some("5f1c0a93d2e47b68")
+        ),
+        "{dump}",
+        dump = dump(&reqs)
+    );
+
+    // Replayed onto Sōzu's own state model: the backend survives, now sticky.
+    let mut state = ConfigState::new();
+    for req in tr::ir_to_requests(&old).iter().chain(reqs.iter()) {
+        state.dispatch(req).expect("dispatch");
+    }
+    let api = state.backends.get("api").expect("api cluster backends");
+    assert_eq!(api.len(), 1);
+    assert_eq!(api[0].sticky_id.as_deref(), Some("5f1c0a93d2e47b68"));
+
+    // Dropping the id again (annotation removed) is the same in-place upsert.
+    let reqs = tr::reconcile(&sample_ir(), &old).expect("reconcile");
+    assert_eq!(reqs.len(), 1, "{}", dump(&reqs));
+    assert!(matches!(
+        &reqs[0].request_type,
+        Some(RequestType::AddBackend(b)) if b.sticky_id.is_none()
+    ));
 }
 
 #[test]

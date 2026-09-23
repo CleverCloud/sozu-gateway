@@ -138,6 +138,14 @@ address:    SocketAddress    // REQUIRED — the POD IP:port
 sticky_id:  Option<String>, load_balancing_parameters: Option<LoadBalancingParams>, backup: Option<bool>
 // RemoveBackend = { cluster_id, backend_id, address } (all required)
 ```
+On a `sticky_session` cluster the `SOZUBALANCEID` cookie is set to
+`sticky_id.unwrap_or(backend_id)`, but a returning cookie is matched against
+`sticky_id` only, so without one it never selects a backend. ✅ Measured on
+2.2.1 (two backends, two workers): with `sticky_id: None` ten replays of the
+cookie alternated between both backends; after an `AddBackend` upsert setting
+`sticky_id` on the *existing* backends, every replay reached the pinned one and
+the cookie was no longer re-issued. The upsert updates `sticky_id` in place in
+the main process's state and in each worker.
 
 ### `PathRule`
 ```rust

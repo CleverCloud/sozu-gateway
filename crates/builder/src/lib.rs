@@ -1280,16 +1280,92 @@ pub(crate) fn add_service_route(
         max_connections_per_ip: s.max_connections_per_ip,
         retry_after: s.retry_after,
     });
-    for addr in &addrs {
-        let backend_id = format!("{cluster_id}#{addr}");
+    let backend_ids: Vec<String> = addrs
+        .iter()
+        .map(|addr| format!("{cluster_id}#{addr}"))
+        .collect();
+    // Keyed on the cluster's own setting, not this call's: the first reference
+    // to a cluster fixes it (`or_insert` above), and a sticky cluster needs a
+    // sticky id on every backend.
+    let sticky = clusters
+        .get(&cluster_id)
+        .is_some_and(|cluster| cluster.sticky_session);
+    let service_uid = svc.and_then(|s| s.metadata.uid.as_deref()).unwrap_or("");
+    let mut sticky_ids = sticky
+        .then(|| sticky_ids(service_uid, &backend_ids))
+        .map(Vec::into_iter);
+    for (addr, backend_id) in addrs.iter().zip(backend_ids) {
+        let sticky_id = sticky_ids.as_mut().and_then(Iterator::next);
         backends.entry(backend_id.clone()).or_insert(ir::Backend {
             cluster_id: cluster_id.clone(),
             backend_id,
             address: *addr,
             weight: None,
+            sticky_id,
         });
     }
     Ok((cluster_id, !addrs.is_empty()))
+}
+
+/// Bytes of the HMAC kept in a sticky id (16 hex characters).
+const STICKY_ID_BYTES: usize = 8;
+
+/// Sticky-session cookie values for one cluster's backends, in input order.
+///
+/// Sōzu hands the value to every client of a sticky cluster, so it must not be
+/// the backend id, which spells out namespace, Service and pod IP. It is an
+/// HMAC-SHA256 of the backend id keyed by the Service UID: every controller
+/// replica and every restart derives the same value from the same objects — a
+/// client pinned by one replica stays pinned through another — while a client,
+/// who never sees the UID, cannot enumerate pod IPs against it. A recreated
+/// Service gets a new UID and so new cookies, which only re-pins its clients
+/// once.
+///
+/// Values are unique within the call: a truncated HMAC can collide, and Sōzu
+/// resolves a cookie to the *first* backend carrying it, so a duplicate would
+/// silently merge two backends' sessions. On a clash the later backend (input
+/// order, which the caller sorts by address) re-derives with a counter. That
+/// makes an id depend on its colliding peers: a newcomer sorting first takes an
+/// existing backend's id, and removing a backend that won a clash hands its id
+/// back to the one that lost it, re-pinning that backend's clients either way.
+/// At 64 bits a clash is odds of about n²/2⁶⁵ per cluster, so that cost is
+/// theoretical; without a clash, pods joining or leaving move no other id.
+fn sticky_ids(service_uid: &str, backend_ids: &[String]) -> Vec<String> {
+    unique_truncated_hmacs(service_uid, backend_ids, STICKY_ID_BYTES)
+}
+
+/// [`sticky_ids`] at any truncation, so a test can force collisions. `bytes`
+/// must leave room for every input: 256^bytes distinct values.
+fn unique_truncated_hmacs(key: &str, backend_ids: &[String], bytes: usize) -> Vec<String> {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key.as_bytes());
+    let mut taken: BTreeSet<String> = BTreeSet::new();
+    backend_ids
+        .iter()
+        .map(|backend_id| {
+            let mut attempt: u32 = 0;
+            loop {
+                let mut ctx = ring::hmac::Context::with_key(&key);
+                ctx.update(backend_id.as_bytes());
+                if attempt > 0 {
+                    // NUL never occurs in a backend id: no retry input can
+                    // spell another backend's first one.
+                    ctx.update(&[0]);
+                    ctx.update(&attempt.to_be_bytes());
+                }
+                let tag = ctx.sign();
+                let candidate: String = tag
+                    .as_ref()
+                    .iter()
+                    .take(bytes)
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                if taken.insert(candidate.clone()) {
+                    break candidate;
+                }
+                attempt += 1;
+            }
+        })
+        .collect()
 }
 
 /// Where an HTTP(S) frontend came from, so a route-key collision can be
@@ -1842,6 +1918,108 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         gateways: gw.gateways,
         routes: gw.routes,
         referenced_services: referenced,
+    }
+}
+
+#[cfg(test)]
+mod sticky_id_tests {
+    use super::{sticky_ids, unique_truncated_hmacs};
+    use std::collections::BTreeSet;
+
+    fn backend_ids(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("demo.web.80#10.244.{}.{}:8080", i / 256, i % 256))
+            .collect()
+    }
+
+    #[test]
+    fn colliding_truncations_are_redrawn_until_unique() {
+        // One byte leaves 256 values, so 200 backends collide many times over:
+        // every clash must be re-derived, never handed out twice.
+        let ids = unique_truncated_hmacs("uid", &backend_ids(200), 1);
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 200);
+        assert!(ids.iter().all(|id| id.len() == 2));
+        // ...and deterministically, so every replica redraws alike.
+        assert_eq!(ids, unique_truncated_hmacs("uid", &backend_ids(200), 1));
+    }
+
+    /// `10.244.<a>.<b>` in the backend-id format, so a test can order by
+    /// address exactly as `add_service_route` sorts its input.
+    fn backend_id(a: u8, b: u8) -> String {
+        format!("demo.web.80#10.244.{a}.{b}:8080")
+    }
+
+    /// The id a backend draws when nothing else in the cluster holds it.
+    fn first_draw(backend_id: &str, bytes: usize) -> String {
+        unique_truncated_hmacs("uid", &[backend_id.to_owned()], bytes).remove(0)
+    }
+
+    /// A backend and one sorting before it whose first draws clash at one
+    /// byte. The HMAC is fixed, so the search always finds the same pair.
+    fn colliding_pair() -> (String, String) {
+        let later = backend_id(200, 0);
+        let taken = first_draw(&later, 1);
+        let earlier = (0..200u8)
+            .flat_map(|a| (0..=255u8).map(move |b| backend_id(a, b)))
+            .find(|id| first_draw(id, 1) == taken)
+            .expect("256 values cannot dodge 51200 draws");
+        (earlier, later)
+    }
+
+    #[test]
+    fn a_colliding_newcomer_that_sorts_first_takes_the_existing_id() {
+        // Characterises the uniqueness rule under membership change: the
+        // input order decides who keeps a clashing value, not seniority.
+        let (earlier, later) = colliding_pair();
+        let alone = unique_truncated_hmacs("uid", std::slice::from_ref(&later), 1);
+        let both = unique_truncated_hmacs("uid", &[earlier.clone(), later.clone()], 1);
+        assert_eq!(both[0], alone[0], "the newcomer draws the clashing value");
+        assert_ne!(both[1], alone[0], "the existing backend is redrawn");
+        // Removing the winner hands the value back to the backend it displaced.
+        assert_eq!(unique_truncated_hmacs("uid", &[later], 1), alone);
+    }
+
+    #[test]
+    fn a_colliding_newcomer_that_sorts_last_is_the_one_redrawn() {
+        let (earlier, later) = colliding_pair();
+        let alone = unique_truncated_hmacs("uid", std::slice::from_ref(&earlier), 1);
+        let both = unique_truncated_hmacs("uid", &[earlier.clone(), later.clone()], 1);
+        assert_eq!(both[0], alone[0], "the existing backend keeps its id");
+        assert_ne!(both[1], alone[0]);
+        assert_eq!(unique_truncated_hmacs("uid", &[earlier], 1), alone);
+    }
+
+    #[test]
+    fn without_a_clash_membership_and_order_move_no_id() {
+        let ids = backend_ids(20);
+        let by_backend = |input: &[String]| {
+            input
+                .iter()
+                .cloned()
+                .zip(sticky_ids("uid", input))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let base = by_backend(&ids);
+        // An earlier address joins, the earliest leaves, the input is permuted.
+        let mut joined = vec!["demo.web.80#10.243.0.1:8080".to_owned()];
+        joined.extend(ids.iter().cloned());
+        let left = ids[1..].to_vec();
+        let reversed: Vec<String> = ids.iter().rev().cloned().collect();
+        for variant in [&joined, &left, &reversed] {
+            for (backend, id) in by_backend(variant) {
+                if let Some(before) = base.get(&backend) {
+                    assert_eq!(&id, before, "{backend} was re-pinned");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_ids_are_sixteen_hex_characters() {
+        let ids = sticky_ids("uid", &backend_ids(3));
+        assert!(ids
+            .iter()
+            .all(|id| id.len() == 16 && id.bytes().all(|c| c.is_ascii_hexdigit())));
     }
 }
 
