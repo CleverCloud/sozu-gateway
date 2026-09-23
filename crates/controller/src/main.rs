@@ -141,6 +141,16 @@ struct Args {
     /// metrics over the command socket on each scrape). Unset disables it.
     #[arg(long, env = "SOZU_GW_METRICS_LISTEN")]
     metrics_listen: Option<SocketAddr>,
+    /// Also export per-cluster and per-backend Sōzu metrics. Off by default:
+    /// each Sōzu worker then answers a scrape with every cluster's and
+    /// backend's metrics in one message, and a message larger than Sōzu's
+    /// `max_command_buffer_size` (the chart sets 1 638 400 bytes) wedges that
+    /// worker for good on Sōzu 2.2.1 — no traffic, no commands, green probes.
+    /// It grows with the clusters that have seen traffic: a local run with
+    /// the chart's buffers wedged between 2 000 and 2 500, an order of
+    /// magnitude rather than a limit. See docs/UPGRADING.md.
+    #[arg(long, env = "SOZU_GW_METRICS_PER_CLUSTER")]
+    metrics_per_cluster: bool,
     /// File on the shared volume where the last-applied state is persisted, so a
     /// controller-only restart resumes from it (and prunes orphaned Sōzu state)
     /// instead of re-applying everything. Empty disables persistence.
@@ -368,6 +378,15 @@ where
     } else {
         Ok(())
     }
+}
+
+/// The `/metrics` endpoint the flags ask for, if any. Per-cluster series stay
+/// off unless `--metrics-per-cluster` is given: they can wedge Sōzu's workers.
+fn metrics_endpoint(args: &Args) -> Option<metrics::Endpoint> {
+    args.metrics_listen.map(|addr| metrics::Endpoint {
+        addr,
+        per_cluster: args.metrics_per_cluster,
+    })
 }
 
 /// Refuse a `--watch-timeout-secs` kube-rs would refuse on every watch start,
@@ -1107,8 +1126,8 @@ async fn main() -> Result<()> {
     // Self-metrics are recorded unconditionally (cheap atomics); the endpoint
     // below only decides whether anyone can scrape them.
     let self_metrics = Arc::new(metrics::SelfMetrics::default());
-    if let Some(addr) = args.metrics_listen {
-        metrics::spawn(addr, agent.clone(), self_metrics.clone());
+    if let Some(endpoint) = metrics_endpoint(&args) {
+        metrics::spawn(endpoint, agent.clone(), self_metrics.clone());
     }
 
     // Ordinary changes coalesce for the debounce period. EndpointSlice
@@ -1645,6 +1664,66 @@ mod tests {
             "uid"
         ])
         .is_ok());
+    }
+
+    /// Per-cluster metrics can wedge Sōzu workers, so they are strictly opt-in,
+    /// and the chart's `SOZU_GW_METRICS_PER_CLUSTER` must reach the same flag.
+    /// The env binding is read from the parser's definition rather than by
+    /// setting the variable: `set_var` is unsound while sibling tests parse
+    /// arguments (and thus call `getenv`) on other threads.
+    #[test]
+    fn per_cluster_metrics_are_off_unless_asked_for() {
+        use clap::CommandFactory;
+
+        assert!(
+            !Args::try_parse_from(["controller"])
+                .unwrap()
+                .metrics_per_cluster
+        );
+        assert!(
+            Args::try_parse_from(["controller", "--metrics-per-cluster"])
+                .unwrap()
+                .metrics_per_cluster
+        );
+        let command = Args::command();
+        let arg = command
+            .get_arguments()
+            .find(|a| a.get_id() == "metrics_per_cluster")
+            .expect("the metrics_per_cluster argument exists");
+        assert_eq!(
+            arg.get_env(),
+            Some(std::ffi::OsStr::new("SOZU_GW_METRICS_PER_CLUSTER"))
+        );
+    }
+
+    /// What `main` starts the metrics server with, from parsed flags: the
+    /// default must reach the server as process-level only. The server's side,
+    /// from that switch to the query on the socket, is pinned in `metrics`.
+    #[test]
+    fn metrics_endpoint_carries_the_parsed_switch() {
+        let addr: SocketAddr = "127.0.0.1:9102".parse().unwrap();
+        let endpoint = |argv: &[&str]| metrics_endpoint(&Args::try_parse_from(argv).unwrap());
+
+        assert_eq!(endpoint(&["controller"]), None);
+        assert_eq!(
+            endpoint(&["controller", "--metrics-listen", "127.0.0.1:9102"]),
+            Some(metrics::Endpoint {
+                addr,
+                per_cluster: false
+            })
+        );
+        assert_eq!(
+            endpoint(&[
+                "controller",
+                "--metrics-listen",
+                "127.0.0.1:9102",
+                "--metrics-per-cluster"
+            ]),
+            Some(metrics::Endpoint {
+                addr,
+                per_cluster: true
+            })
+        );
     }
 
     #[tokio::test]

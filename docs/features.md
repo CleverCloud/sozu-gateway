@@ -67,6 +67,8 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Protocols | TCP / UDP ingress (L4) | ✅ | `TCPRoute`/`UDPRoute` only (the `tcp/udp-services` ConfigMaps are gone); one port → one Service, no host routing; ports > 1024 (unprivileged), and never 443 — see below |
 | Operations | Exposure via `Service type=LoadBalancer` | ✅ | |
 | Operations | Structured logs (`tracing`) | ✅ | |
+| Operations | Prometheus `/metrics` (controller + proxy-wide Sōzu series) | ✅ | pulled over the command socket on each scrape; `metrics.enabled` |
+| Operations | Per-Service / per-backend Sōzu metrics | ✅ | opt-in only, `metrics.perCluster`: on Sōzu 2.2.1 a scrape can wedge the workers of a large gateway, see [Upgrading](UPGRADING.md#metrics-exports-proxy-wide-sōzu-series-only) |
 | Operations | Gateway API status write-back (loop-safe) | ✅ | Accepted/Programmed/ResolvedRefs |
 | Operations | Ingress `status` write-back (loadBalancer) | ✅ | publishes the gateway LB address; enable with `rbac.allowStatusWrites` |
 | Operations | Dedicated `/healthz` readiness gate | ✅ | `/readyz` goes green only after the first reconcile, and drops again if Sōzu restarts with no routes until the re-apply succeeds, so a Pod is in the Service only while it can actually serve |

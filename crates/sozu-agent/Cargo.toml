@@ -46,3 +46,9 @@ path = "examples/probe.rs"
 [[example]]
 name = "agent_smoke"
 path = "examples/agent_smoke.rs"
+
+# Measurement probe: what QueryMetrics returns with and without no_clusters,
+# and whether the per-cluster query wedges the workers.
+[[example]]
+name = "metrics_probe"
+path = "examples/metrics_probe.rs"

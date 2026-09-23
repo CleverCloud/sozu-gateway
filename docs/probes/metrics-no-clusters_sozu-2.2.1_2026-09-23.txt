@@ -1,0 +1,136 @@
+metrics_probe against a local Sozu 2.2.1 release binary (tag 2.2.1, cd02310), 2 workers,
+default metrics detail, one HTTP listener; the probe's own backend on loopback.
+
+Run 1: the chart's buffers (command_buffer_size 163_840, max_command_buffer_size 1_638_400),
+PROBE_CLUSTERS=20 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1
+
+[setup] programmed 20 clusters + 1 with a refusing backend
+[traffic] before queries: 120/120 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 344.024µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3356
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 1.215358ms
+[full] clusters=21 backends=0 workers=0 json_bytes=37992
+[full]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (23): {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[traffic] after full query: 10/10 x 200
+
+Run 2: buffers lowered to scale the wedge down (command_buffer_size 16_384,
+max_command_buffer_size 40_960), PROBE_CLUSTERS=80 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1.
+Afterwards both workers sat at ~75% CPU each and served nothing until killed. With
+logging on, Sozu logs "Could not write message QueryMetrics-... on the channel: message
+(56889 bytes) too large" on every requeue: 1.6 million lines in about 20 s in an earlier
+run of the same case.
+
+[setup] programmed 80 clusters + 1 with a refusing backend
+[traffic] before queries: 480/480 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 352.035µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3362
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 10.010963036s
+[full] clusters=0 backends=0 workers=0 json_bytes=296
+[full]   proxy (0): {}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (0): {}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {}
+[traffic] after full query: 0/10 x 200
+
+Runs 3-5: the chart's buffers again (command_buffer_size 163_840,
+max_command_buffer_size 1_638_400), 2 workers, worker_automatic_restart = true,
+PROBE_REQUESTS=6 PROBE_FULL_QUERY=1, a fresh Sozu per run. Only PROBE_CLUSTERS
+changes. Cluster ids are the probe's own (`probe.metrics-<i>.80`, 18-21 bytes);
+real `namespace.service.port` ids are usually longer, so each cluster weighs
+more. The trailing `ps` lines are the harness's, taken 5 s after the probe
+exited, before that Sozu was killed; ps's %CPU is the average over the worker's
+life, of which the wedged runs spent about 65 s after the full query (its 10 s
+timeout, ten 5 s read timeouts, the 5 s wait). Their elapsed time spans the
+whole run: neither wedged worker was restarted, despite worker_automatic_restart.
+
+Run PROBE_CLUSTERS=2000
+
+[setup] programmed 2000 clusters + 1 with a refusing backend
+[traffic] before queries: 12000/12000 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 761.705µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3611
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 48.121687ms
+[full] clusters=2001 backends=0 workers=0 json_bytes=3342645
+[full]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (23): {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[traffic] after full query: 10/10 x 200
+[ps] probe exit 0
+[ps] workers 5 s after the probe:
+[ps]   worker 0: pid 631749 cpu 7.4% elapsed 00:12
+[ps]   worker 1: pid 631750 cpu 7.6% elapsed 00:12
+
+Run PROBE_CLUSTERS=2500
+
+[setup] programmed 2500 clusters + 1 with a refusing backend
+[traffic] before queries: 15000/15000 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 738.246µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3463
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 10.009667532s
+[full] clusters=0 backends=0 workers=0 json_bytes=304
+[full]   proxy (0): {}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (0): {}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {}
+[traffic] after full query: 0/10 x 200
+[ps] probe exit 0
+[ps] workers 5 s after the probe:
+[ps]   worker 0: pid 671260 cpu 88.5% elapsed 01:14
+[ps]   worker 1: pid 671261 cpu 88.6% elapsed 01:14
+
+Run PROBE_CLUSTERS=3000
+
+[setup] programmed 3000 clusters + 1 with a refusing backend
+[traffic] before queries: 18000/18000 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 234.352µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3580
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 10.012665287s
+[full] clusters=0 backends=0 workers=0 json_bytes=304
+[full]   proxy (0): {}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (0): {}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {}
+[traffic] after full query: 0/10 x 200
+[ps] probe exit 0
+[ps] workers 5 s after the probe:
+[ps]   worker 0: pid 646434 cpu 85.6% elapsed 01:18
+[ps]   worker 1: pid 646435 cpu 85.2% elapsed 01:18

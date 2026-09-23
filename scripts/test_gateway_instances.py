@@ -190,6 +190,14 @@ class GatewayProvisioning(unittest.TestCase):
             resources = self.render(gatewayProvisioning={"enabled": True}, metrics=metrics)
             self.assertEqual(set(config(resources)) & {"metrics_service", "service_monitor"}, expected)
 
+    def test_generated_gateways_inherit_the_per_cluster_metrics_switch(self):
+        for per_cluster in (False, True):
+            resources = self.render(gatewayProvisioning={"enabled": True},
+                                    metrics={"enabled": True, "perCluster": per_cluster})
+            for deployment in (select(resources, "Deployment", "sozu"), config(resources)["deployment"]):
+                self.assertEqual(env(deployment).get("SOZU_GW_METRICS_PER_CLUSTER"),
+                                 "true" if per_cluster else None)
+
     def test_only_provisioner_has_namespaced_workload_permissions(self):
         resources = self.render(gatewayProvisioning={"enabled": True})
         roles = [r for r in resources if r["kind"] == "Role"]

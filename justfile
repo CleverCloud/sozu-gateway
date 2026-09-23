@@ -67,6 +67,11 @@ chart-lint:
     # Both sides of the metrics switch, asserted rather than merely rendered.
     helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN
     ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false | grep -q SOZU_GW_METRICS_LISTEN
+    # Per-cluster metrics can wedge Sōzu workers, so they stay off unless asked
+    # for, and never ride along when the endpoint itself is off.
+    ! helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_PER_CLUSTER
+    helm template {{HELM_RELEASE}} {{CHART}} --set metrics.perCluster=true | grep -A1 SOZU_GW_METRICS_PER_CLUSTER | grep -q '"true"'
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.perCluster=true --set metrics.enabled=false | grep -q SOZU_GW_METRICS_PER_CLUSTER
     # The watch bound is rendered on presence, not truthiness: the binary
     # defaults to 60 and reads 0 as the opt-out, so an explicit 0 must reach
     # the container, while an absent key (`null` removes it, as

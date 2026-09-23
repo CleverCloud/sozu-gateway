@@ -119,6 +119,17 @@ controller:
 metrics:
   enabled: true
   port: 9100              # container port + ClusterIP Service port for /metrics
+  # Also export per-cluster and per-backend Sōzu series (everything labelled
+  # cluster_id: per-Service request counts, status codes of routed requests,
+  # backend response times). Off by default because it can take the gateway
+  # down: each Sōzu worker then answers a scrape with every cluster's metrics in
+  # one message, and on Sōzu 2.2.1 a message larger than max_command_buffer_size
+  # (1 638 400 bytes here) wedges that worker for good — no traffic, no
+  # commands, probes still green. The size grows with the Services that have
+  # received traffic: a local run with these buffers wedged somewhere between
+  # 2 000 and 2 500, an order of magnitude rather than a limit to plan against.
+  # See docs/UPGRADING.md before turning it on.
+  perCluster: false
   serviceMonitor:
     enabled: false        # requires the Prometheus Operator (monitoring.coreos.com)
     interval: 30s

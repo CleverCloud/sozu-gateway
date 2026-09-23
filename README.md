@@ -91,6 +91,7 @@ The controller is configured entirely through the Helm chart
 | `rbac.allowStatusWrites` | `false` | Publish the gateway's LoadBalancer address into Ingress / Gateway `.status` |
 | `rbac.allowGatewayStatusWrites` | `true` | Write Gateway API status conditions (they are the API's UX; off = least-privilege, degraded status for **every** route kind) |
 | `metrics.enabled` | `true` | Serve Prometheus `/metrics` (pulled from Sōzu over the command socket) |
+| `metrics.perCluster` | `false` | Also export per-Service / per-backend Sōzu series. Can wedge Sōzu workers on a large gateway — [read this first](docs/UPGRADING.md#metrics-exports-proxy-wide-sōzu-series-only) |
 | `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor`; needs the Prometheus Operator |
 | `sozu.timeouts.connect` | `2` | Seconds Sōzu waits for a backend to accept, on the HTTP/HTTPS listeners. Below Sōzu's own 3 so a silent backend fails inside the proxy, where it is answered and logged |
 
@@ -98,7 +99,7 @@ A few behaviours worth knowing:
 
 - **IngressClass** — only Ingresses selecting class `sozu` are reconciled (`spec.ingressClassName`, the legacy `kubernetes.io/ingress.class` annotation, or class-less when `ingressClass.default=true`).
 - **TLS** — `spec.tls[]` Secrets are served by SNI; a host goes HTTPS-on only once its certificate loads, and rotation is applied in place (`ReplaceCertificate`) with no gap.
-- **Metrics** — on by default: each scrape pulls `QueryMetrics` over the command socket and renders Prometheus text on a dedicated `ClusterIP` Service. Best-effort — a socket error returns `503` — but not free: the scrape shares that socket with routing applies, so a slow one can delay them. With more than one replica, scrape the `ServiceMonitor` (per-Endpoint) rather than the Service, whose counters otherwise alternate between Pods.
+- **Metrics** — on by default: each scrape pulls `QueryMetrics` over the command socket and renders Prometheus text on a dedicated `ClusterIP` Service. Proxy-wide series only unless `metrics.perCluster` is set, because the per-cluster query can wedge Sōzu's workers. Best-effort — a socket error returns `503` — but not free: the scrape shares that socket with routing applies, so a slow one can delay them. With more than one replica, scrape the `ServiceMonitor` (per-Endpoint) rather than the Service, whose counters otherwise alternate between Pods.
 - **Data plane** — the controller and Sōzu run as two containers in one Pod sharing the command socket; HTTP / HTTPS listeners are declared statically in Sōzu's [`config.toml`](deploy/sozu/config.toml).
 
 ---
