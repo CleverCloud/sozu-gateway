@@ -390,6 +390,31 @@ fn build_listener(
         }
     }
 
+    // A listener hostname Sōzu cannot parse leaves nothing to serve: every
+    // frontend on the listener carries that name or one beneath it, and a name
+    // beneath an unparseable one is unparseable too. The leading `*.` of a
+    // wildcard is left out of this test, because in a right-to-left domain the
+    // `*` label alone is what fails and the names beneath it still parse; those
+    // frontends stay, and the ones carrying the wildcard itself are refused on
+    // the route that would emit them. A layer-4 listener ignores `hostname`.
+    if protocol.l4().is_none() {
+        if let Some(hostname) = l.hostname.as_deref() {
+            let suffix = hostname.strip_prefix("*.").unwrap_or(hostname);
+            if let Some(reason) = crate::hostname_refusal(suffix) {
+                info.accepted = false;
+                info.accepted_reason = "UnsupportedValue";
+                info.programmed = false;
+                info.programmed_reason = "Invalid";
+                problems.push(Problem::InvalidHostname {
+                    hostname: hostname.to_string(),
+                    reason,
+                    listener: Some(l.name.clone()),
+                });
+                return listener_kinds(info, l, protocol);
+            }
+        }
+    }
+
     if !selector_unevaluable {
         match protocol {
             ListenerProtocol::Http => info.programmed = true,
@@ -1120,6 +1145,16 @@ fn attach_rule(
                 continue; // unreachable: a programmed listener resolved both
             };
             for hostname in hosts {
+                // Checked on the name actually emitted, not on the route's
+                // spelling: the intersection with a wildcard listener can be
+                // the listener's narrower name, which may parse when the
+                // route's wildcard does not (see `admit_hostname`).
+                if let Err(problem) = crate::admit_hostname(&hostname) {
+                    if !problems.contains(&problem) {
+                        problems.push(problem);
+                    }
+                    continue;
+                }
                 frontends.push(SourcedFrontend {
                     frontend: ir::Frontend {
                         hostname,

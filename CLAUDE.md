@@ -277,12 +277,21 @@ changes.
   points and Sōzu serves such a leaf regardless; **every path rule that compiles to a
   regex** — a user `ImplementationSpecific`/`RegularExpression` pattern, and the anchored regex a
   non-root `Prefix` or an `Exact` becomes — is compiled with `regex::bytes::Regex::new` on the
-  `regex` version Sōzu 2.2.1 builds against (pinned in the lock), because the crate refuses a
+  `regex` version Sōzu 2.2.1 builds against, because the crate refuses a
   compiled program past 10 MiB and a literal path of a few hundred kilobytes, which Kubernetes
-  accepts, reaches it. Measured (2026-09-21): either input unvalidated makes Sōzu reject the request, and since
+  accepts, reaches it; and **every frontend hostname** goes through `idna::domain_to_ascii` on
+  the `idna` version and Unicode data Sōzu 2.2.1 builds against (`admit_hostname`),
+  because Kubernetes checks only the RFC 1123 grammar and an A-label such as
+  `xn--a.example.com` fails IDNA. It is checked on the name actually emitted, not per label:
+  in a right-to-left domain `*.xn--4gbrim.example.com` fails while `a.xn--4gbrim.example.com`
+  parses. Certificate names skip IDNA in Sōzu and are not checked. Measured (2026-09-21,
+  hostnames 2026-09-23): any of these inputs unvalidated makes Sōzu reject the request, and since
   translation is all-or-nothing that fails every reconcile of the shared instance until the
   object is removed. The builder is the only place these strings enter the IR; the translator
-  does not re-validate.
+  does not re-validate. Those crate versions, as the builder links them (the lock's edges from
+  its own `regex` and `idna`, so an unrelated second copy is not drift), are held by the lock and
+  checked against Sōzu's by `builder/tests/sozu_lock_pins.rs` (dependabot ignores them): they
+  move only with Sōzu.
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
   (`--metrics-listen`, off when the flag is absent; the chart sets it by default via
   `metrics.enabled`) by issuing a `QueryMetrics` over the command

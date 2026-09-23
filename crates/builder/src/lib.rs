@@ -300,6 +300,20 @@ pub enum Problem {
         path: String,
         reason: String,
     },
+    /// A hostname Sōzu's router cannot parse. Kubernetes validates hostnames
+    /// against the RFC 1123 label grammar only, so an A-label that fails IDNA
+    /// (UTS #46) processing, such as `xn--a.example.com`, is admitted by the
+    /// apiserver and then refused by Sōzu when the frontend is added. Emitting
+    /// it would fail every reconcile of the shared instance, as with
+    /// [`Problem::InvalidPathRegex`]. The frontends that would carry it are
+    /// skipped (fail closed); the rest of the object still programs.
+    /// `listener` names the Gateway listener whose own `hostname` it is; it is
+    /// `None` on an Ingress rule or an HTTPRoute.
+    InvalidHostname {
+        hostname: String,
+        reason: &'static str,
+        listener: Option<String>,
+    },
     // Gateway API (Phase 2) — features Sōzu or this phase does not cover yet.
     UnsupportedTlsMode {
         mode: String,
@@ -404,6 +418,7 @@ impl Problem {
             Problem::FqdnEndpointsUnsupported { .. } => "FqdnEndpointsUnsupported",
             Problem::RouteCollision { .. } => "RouteCollision",
             Problem::InvalidPathRegex { .. } => "InvalidPathRegex",
+            Problem::InvalidHostname { .. } => "InvalidHostname",
             Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
             Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
             Problem::PortNotExposed { .. } => "PortNotExposed",
@@ -428,6 +443,7 @@ impl Problem {
             Problem::PortNotExposed { listener, .. }
             | Problem::ListenerPortNotOwned { listener, .. }
             | Problem::NamespaceSelectorInvalid { listener, .. } => Some(listener),
+            Problem::InvalidHostname { listener, .. } => listener.as_deref(),
             _ => None,
         }
     }
@@ -478,6 +494,24 @@ impl std::fmt::Display for Problem {
                 f,
                 "path {path:?} is not a regular expression Sōzu can compile ({reason}); no \
                  route was programmed for it"
+            ),
+            Problem::InvalidHostname {
+                hostname,
+                reason,
+                listener: None,
+            } => write!(
+                f,
+                "hostname {hostname:?} cannot be parsed by Sōzu ({reason}); no route was \
+                 programmed for it"
+            ),
+            Problem::InvalidHostname {
+                hostname,
+                reason,
+                listener: Some(listener),
+            } => write!(
+                f,
+                "listener {listener} hostname {hostname:?} cannot be parsed by Sōzu ({reason}); \
+                 the listener serves no routes"
             ),
             Problem::UnsupportedTlsMode { mode } => {
                 write!(f, "TLS mode {mode:?} is not supported (Terminate only)")
@@ -668,8 +702,8 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
 /// flags, no `RegexBuilder` limits — when the frontend is added, failing the
 /// whole request on error and, since translation is all-or-nothing, every
 /// reconcile of the shared instance. This is the same call against the same
-/// `regex` version (pinned in the lock), so what compiles here compiles there;
-/// the compiled regex itself is discarded. Paths enter the IR only through
+/// `regex` version (pinned, see `tests/sozu_lock_pins.rs`), so what compiles
+/// here compiles there; the compiled regex itself is discarded. Paths enter the IR only through
 /// here, which is why the check lives here and not in the translator.
 pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> {
     let pattern = match path.sozu_rule() {
@@ -690,6 +724,64 @@ pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> 
                 .collect::<Vec<_>>()
                 .join(" "),
         }),
+    }
+}
+
+/// Sōzu's bound on a frontend hostname (`router::MAX_HOSTNAME_LENGTH`), checked
+/// before anything parses it.
+const MAX_HOSTNAME_LENGTH: usize = 4096;
+
+/// Admit a frontend hostname into the IR only if Sōzu's router can parse it.
+///
+/// Every hostname but the bare `*` catch-all goes into the route table's tree,
+/// where Sōzu 2.2.1 parses it twice when the frontend is added: as a
+/// `DomainRule` (`*` is any host, a `/` makes a regex domain, a `*` is only
+/// accepted in front) and through `idna::domain_to_ascii`, whose ASCII form is
+/// inserted into a trie that refuses an empty leading label. Any of these
+/// failures rejects the whole request ("parsing hostname failed", or "Could
+/// not add route" from the trie) and, since translation is all-or-nothing,
+/// every reconcile of the shared instance. These are the same
+/// checks on the same `idna` version and Unicode data (pinned, see
+/// `tests/sozu_lock_pins.rs`), so what passes here parses there; the one
+/// deliberate difference is a '/', which is refused rather than compiled. The outcome is not a per-label property: in
+/// a domain with a right-to-left label the bidi rule applies to every label,
+/// so `a.xn--4gbrim.example.com` parses and `*.xn--4gbrim.example.com` does
+/// not. Hostnames enter the IR only through here, which is why the check lives
+/// here and not in the translator.
+pub(crate) fn admit_hostname(hostname: &str) -> Result<(), Problem> {
+    match hostname_refusal(hostname) {
+        None => Ok(()),
+        Some(reason) => Err(Problem::InvalidHostname {
+            hostname: display_path(hostname),
+            reason,
+            listener: None,
+        }),
+    }
+}
+
+/// Why Sōzu's router would refuse `hostname` as a frontend hostname, if it
+/// would. See [`admit_hostname`].
+pub(crate) fn hostname_refusal(hostname: &str) -> Option<&'static str> {
+    if hostname.len() > MAX_HOSTNAME_LENGTH {
+        return Some("longer than the 4096 bytes Sōzu accepts");
+    }
+    if hostname == "*" {
+        return None;
+    }
+    // Refused outright rather than compiled the way Sōzu would: a host field
+    // is never a regex domain, and the apiserver refuses the character anyway.
+    if hostname.contains('/') {
+        return Some("a '/' makes Sōzu read it as a regular-expression domain");
+    }
+    if hostname.contains('*') && !hostname.starts_with('*') {
+        return Some("a '*' is only accepted as the leading label");
+    }
+    match idna::domain_to_ascii(hostname) {
+        Err(_) => Some("not a valid internationalized domain name under IDNA (UTS #46)"),
+        // The trie consumes labels from the right and refuses only an empty
+        // leftmost one: measured, `a..b.com` and `example.com.` are added.
+        Ok(ascii) if ascii.is_empty() || ascii.starts_with('.') => Some("empty leading label"),
+        Ok(_) => None,
     }
 }
 
@@ -1485,6 +1577,14 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             // routes as DomainRule::Any. `tls_covers` returns false for `*`, so
             // it stays plain-HTTP (no `*`-named cert frontend).
             let host = rule.host.clone().unwrap_or_else(|| "*".to_string());
+            // A host Sōzu cannot parse takes out the whole rule before any
+            // backend is resolved: every one of its paths would carry it.
+            if let Err(problem) = admit_hostname(&host) {
+                if !problems.contains(&problem) {
+                    problems.push(problem);
+                }
+                continue;
+            }
             for path in &http.paths {
                 // Settled before the backend is touched: a path Sōzu would
                 // refuse programs nothing, so its Service is neither resolved
@@ -1763,6 +1863,53 @@ mod certificate_name_tests {
             validate_inferred_certificate_names(&names).unwrap(),
             ["mixed.example.com", "*.wild.org", "*", "plain.example.org"].map(String::from)
         );
+    }
+}
+
+#[cfg(test)]
+mod hostname_tests {
+    use super::hostname_refusal;
+
+    /// Each shape was added to (or refused by) a live Sōzu 2.2.1 with
+    /// `AddHttpFrontend`. Most of them never reach the builder, because the
+    /// apiserver refuses them first, but none may be refused here while Sōzu
+    /// adds it — with one deliberate exception: Sōzu reads a `/` as a regex
+    /// domain (`/a+/.example.com` is added), which a host field never means.
+    #[test]
+    fn hostnames_are_refused_exactly_where_sozu_refuses_them() {
+        assert!(hostname_refusal("/a+/.example.com").is_some());
+        for refused in [
+            "xn--a.example.com",
+            "xn--.example.com",
+            "*.xn--a.example.com",
+            "0.xn--4gbrim.example.com",
+            "*.xn--4gbrim.example.com",
+            "",
+            ".",
+            ".example.com",
+            "..a.com",
+            "a.com/",
+            "x.*",
+        ] {
+            assert!(hostname_refusal(refused).is_some(), "{refused:?}");
+        }
+        for accepted in [
+            "*",
+            "*.example.com",
+            "good.example.com",
+            "xn--bcher-kva.example.com",
+            "a.xn--4gbrim.example.com",
+            "a..b.com",
+            "a...b.com",
+            "example.com.",
+            "com..",
+            "*.",
+            "**.foo",
+        ] {
+            assert_eq!(hostname_refusal(accepted), None, "{accepted:?}");
+        }
+        assert!(hostname_refusal(&"a".repeat(4097)).is_some());
+        assert_eq!(hostname_refusal(&"a".repeat(4096)), None);
     }
 }
 

@@ -4,6 +4,33 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Hostnames Sōzu cannot parse are refused per object
+
+Kubernetes checks a hostname against the RFC 1123 label grammar only; Sōzu also
+runs it through IDNA (UTS #46) and rejects the frontend when that fails. An
+apiserver-valid name such as `xn--a.example.com`, or a digit-led label in a
+domain with a right-to-left label (`0.xn--4gbrim.example.com`), therefore used
+to fail **every** reconcile, which prevented the shared instance from
+converging, and a new or restarted Pod never became Ready, until the object
+was deleted.
+
+Such a name is now refused in the controller, with a Warning Event
+`InvalidHostname` on the object that carries it, and only the frontends that
+would carry it are skipped. On an Ingress, the rule with that `host` is
+skipped. On an HTTPRoute, the hostname is dropped and the route stays
+`Accepted`, as with an uncompilable regex. A Gateway listener whose own
+`hostname` cannot be parsed is `Accepted: False` / `UnsupportedValue`, and
+routes attach to it no more than to any other refused listener. One subtlety
+follows Sōzu exactly: in a right-to-left domain the `*` label itself fails, so a
+`*.xn--4gbrim.example.com` listener keeps serving the names beneath it, and
+only a frontend carrying the wildcard is refused.
+
+Nothing to do on upgrade. These names never served traffic; fix them to a
+valid A-label (for example, `xn--bcher-kva.example.com` for `bücher`).
+Certificate names are not affected: Sōzu loads them without IDNA processing.
+
+---
+
 ## Path rules are written for Sōzu's next router as well as 2.2.1
 
 Sōzu 2.2.1 matches a `Regex` path rule unanchored; its unreleased successor
