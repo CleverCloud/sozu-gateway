@@ -36,6 +36,9 @@ serde_json = { workspace = true }
 # End-to-end smoke example dogfoods the pure pipeline (IR -> Translator -> Agent).
 sozu-gw-ir = { workspace = true }
 sozu-gw-translator = { workspace = true }
+# The SNI ownership probe reads which certificate a handshake is served; the
+# same rustls and ring the builder already links, so the lock gains no package.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 # Throwaway protocol probe (Étape 1): connect to a live Sōzu, exercise
 # AddCluster/AddBackend/AddHttpFrontend/AddCertificate, verify with curl.

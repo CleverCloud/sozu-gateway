@@ -1,0 +1,25 @@
+# sni_ownership_probe against docker clevercloud/sozu:2.2.1 (deploy config, 2 workers), 2026-10-19
+
+== sni ownership probe ==
+victim 2e6f2ec7 (notAfter 2036-06-19), attacker dd3f3e70 (notAfter 2036-09-18)
+-- both claim the name: AddCertificate(victim, ["api.probe"]); AddCertificate(attacker, ["api.probe", "attacker.probe"])
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- strip it from the attacker: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- victim deleted: ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); RemoveCertificate(2e6f2ec7)
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- victim back, older: AddCertificate(victim, ["api.probe"]); ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- back to the attacker: applied
+-- only the loser's request: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: attacker: 6
+-- then the winner's: applied
+   api.probe: attacker: 6
+-- back to the attacker: applied
+-- race, translator order: batch to the victim: AddCertificate(victim, ["api.probe"]); ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); 0 batches failed; api.probe served: attacker: 885
+-- race, reversed order: batch to the victim: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); AddCertificate(victim, ["api.probe"]); 0 batches failed; api.probe served: attacker: 764

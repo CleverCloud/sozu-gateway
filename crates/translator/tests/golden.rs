@@ -913,6 +913,205 @@ fn reconcile_duplicate_fingerprint_certs_union_names() {
     }
 }
 
+/// A certificate at the HTTPS listener carrying `names`.
+fn named(certificate: &str, key: &str, names: &[&str]) -> ir::Certificate {
+    ir::Certificate {
+        names: names.iter().map(|n| n.to_string()).collect(),
+        ..cert(certificate, key)
+    }
+}
+
+fn certificates(certificates: Vec<ir::Certificate>) -> ir::Ir {
+    ir::Ir {
+        certificates,
+        ..Default::default()
+    }
+}
+
+/// What each certificate request does, in batch order: the verb, the leaf it
+/// installs and the names it installs it with.
+fn certificate_steps(reqs: &[Request]) -> Vec<(&'static str, &str, Vec<String>)> {
+    reqs.iter()
+        .map(|r| match &r.request_type {
+            Some(RequestType::AddCertificate(a)) => (
+                "add",
+                a.certificate.certificate.as_str(),
+                a.certificate.names.clone(),
+            ),
+            Some(RequestType::ReplaceCertificate(r)) => (
+                "replace",
+                r.new_certificate.certificate.as_str(),
+                r.new_certificate.names.clone(),
+            ),
+            other => panic!("unexpected request {other:?}"),
+        })
+        .collect()
+}
+
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+#[test]
+fn a_name_taken_by_a_new_certificate_is_added_before_the_loser_drops_it() {
+    // The builder hands api.example.com to an older claimant's certificate
+    // and strips it from the one that held it. Sōzu 2.3.2 applies both at
+    // once, so dropping first would fall back to the default certificate
+    // until the add lands.
+    let before = certificates(vec![named(
+        CERT_B,
+        KEY_B,
+        &["api.example.com", "x.example.com"],
+    )]);
+    let after = certificates(vec![
+        named(CERT_A, KEY_A, &["api.example.com"]),
+        named(CERT_B, KEY_B, &["x.example.com"]),
+    ]);
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(
+        certificate_steps(&reqs),
+        vec![
+            ("add", CERT_A, names(&["api.example.com"])),
+            ("replace", CERT_B, names(&["x.example.com"])),
+        ],
+        "{}",
+        dump(&reqs)
+    );
+    assert!(in_place_replace(&reqs[1]).is_some());
+    insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn a_name_moving_between_loaded_certificates_is_given_before_it_is_taken() {
+    // Both certificates stay loaded, so both requests are replaces, and the
+    // JSON encoding would put CERT_B's first (its PEM sorts first).
+    let before = certificates(vec![
+        named(CERT_A, KEY_A, &["app.example.com"]),
+        named(CERT_B, KEY_B, &["api.example.com", "x.example.com"]),
+    ]);
+    let after = certificates(vec![
+        named(CERT_A, KEY_A, &["api.example.com", "app.example.com"]),
+        named(CERT_B, KEY_B, &["x.example.com"]),
+    ]);
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(
+        certificate_steps(&reqs),
+        vec![
+            (
+                "replace",
+                CERT_A,
+                names(&["api.example.com", "app.example.com"])
+            ),
+            ("replace", CERT_B, names(&["x.example.com"])),
+        ],
+        "{}",
+        dump(&reqs)
+    );
+}
+
+#[test]
+fn a_replace_that_gives_a_name_away_runs_before_one_that_only_drops() {
+    // CERT_A drops n but takes m from CERT_B, which only drops it: CERT_A's
+    // replace must land first, though both take a name away and CERT_B's
+    // PEM sorts first.
+    let before = certificates(vec![
+        named(CERT_A, KEY_A, &["n.example.com", "x.example.com"]),
+        named(CERT_B, KEY_B, &["m.example.com", "y.example.com"]),
+    ]);
+    let after = certificates(vec![
+        named(CERT_A, KEY_A, &["m.example.com", "x.example.com"]),
+        named(CERT_B, KEY_B, &["y.example.com"]),
+    ]);
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(
+        certificate_steps(&reqs),
+        vec![
+            (
+                "replace",
+                CERT_A,
+                names(&["m.example.com", "x.example.com"])
+            ),
+            ("replace", CERT_B, names(&["y.example.com"])),
+        ],
+        "{}",
+        dump(&reqs)
+    );
+}
+
+#[test]
+fn a_chain_of_name_transfers_runs_every_recipient_before_its_donor() {
+    // y.example.com moves from `donor` to `recipient`, while each also drops
+    // or gains a name of its own: both replaces trade names, and the chain is
+    // acyclic, so `recipient` must go first whichever PEM sorts first.
+    for (recipient, recipient_key, donor, donor_key) in [
+        (CERT_A, KEY_A, CERT_B, KEY_B),
+        (CERT_B, KEY_B, CERT_A, KEY_A),
+    ] {
+        let before = vec![
+            named(recipient, recipient_key, &["x.example.com"]),
+            named(donor, donor_key, &["y.example.com"]),
+        ];
+        let after = vec![
+            named(recipient, recipient_key, &["y.example.com"]),
+            named(donor, donor_key, &["z.example.com"]),
+        ];
+        for reversed in [false, true] {
+            let (mut before, mut after) = (before.clone(), after.clone());
+            if reversed {
+                before.reverse();
+                after.reverse();
+            }
+            let reqs =
+                tr::reconcile(&certificates(before), &certificates(after)).expect("reconcile");
+            assert_eq!(
+                certificate_steps(&reqs),
+                vec![
+                    ("replace", recipient, names(&["y.example.com"])),
+                    ("replace", donor, names(&["z.example.com"])),
+                ],
+                "{}",
+                dump(&reqs)
+            );
+        }
+    }
+}
+
+#[test]
+fn certificates_swapping_names_keep_the_json_order_whatever_the_input_order() {
+    // Each gains the name the other drops: a cycle, so neither can go first
+    // without one name falling back for a moment. The batch still settles,
+    // in the JSON order, whatever order the certificates come in.
+    let before = vec![
+        named(CERT_A, KEY_A, &["x.example.com"]),
+        named(CERT_B, KEY_B, &["y.example.com"]),
+    ];
+    let after = vec![
+        named(CERT_A, KEY_A, &["y.example.com"]),
+        named(CERT_B, KEY_B, &["x.example.com"]),
+    ];
+    let reqs = tr::reconcile(&certificates(before.clone()), &certificates(after.clone()))
+        .expect("reconcile");
+    let mut json_order = reqs.clone();
+    json_order.sort_by_cached_key(|r| serde_json::to_string(r).expect("json"));
+    assert_eq!(reqs, json_order, "{}", dump(&reqs));
+    assert_eq!(
+        certificate_steps(&reqs),
+        vec![
+            ("replace", CERT_B, names(&["x.example.com"])),
+            ("replace", CERT_A, names(&["y.example.com"])),
+        ],
+        "{}",
+        dump(&reqs)
+    );
+    let (mut before, mut after) = (before, after);
+    before.reverse();
+    after.reverse();
+    assert_eq!(
+        tr::reconcile(&certificates(before), &certificates(after)).expect("reconcile"),
+        reqs
+    );
+}
+
 #[test]
 fn reconcile_retarget_route_removes_before_adds() {
     // Re-pointing the same host+path at a DIFFERENT cluster. Sōzu keys a route by

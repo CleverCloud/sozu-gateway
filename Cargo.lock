@@ -2541,6 +2541,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "mio",
+ "rustls",
  "serde",
  "serde_json",
  "socket2",

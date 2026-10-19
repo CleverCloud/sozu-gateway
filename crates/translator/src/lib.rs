@@ -21,12 +21,16 @@
 //! same key, and adding first would be rejected as a duplicate. Since Sōzu 2.3.0
 //! a cluster removal also drops the cluster's frontends and backends, and the
 //! diff leaves those out; they are spelled out again so they tier the same way
-//! (see `expand_cluster_removals`). A new/replacement
-//! certificate lands before the old one is removed → no TLS gap. This also makes
-//! the otherwise HashSet-ordered routing diff deterministic.
+//! (see `expand_cluster_removals`). A new/replacement certificate lands before
+//! the old one is removed → no TLS gap, and a name moving between two
+//! certificates is given before it is taken (`CertRank`, `transfer_order`:
+//! recipient before donor, in a deterministic topological order; only
+//! certificates whose name transfers form a cycle cannot all go first). This
+//! also makes the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::net::SocketAddr;
 
 use sozu_command_lib::certificate::{parse_pem, split_certificate_chain};
@@ -546,6 +550,8 @@ fn tier(req: &Request) -> u8 {
         Some(RequestType::ActivateListener(_)) => 1,
         Some(RequestType::AddCluster(_)) => 2,
         Some(RequestType::AddBackend(_)) | Some(RequestType::AddUnixBackend(_)) => 3,
+        // Within the tier, a request that takes a name off a certificate goes
+        // after the ones that give it to another (`CertRank`).
         Some(RequestType::AddCertificate(_)) | Some(RequestType::ReplaceCertificate(_)) => 4,
         // Frontend removes precede frontend adds. Sōzu keys a route by
         // `address;hostname;path[;method]` (cluster_id is NOT part of the key),
@@ -598,12 +604,231 @@ fn tier(req: &Request) -> u8 {
 }
 
 /// Reorder into dependency-safe tiers with a deterministic secondary key.
-fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
-    requests.sort_by_cached_key(|req| {
+fn canonicalize(requests: Vec<Request>) -> Vec<Request> {
+    canonicalize_ranked(requests.into_iter().map(|r| (CertRank::Gains, r)).collect())
+}
+
+/// [`canonicalize`], with a certificate request's [`CertRank`] ordering it
+/// within its tier ahead of the JSON encoding.
+fn canonicalize_ranked(mut requests: Vec<(CertRank, Request)>) -> Vec<Request> {
+    requests.sort_by_cached_key(|(rank, req)| {
         let key = serde_json::to_string(req).unwrap_or_default();
-        (tier(req), key)
+        (tier(req), *rank, key)
     });
-    requests
+    requests.into_iter().map(|(_, req)| req).collect()
+}
+
+/// Where a certificate request sits among the `AddCertificate` and
+/// `ReplaceCertificate` of one batch, which share a tier.
+///
+/// The builder gives a contested SNI name to one certificate and strips it
+/// from the others, so a name can move between two loaded certificates in
+/// one batch: the winner gains it (an add, or a same-fingerprint replace),
+/// the loser drops it (a same-fingerprint replace). Each is applied at once,
+/// per worker, since Sōzu 2.3.2 (0bc160b7), so if the loser went first the
+/// name would fall back to the default certificate until the winner's
+/// request landed (measured: `docs/probes/sni-ownership-race_sozu-2.3.2_*`).
+/// Ordered by the JSON encoding, an add happens to precede a
+/// replace, but two replaces follow their PEM text. This makes the order
+/// explicit: nothing that only takes names away runs before anything that
+/// gives one, and among the replaces that do both, every name that moves is
+/// given before it is taken ([`transfer_order`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CertRank {
+    /// Takes no name away: an add, a rotation (same names), a chain update, or
+    /// an in-place replace that only adds names. Requests outside the
+    /// certificates rank here too; a rank only orders within a tier.
+    Gains,
+    /// Takes a name away and gives another, at its position in
+    /// [`transfer_order`]: after every trade that gives it a name it takes,
+    /// unless the two are on a cycle of transfers.
+    Trades(usize),
+    /// Only takes names away: nothing can be waiting for it.
+    Withdraws,
+}
+
+/// An SNI name as Sōzu's resolver keys it: per listener, ASCII-lowercased.
+type SniKey = (SocketAddr, String);
+
+fn sni_keys(c: &ir::Certificate) -> BTreeSet<SniKey> {
+    c.names
+        .iter()
+        .map(|n| (c.listener, n.to_ascii_lowercase()))
+        .collect()
+}
+
+/// A same-fingerprint `ReplaceCertificate` that gives some names to its
+/// certificate and takes others off it.
+struct Trade {
+    request: Request,
+    gives: BTreeSet<SniKey>,
+    takes: BTreeSet<SniKey>,
+}
+
+/// The order the trades of one batch run in, as each trade's position: for
+/// every name one trade gives and another takes, the one giving it goes
+/// first, so the name never falls back to the default certificate between
+/// the two. A chain of transfers (`{x}` → `{y}` on one certificate while `{y}`
+/// → `{z}` on another) runs recipient first whatever the PEM texts. What the
+/// transfers leave unordered follows the JSON encoding, as everywhere in
+/// [`canonicalize_ranked`]: of the orders that respect them, this is the
+/// smallest by that key, so the batch is deterministic.
+///
+/// Transfers can form a cycle — certificates swapping names, each gaining
+/// one another on the cycle drops — and then no order gives every name
+/// first. The trades on a cycle keep the JSON order among themselves (they
+/// still run after every trade that gives them a name from outside it, and
+/// before every one they give a name to), so only a name on a cycle can
+/// fall back to the default certificate for a moment.
+///
+/// Linear in the names moved: a name is one node between the trades giving
+/// it and those taking it, not an edge per (giver, taker) pair, and cycles
+/// are found as strongly connected components.
+fn transfer_order(trades: &[Trade]) -> Vec<usize> {
+    let count = trades.len();
+    // Each trade's place in the JSON order: the tie-break.
+    let mut by_key: Vec<usize> = (0..count).collect();
+    let keys: Vec<String> = trades
+        .iter()
+        .map(|t| serde_json::to_string(&t.request).unwrap_or_default())
+        .collect();
+    by_key.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+    let mut seq = vec![0; count];
+    for (place, &trade) in by_key.iter().enumerate() {
+        seq[trade] = place;
+    }
+
+    // Nodes: the trades, then one per name both given and taken here.
+    let mut movers: BTreeMap<&SniKey, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
+    for (i, t) in trades.iter().enumerate() {
+        for name in &t.gives {
+            movers.entry(name).or_default().0.push(i);
+        }
+        for name in &t.takes {
+            movers.entry(name).or_default().1.push(i);
+        }
+    }
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (givers, takers) in movers.into_values() {
+        if givers.is_empty() || takers.is_empty() {
+            continue;
+        }
+        let name = edges.len();
+        for giver in givers {
+            edges[giver].push(name);
+        }
+        edges.push(takers);
+    }
+
+    let (component, components) = strongly_connected(&edges);
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); components];
+    for (node, &c) in component.iter().enumerate() {
+        members[c].push(node);
+    }
+    let mut waiting = vec![0usize; components];
+    for (node, targets) in edges.iter().enumerate() {
+        for &target in targets {
+            if component[target] != component[node] {
+                waiting[component[target]] += 1;
+            }
+        }
+    }
+    // A component holding no trade emits nothing and runs as soon as it is
+    // ready; one holding trades runs at its first trade's JSON place.
+    let priority = |c: usize| {
+        members[c]
+            .iter()
+            .filter(|&&node| node < count)
+            .map(|&node| seq[node])
+            .min()
+            .map_or((false, 0), |first| (true, first))
+    };
+    let mut ready: BinaryHeap<Reverse<((bool, usize), usize)>> = (0..components)
+        .filter(|&c| waiting[c] == 0)
+        .map(|c| Reverse((priority(c), c)))
+        .collect();
+    let mut position = vec![0; count];
+    let mut next = 0;
+    while let Some(Reverse((_, c))) = ready.pop() {
+        let mut on_it: Vec<usize> = members[c].iter().copied().filter(|&n| n < count).collect();
+        on_it.sort_by_key(|&trade| seq[trade]);
+        for trade in on_it {
+            position[trade] = next;
+            next += 1;
+        }
+        for &node in &members[c] {
+            for &target in &edges[node] {
+                let t = component[target];
+                if t != c {
+                    waiting[t] -= 1;
+                    if waiting[t] == 0 {
+                        ready.push(Reverse((priority(t), t)));
+                    }
+                }
+            }
+        }
+    }
+    position
+}
+
+/// The strongly connected components of a graph given as adjacency lists:
+/// each node's component, and how many there are (Tarjan's algorithm, with
+/// an explicit stack so a long chain cannot overflow the thread's).
+fn strongly_connected(edges: &[Vec<usize>]) -> (Vec<usize>, usize) {
+    const UNSEEN: usize = usize::MAX;
+    let nodes = edges.len();
+    let mut index = vec![UNSEEN; nodes];
+    let mut low = vec![0; nodes];
+    let mut on_stack = vec![false; nodes];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut component = vec![UNSEEN; nodes];
+    let (mut next_index, mut components) = (0, 0);
+    // (node, next edge to follow)
+    let mut calls: Vec<(usize, usize)> = Vec::new();
+    for root in 0..nodes {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        index[root] = next_index;
+        low[root] = next_index;
+        next_index += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        calls.push((root, 0));
+        while let Some(&(node, edge)) = calls.last() {
+            if let Some(&target) = edges[node].get(edge) {
+                if let Some(call) = calls.last_mut() {
+                    call.1 += 1;
+                }
+                if index[target] == UNSEEN {
+                    index[target] = next_index;
+                    low[target] = next_index;
+                    next_index += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    calls.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(index[target]);
+                }
+                continue;
+            }
+            calls.pop();
+            if let Some(&(parent, _)) = calls.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == index[node] {
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    component[member] = components;
+                    if member == node {
+                        break;
+                    }
+                }
+                components += 1;
+            }
+        }
+    }
+    (component, components)
 }
 
 /// Every backend and frontend of the desired state names a cluster it declares.
@@ -751,10 +976,15 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
 ///    leaf's own key.
 ///  - rotation (a removed + an added at the same listener sharing the SNI name
 ///    set) -> a single ReplaceCertificate (zero-gap)
+///
+/// Each request carries its [`CertRank`]: an in-place replace that drops a
+/// name ranks after the requests that may be giving that name to another
+/// certificate, and one that also gains a name runs after every replace
+/// giving it a name it takes ([`transfer_order`]).
 fn certificate_requests(
     previous: &[ir::Certificate],
     desired: &[ir::Certificate],
-) -> Result<Vec<Request>, TranslatorError> {
+) -> Result<Vec<(CertRank, Request)>, TranslatorError> {
     let prev = keyed_certs(previous)?;
     let des = keyed_certs(desired)?;
 
@@ -768,6 +998,7 @@ fn certificate_requests(
         .collect();
 
     let mut out = Vec::new();
+    let mut trades: Vec<Trade> = Vec::new();
     let mut truly_added: Vec<&KeyedCert> = Vec::new();
 
     for d in &des {
@@ -776,11 +1007,27 @@ fn certificate_requests(
             // request; the leaf, and with it the key, cannot differ.
             Some(p) => {
                 if names_set(&p.cert) != names_set(&d.cert) || p.chain != d.chain {
-                    out.push(replace_certificate_request(&d.cert, d.fingerprint.clone()));
+                    let request = replace_certificate_request(&d.cert, d.fingerprint.clone());
+                    let (old, new) = (sni_keys(&p.cert), sni_keys(&d.cert));
+                    let gives: BTreeSet<SniKey> = new.difference(&old).cloned().collect();
+                    let takes: BTreeSet<SniKey> = old.difference(&new).cloned().collect();
+                    match (gives.is_empty(), takes.is_empty()) {
+                        (_, true) => out.push((CertRank::Gains, request)),
+                        (true, false) => out.push((CertRank::Withdraws, request)),
+                        (false, false) => trades.push(Trade {
+                            request,
+                            gives,
+                            takes,
+                        }),
+                    }
                 }
             }
             None => truly_added.push(d),
         }
+    }
+    let order = transfer_order(&trades);
+    for (trade, position) in trades.into_iter().zip(order) {
+        out.push((CertRank::Trades(position), trade.request));
     }
 
     let mut truly_removed: Vec<&KeyedCert> = prev
@@ -795,19 +1042,21 @@ fn certificate_requests(
             !used[i] && old.listener == new.listener && names_set(&old.cert) == names_set(&new.cert)
         }) {
             used[idx] = true;
-            out.push(replace_certificate_request(
-                &new.cert,
-                truly_removed[idx].fingerprint.clone(),
+            out.push((
+                CertRank::Gains,
+                replace_certificate_request(&new.cert, truly_removed[idx].fingerprint.clone()),
             ));
         } else {
-            out.push(add_certificate_request(&new.cert));
+            out.push((CertRank::Gains, add_certificate_request(&new.cert)));
         }
     }
+    // A removal takes names away too, but it already tiers after every add
+    // and replace.
     for (i, old) in truly_removed.iter_mut().enumerate() {
         if !used[i] {
-            out.push(remove_certificate_request(
-                old.listener,
-                old.fingerprint.clone(),
+            out.push((
+                CertRank::Withdraws,
+                remove_certificate_request(old.listener, old.fingerprint.clone()),
             ));
         }
     }
@@ -845,15 +1094,19 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
 pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, TranslatorError> {
     check_cluster_references(desired)?;
     let previous_state = routing_state(previous)?;
-    let mut requests = expand_cluster_removals(
+    let routing = drop_superseded_backend_removes(expand_cluster_removals(
         &previous_state,
         previous_state.diff(&routing_state(desired)?),
-    );
+    ));
+    let mut requests: Vec<(CertRank, Request)> = routing
+        .into_iter()
+        .map(|req| (CertRank::Gains, req))
+        .collect();
     requests.extend(certificate_requests(
         &previous.certificates,
         &desired.certificates,
     )?);
-    let mut requests = canonicalize(drop_superseded_backend_removes(requests));
+    let mut requests = canonicalize_ranked(requests);
     // `ConfigState::diff` emits the activation of a newly-added active TCP/UDP
     // listener twice (once inline, once in its trailing activation sweep).
     // After `canonicalize` the batch is fully sorted, so identical requests
@@ -871,4 +1124,80 @@ fn plain(address: SocketAddr) -> SocketAddr {
 /// Lower-case hex, the spelling Sōzu and [`fingerprint`] use.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod transfer_order_tests {
+    use super::{remove_certificate_request, transfer_order, SniKey, Trade};
+    use std::collections::BTreeSet;
+
+    /// A trade whose JSON encoding sorts by `id`, giving and taking `names`.
+    fn trade(id: &str, gives: &[&str], takes: &[&str]) -> Trade {
+        let listener = "0.0.0.0:443".parse().expect("address");
+        let keys = |names: &[&str]| -> BTreeSet<SniKey> {
+            names.iter().map(|n| (listener, n.to_string())).collect()
+        };
+        Trade {
+            request: remove_certificate_request(listener, id.to_string()),
+            gives: keys(gives),
+            takes: keys(takes),
+        }
+    }
+
+    #[test]
+    fn unrelated_trades_keep_the_json_order() {
+        let trades = [
+            trade("c", &["c1"], &["c2"]),
+            trade("a", &["a1"], &["a2"]),
+            trade("b", &["b1"], &["b2"]),
+        ];
+        assert_eq!(transfer_order(&trades), [2, 0, 1]);
+    }
+
+    #[test]
+    fn a_chain_runs_from_its_last_recipient_back_to_its_first_donor() {
+        // `c` gives n1, which `b` takes; `b` gives n2, which `a` takes: the
+        // reverse of the JSON order.
+        let trades = [
+            trade("a", &["a1"], &["n2"]),
+            trade("b", &["n2"], &["n1"]),
+            trade("c", &["n1"], &["c1"]),
+        ];
+        assert_eq!(transfer_order(&trades), [2, 1, 0]);
+    }
+
+    #[test]
+    fn a_cycle_keeps_the_json_order_inside_and_its_edges_outside() {
+        // `p` and `q` swap x and y. `e` gives `q` a name, so runs before the
+        // cycle; `p` gives `d` one, so `d` runs after it, though `d` sorts
+        // first.
+        let trades = [
+            trade("d", &["d1"], &["z"]),
+            trade("e", &["w"], &["e1"]),
+            trade("p", &["y", "z"], &["x"]),
+            trade("q", &["x"], &["y", "w"]),
+        ];
+        assert_eq!(transfer_order(&trades), [3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn a_long_chain_is_ordered_without_deep_recursion() {
+        const LENGTH: usize = 50_000;
+        let names: Vec<String> = (0..=LENGTH).map(|i| format!("n{i}")).collect();
+        // Trade i gives n{i+1}, which trade i+1 takes: the chain runs in the
+        // JSON order, and the search for cycles walks it end to end from the
+        // first trade, 100,000 nodes deep.
+        let forwards: Vec<Trade> = (0..LENGTH)
+            .map(|i| trade(&format!("{i:06}"), &[&names[i + 1]], &[&names[i]]))
+            .collect();
+        let order = transfer_order(&forwards);
+        assert!(order.iter().enumerate().all(|(i, &p)| p == i));
+        // Trade i gives n{i}, which trade i-1 takes: every donor sorts before
+        // its recipient, so the chain runs backwards.
+        let backwards: Vec<Trade> = (0..LENGTH)
+            .map(|i| trade(&format!("{i:06}"), &[&names[i]], &[&names[i + 1]]))
+            .collect();
+        let order = transfer_order(&backwards);
+        assert!(order.iter().enumerate().all(|(i, &p)| p == LENGTH - 1 - i));
+    }
 }

@@ -280,7 +280,17 @@ fn build_listeners_status(
                         status: l.programmed,
                         reason: l.programmed_reason,
                         message: if l.programmed {
-                            "Listener programmed into Sōzu".to_string()
+                            // A name an older object claims leaves the
+                            // listener programmed — its routes are served,
+                            // under that object's certificate — so the loss is
+                            // told here, as an L4 route conflict is told in a
+                            // route's Accepted condition.
+                            let claimed: Vec<&Problem> = listener_problems
+                                .iter()
+                                .copied()
+                                .filter(|p| matches!(p, Problem::CertificateNameClaimed { .. }))
+                                .collect();
+                            problems_message(&claimed, "Listener programmed into Sōzu")
                         } else {
                             problems_message(
                                 &listener_problems,
@@ -1321,6 +1331,79 @@ mod tests {
                 assert_eq!(condition.last_transition_time, previous);
             }
         }
+    }
+
+    /// A listener whose certificate lost a name to an older object still
+    /// serves its routes, so it stays Programmed; the loss is told in that
+    /// condition's message, on that listener only, and the message is stable
+    /// across passes and clears with the problem.
+    #[test]
+    fn a_claimed_certificate_name_is_told_on_its_own_listener() {
+        let listener = |name: &str| sozu_gw_builder::ListenerStatus {
+            name: name.into(),
+            supported_kinds: vec!["HTTPRoute".into()],
+            attached_routes: 1,
+            accepted: true,
+            accepted_reason: "Accepted",
+            programmed: true,
+            programmed_reason: "Programmed",
+            resolved_refs: true,
+            resolved_refs_reason: "ResolvedRefs",
+        };
+        let mut gw = gateway_result();
+        gw.listeners = vec![listener("https"), listener("other")];
+        gw.problems = vec![Problem::CertificateNameClaimed {
+            secret: "gw-tls".into(),
+            listener: Some("https".into()),
+            names: vec![sozu_gw_builder::ClaimedName {
+                name: "api.example.com".into(),
+                owner_kind: "Ingress",
+                owner: "victim/web".into(),
+            }],
+        }];
+        let programmed = |listeners: &[GatewayStatusListeners], index: usize| {
+            listeners[index]
+                .conditions
+                .iter()
+                .find(|c| c.type_ == "Programmed")
+                .cloned()
+                .expect("a Programmed condition")
+        };
+        let mut current: Gateway = serde_json::from_value(current_gateway()).unwrap();
+        let first = build_listeners_status(&gw, &current, Some(1));
+        let claimed = programmed(&first, 0);
+        assert_eq!(
+            (claimed.status.as_str(), claimed.reason.as_str()),
+            ("True", "Programmed")
+        );
+        assert!(
+            claimed.message.contains("\"api.example.com\""),
+            "{}",
+            claimed.message
+        );
+        assert!(
+            claimed.message.contains("Ingress victim/web"),
+            "{}",
+            claimed.message
+        );
+        assert_eq!(
+            programmed(&first, 1).message,
+            "Listener programmed into Sōzu"
+        );
+
+        current.status = Some(serde_json::from_value(json!({ "listeners": first })).unwrap());
+        assert_eq!(
+            serde_json::to_value(build_listeners_status(&gw, &current, Some(1))).unwrap(),
+            serde_json::to_value(&first).unwrap(),
+            "rebuilding from our own status must be a no-op"
+        );
+
+        gw.problems.clear();
+        let cleared = build_listeners_status(&gw, &current, Some(1));
+        assert_eq!(
+            programmed(&cleared, 0).message,
+            "Listener programmed into Sōzu"
+        );
     }
 
     fn features(names: &[&str]) -> Vec<GatewayClassStatusSupportedFeatures> {
