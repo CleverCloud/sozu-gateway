@@ -752,14 +752,99 @@ fn reconcile_cert_name_change_replaces_in_place() {
     };
     let reqs = tr::reconcile(&before, &after).expect("reconcile");
     assert_eq!(reqs.len(), 1);
-    assert!(
-        matches!(
-            reqs[0].request_type,
-            Some(RequestType::ReplaceCertificate(_))
-        ),
-        "a name-only change must Replace in place, got {:?}",
-        reqs[0].request_type
+    // Since Sōzu 2.3.2 (0bc160b7) the worker applies a same-fingerprint
+    // Replace whose names changed; 2.2.1 ignored it (#81).
+    assert_eq!(
+        in_place_replace(&reqs[0]),
+        Some(vec!["app.example.com".into(), "www.example.com".into()]),
+        "a name-only change must Replace in place"
     );
+}
+
+/// The names a ReplaceCertificate installs, when it replaces the certificate
+/// with itself (same fingerprint) — the in-place update.
+fn in_place_replace(req: &Request) -> Option<Vec<String>> {
+    match &req.request_type {
+        Some(RequestType::ReplaceCertificate(r)) => {
+            let own = sozu_command_lib::certificate::calculate_fingerprint(
+                r.new_certificate.certificate.as_bytes(),
+            )
+            .expect("fingerprint");
+            let own: String = own.iter().map(|b| format!("{b:02x}")).collect();
+            (r.old_fingerprint == own).then(|| r.new_certificate.names.clone())
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn a_chain_change_on_the_same_leaf_replaces_it_in_place() {
+    // A Secret that gains (or fixes) an intermediate keeps its leaf, so the
+    // fingerprint is unchanged; without a Replace the old chain stays served.
+    let before = ir::Ir {
+        certificates: vec![cert(CERT_A, KEY_A)],
+        ..Default::default()
+    };
+    let mut chained = cert(CERT_A, KEY_A);
+    chained.chain = vec![CERT_B.to_string()];
+    let after = ir::Ir {
+        certificates: vec![chained],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&before, &after).expect("reconcile");
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert!(in_place_replace(&reqs[0]).is_some(), "{reqs:?}");
+    match &reqs[0].request_type {
+        Some(RequestType::ReplaceCertificate(r)) => {
+            assert_eq!(
+                r.new_certificate.certificate_chain,
+                vec![CERT_B.to_string()]
+            )
+        }
+        other => panic!("expected ReplaceCertificate, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_chain_spelled_differently_is_no_change() {
+    // What Sōzu serves is the decoded chain without copies of the leaf: a
+    // re-wrapped PEM, a fullchain bundle carrying the leaf again, or the same
+    // intermediates split across entries differently send nothing.
+    let mut chained = cert(CERT_A, KEY_A);
+    chained.chain = vec![CERT_B.to_string()];
+    let before = ir::Ir {
+        certificates: vec![chained.clone()],
+        ..Default::default()
+    };
+    let mut respelled = chained;
+    respelled.chain = vec![format!("{CERT_A}\n{}\n\n", CERT_B.trim_end())];
+    let after = ir::Ir {
+        certificates: vec![respelled],
+        ..Default::default()
+    };
+    assert!(tr::reconcile(&before, &after)
+        .expect("reconcile")
+        .is_empty());
+}
+
+#[test]
+fn secrets_sharing_a_leaf_serve_one_chain_whatever_their_order() {
+    // Two Secrets carry the same leaf with different chains: one of them is
+    // served, and which one must not depend on the order they were read in,
+    // or every reconcile would replace the certificate back and forth.
+    let mut chained = cert(CERT_A, KEY_A);
+    chained.chain = vec![CERT_B.to_string()];
+    let bare = cert(CERT_A, KEY_A);
+    let one = ir::Ir {
+        certificates: vec![chained.clone(), bare.clone()],
+        ..Default::default()
+    };
+    let other = ir::Ir {
+        certificates: vec![bare, chained],
+        ..Default::default()
+    };
+    assert!(tr::reconcile(&one, &other).expect("reconcile").is_empty());
+    assert!(tr::reconcile(&other, &one).expect("reconcile").is_empty());
 }
 
 #[test]

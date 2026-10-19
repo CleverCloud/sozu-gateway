@@ -47,8 +47,8 @@ use crate::{hex, plain, routing_state};
 /// `AddCertificate` of a fingerprint Sōzu already holds is a no-op there
 /// (names and material kept, on 2.2.1 as on 2.3.2) while the replay records
 /// the desired certificate, so over a drift `previous` missed the result
-/// lists names Sōzu does not hold. `previous` does no better there: its
-/// retry sends the same add, the same no-op.
+/// lists names, or a chain, Sōzu does not hold. `previous` does no better
+/// there: its retry sends the same add, the same no-op.
 pub fn replay_if_exact(
     previous: &ir::Ir,
     desired: &ir::Ir,
@@ -100,9 +100,10 @@ pub fn replay_if_exact(
 ///   evicted alike).
 /// - `AddCertificate` and `RemoveCertificate`: the certificates at that
 ///   listener with that fingerprint. `ReplaceCertificate` drops the old
-///   fingerprint, unless it is the new one (a rename), and sets the new.
-///   (Sōzu takes an add of a fingerprint it already holds as a no-op, so
-///   over a drift the add records names it may not hold; see
+///   fingerprint, unless it is the new one (its names or chain updated in
+///   place), and sets the new. (Sōzu takes an add of a fingerprint it
+///   already holds as a no-op, so over a drift the add records names or a
+///   chain it may not hold; see
 ///   [`replay_if_exact`].)
 ///
 /// An add sets what `desired` holds under its key, never an object rebuilt

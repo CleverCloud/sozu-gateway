@@ -330,7 +330,13 @@ Build `CertificateAndKey` straight from the Kubernetes Secret bytes (`tls.crt` /
   each worker re-inserts the entry under its resolver lock. Measured: names `[a]` → `[b]` on one
   fingerprint serves `b` and drops `a` on 2.3.2; 2.2.1 acknowledged it and kept serving `a`
   (our #81). An identical replay is still a no-op, and a plain `AddCertificate` of an existing
-  fingerprint is still ignored, so `Replace` stays the verb for a name change.
+  fingerprint is still ignored, so `Replace` stays the verb for a name change. The change test is
+  a digest of the certificate's material (leaf, chain, key, versions, names), so a Secret whose
+  intermediates changed on an unchanged leaf is a same-fingerprint `Replace` too; the translator
+  sends one when the served chain (decoded, without copies of the leaf) differs. Measured on the
+  test cluster, 2 workers: expand, restrict and rename on 8/8 handshakes each, and an added
+  intermediate served — not served without the chain comparison
+  ([E2E-RESULTS](docs/E2E-RESULTS.md#certificate-names-and-chains-on-sōzu-232-2026-10-19)).
 - **A `ReplaceCertificate` fails `NotFound` when the listener holds no certificate at all**
   (2.3.0 deletes an emptied address bucket, upstream 6dd569ee); with another certificate present
   but the old fingerprint missing, it inserts the new one and answers `Ok`. `sozu-agent` answers

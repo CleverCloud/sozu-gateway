@@ -29,6 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 
+use sozu_command_lib::certificate::{parse_pem, split_certificate_chain};
 use sozu_command_lib::proto::command::{
     request::RequestType, ActivateListener, AddBackend, AddCertificate, CertificateAndKey, Cluster,
     Header, HeaderPosition, ListenerType, LoadBalancingAlgorithms, LoadBalancingParams, PathRule,
@@ -311,7 +312,33 @@ fn replace_certificate_request(new: &ir::Certificate, old_fingerprint: String) -
 struct KeyedCert {
     listener: SocketAddr,
     fingerprint: String,
+    /// The intermediates as Sōzu serves them: DER, in order, without a copy
+    /// of the leaf (Sōzu drops those). Compared rather than the PEM, so a
+    /// re-encoded Secret is not a change.
+    chain: Vec<Vec<u8>>,
     cert: ir::Certificate,
+}
+
+/// The certificate chain `c` makes Sōzu serve after its leaf: every PEM block
+/// of every chain entry, decoded, minus copies of the leaf — the same split,
+/// decode and deduplication Sōzu applies when it loads the certificate.
+fn served_chain(c: &ir::Certificate) -> Result<Vec<Vec<u8>>, TranslatorError> {
+    let decode = |pem: &str| {
+        parse_pem(pem.as_bytes())
+            .map(|pem| pem.contents)
+            .map_err(|e| TranslatorError::Certificate(format!("{e:?}")))
+    };
+    let leaf = decode(&c.certificate)?;
+    let mut chain = Vec::new();
+    for entry in &c.chain {
+        for pem in split_certificate_chain(entry.clone()) {
+            let link = decode(&pem)?;
+            if link != leaf {
+                chain.push(link);
+            }
+        }
+    }
+    Ok(chain)
 }
 
 /// Group the certs by (listener, fingerprint), unioning the SNI names within
@@ -321,25 +348,44 @@ struct KeyedCert {
 /// loaded cert against whichever duplicate it pairs with — re-emitting a
 /// ReplaceCertificate on every cycle and clamping SNI coverage to that entry's
 /// names. Grouping first keeps `reconcile(&ir, &ir)` empty and every hostname
-/// covered. The first occurrence fixes the group's position and PEM bytes
-/// (the DER is identical anyway); the merged name set is sorted.
+/// covered. The first occurrence fixes the group's position; the material Sōzu
+/// is sent (chain, key, PEM) is the smallest of the group's entries, so which
+/// Secret is read first never changes what is served — two Secrets sharing a
+/// leaf with different chains would otherwise trade places across reconciles
+/// and replace the certificate each time. The merged name set is sorted.
 fn keyed_certs(certs: &[ir::Certificate]) -> Result<Vec<KeyedCert>, TranslatorError> {
     let mut out: Vec<KeyedCert> = Vec::new();
     let mut index: HashMap<(SocketAddr, String), usize> = HashMap::new();
     for c in certs {
         let fp = fingerprint(c)?;
+        let chain = served_chain(c)?;
         match index.get(&(c.listener, fp.clone())) {
             Some(&i) => {
-                let existing = &mut out[i].cert;
-                let mut names: BTreeSet<String> = existing.names.drain(..).collect();
+                let existing = &mut out[i];
+                let mut names: BTreeSet<String> = existing.cert.names.drain(..).collect();
                 names.extend(c.names.iter().cloned());
-                existing.names = names.into_iter().collect();
+                if (
+                    std::cmp::Reverse(chain.len()),
+                    &chain,
+                    &c.key,
+                    &c.certificate,
+                ) < (
+                    std::cmp::Reverse(existing.chain.len()),
+                    &existing.chain,
+                    &existing.cert.key,
+                    &existing.cert.certificate,
+                ) {
+                    existing.chain = chain;
+                    existing.cert = c.clone();
+                }
+                existing.cert.names = names.into_iter().collect();
             }
             None => {
                 index.insert((c.listener, fp.clone()), out.len());
                 out.push(KeyedCert {
                     listener: c.listener,
                     fingerprint: fp,
+                    chain,
                     cert: c.clone(),
                 });
             }
@@ -696,9 +742,13 @@ fn routing_state(ir: &ir::Ir) -> Result<ConfigState, TranslatorError> {
 /// to a single entry carrying the union of their SNI names. Handles:
 ///  - new cert at (listener, fp)        -> AddCertificate
 ///  - cert gone from (listener, fp)     -> RemoveCertificate
-///  - same (listener, fp), names differ -> ReplaceCertificate (same fp; Sōzu
-///    skips a plain AddCertificate whose fp already exists, so a Replace is the
-///    only way to update SNI names in place)
+///  - same (listener, fp), names or served chain differ -> ReplaceCertificate
+///    (same fp; Sōzu skips a plain AddCertificate whose fp already exists, so a
+///    Replace is the only way to update a loaded certificate in place, and
+///    since Sōzu 2.3.2 a same-fingerprint Replace whose names or material
+///    differ is applied per worker without a gap — 2.2.1 ignored it). A key
+///    that only changed encoding is no change: the builder admits only the
+///    leaf's own key.
 ///  - rotation (a removed + an added at the same listener sharing the SNI name
 ///    set) -> a single ReplaceCertificate (zero-gap)
 fn certificate_requests(
@@ -722,9 +772,10 @@ fn certificate_requests(
 
     for d in &des {
         match prev_by_key.get(&(d.listener, d.fingerprint.as_str())) {
-            // Same (listener, fp): in place. Only a name change needs a request.
+            // Same (listener, fp): in place. A name or chain change needs a
+            // request; the leaf, and with it the key, cannot differ.
             Some(p) => {
-                if names_set(&p.cert) != names_set(&d.cert) {
+                if names_set(&p.cert) != names_set(&d.cert) || p.chain != d.chain {
                     out.push(replace_certificate_request(&d.cert, d.fingerprint.clone()));
                 }
             }

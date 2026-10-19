@@ -853,6 +853,30 @@ fn a_rotation_swaps_the_certificate_and_a_rename_renames_it() {
     );
 }
 
+/// A chain change on an unchanged leaf is a replace with its own
+/// fingerprint as well: acknowledged, the replay records the desired chain,
+/// so the next diff sends nothing for it; not acknowledged, the baseline
+/// keeps the old chain and the next diff sends the same replace again.
+#[test]
+fn a_chain_change_is_recorded_once_acknowledged() {
+    let previous = applied();
+    let mut chained = previous.clone();
+    chained.certificates[0].chain = vec![CERT_B.to_string()];
+    let replace = one_request(&previous, &chained);
+    assert!(matches!(
+        replace.request_type,
+        Some(RequestType::ReplaceCertificate(_))
+    ));
+    let adopted = tr::replay_if_exact(&previous, &chained, std::slice::from_ref(&replace))
+        .expect("a certificate replace leaves the routing state as it was");
+    assert_eq!(adopted, chained);
+    assert!(tr::reconcile(&adopted, &chained)
+        .expect("translate")
+        .is_empty());
+    let kept = tr::replay_if_exact(&previous, &chained, &[]).expect("nothing acknowledged");
+    assert_eq!(one_request(&kept, &chained), replace);
+}
+
 /// A layer-4 frontend also stands for its listener. Dropped while Sōzu
 /// still holds the listener, it would leave the listener out of the
 /// baseline, and the retry would never take it down: it stays until the

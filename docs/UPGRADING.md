@@ -4,6 +4,23 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Certificate chain changes are pushed live
+
+A Secret whose intermediates changed while its leaf stayed the same — a missing
+intermediate added, a CA re-issuing its intermediate — produced no request: a
+loaded certificate is identified by its leaf's fingerprint, and only its names
+were compared. Clients kept getting the old chain until Sōzu restarted. The
+controller now sends the new chain as a same-fingerprint `ReplaceCertificate`,
+which Sōzu 2.3.2 applies in place on every worker (measured on the test cluster).
+The chain is compared as Sōzu serves it, decoded and without copies of the
+leaf, so a re-encoded bundle, intermediates split differently across PEM
+blocks, or a copy of the leaf added or dropped is not a change; intermediates
+in a different order are. When several Secrets carry the same leaf with
+different chains, the one with the most intermediates is served, whatever
+order the Secrets are read in. Nothing to do.
+
+---
+
 ## Sōzu 2.3.2
 
 The controller now links `sozu-command-lib` 2.3.2 and the chart defaults to
