@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
-use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service, ServicePort};
+use k8s_openapi::api::discovery::v1::{EndpointPort, EndpointSlice};
 use k8s_openapi::api::networking::v1::Ingress;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::PrivateKeyDer;
@@ -348,6 +348,18 @@ pub enum Problem {
     UnsupportedProtocol {
         protocol: String,
     },
+    /// An HTTP route's backend Service port declares an `appProtocol` Sōzu
+    /// cannot speak to it (Gateway API GEP-1911): `kubernetes.io/wss`, which
+    /// needs TLS to the backend, and Sōzu has none. Reported only: the route is
+    /// still programmed as before, cleartext HTTP/1.1 to that port (see
+    /// [`HttpBackendProtocol::Unsupported`] for why). An HTTPRoute's parent
+    /// reads `ResolvedRefs: False` / `UnsupportedProtocol`; an Ingress, which
+    /// has no condition for it, gets the Warning Event alone.
+    UnsupportedAppProtocol {
+        service: String,
+        port: i32,
+        app_protocol: String,
+    },
     /// A listener declares a `(port, protocol)` pair this gateway does not
     /// expose. The port is the client-visible one — the Service's port, not the
     /// pod bind — and only the exposed set can carry traffic, because the
@@ -451,6 +463,7 @@ impl Problem {
             Problem::InvalidHostname { .. } => "InvalidHostname",
             Problem::UnsupportedTlsMode { .. } => "UnsupportedTlsMode",
             Problem::UnsupportedProtocol { .. } => "UnsupportedProtocol",
+            Problem::UnsupportedAppProtocol { .. } => "UnsupportedAppProtocol",
             Problem::PortNotExposed { .. } => "PortNotExposed",
             Problem::ListenerPortNotOwned { .. } => "ListenerPortNotOwned",
             Problem::L4RouteConflict { .. } => "L4RouteConflict",
@@ -661,6 +674,16 @@ impl std::fmt::Display for Problem {
                 f,
                 "listener protocol {protocol:?} is not supported (HTTP, HTTPS, TCP and UDP are)"
             ),
+            Problem::UnsupportedAppProtocol {
+                service,
+                port,
+                app_protocol,
+            } => write!(
+                f,
+                "Service {service:?} port {port} declares appProtocol {app_protocol:?}, which \
+                 needs TLS to the backend, and Sōzu cannot open TLS to a backend; the route \
+                 still sends it cleartext HTTP/1.1"
+            ),
             Problem::PortNotExposed {
                 listener,
                 declared,
@@ -759,9 +782,18 @@ pub struct BuildOutput {
     pub referenced_services: BTreeSet<String>,
 }
 
-/// A reference to a Service port from an Ingress backend: by number or by name.
+/// A reference to a Service port from a route's backend: by number or by name.
 pub(crate) enum PortRef {
+    /// A number, as a TCPRoute or UDPRoute names it: the first Service port
+    /// carrying it, whatever its protocol.
     Number(i32),
+    /// A number, as an HTTP route (Ingress, HTTPRoute) names it. Sōzu reaches
+    /// an HTTP backend over TCP, so when the Service exposes the number over
+    /// TCP and over another protocol, the TCP entry is the one meant, wherever
+    /// it is listed. Without a TCP entry, the first one carrying the number,
+    /// as [`PortRef::Number`].
+    HttpNumber(i32),
+    /// A name, unique within a Service.
     Name(String),
 }
 
@@ -1202,6 +1234,201 @@ impl<'a> Index<'a> {
     }
 }
 
+/// A Service port's protocol, `TCP` when unset (the apiserver's default).
+fn port_protocol(port: &ServicePort) -> &str {
+    port.protocol.as_deref().unwrap_or("TCP")
+}
+
+/// The Service port a backend reference names, and the id of the cluster it
+/// maps to.
+///
+/// The id is `namespace.service.port` — except that a Service may expose one
+/// number twice, over two protocols (`53/UDP` and `53/TCP`), each entry with
+/// its own `targetPort` and `appProtocol`. One cluster for both would pool
+/// the two target ports' pod addresses into the backends of every route to
+/// either, and an HTTP route (which takes the TCP entry) and a UDPRoute (which
+/// takes the first) to one such number would each send part of their traffic
+/// to the other's port. So the first entry carrying a number keeps the bare id,
+/// which every reference by number resolved to before HTTP routes preferred
+/// TCP, and a later entry gets its protocol appended: `namespace.service.53.tcp`.
+fn service_port<'a>(
+    index: &Index<'a>,
+    namespace: &str,
+    service: &str,
+    port_ref: &PortRef,
+) -> Result<(&'a ServicePort, String), Problem> {
+    let svc = index
+        .services
+        .get(&(namespace.to_string(), service.to_string()))
+        .ok_or_else(|| Problem::ServiceNotFound {
+            service: service.to_string(),
+        })?;
+
+    let ports: &'a [ServicePort] = svc
+        .spec
+        .as_ref()
+        .and_then(|s| s.ports.as_deref())
+        .unwrap_or_default();
+    let first_with = |n: i32| ports.iter().find(|p| p.port == n);
+    let port = match port_ref {
+        PortRef::Number(n) => first_with(*n),
+        PortRef::HttpNumber(n) => ports
+            .iter()
+            .find(|p| p.port == *n && port_protocol(p) == "TCP")
+            .or_else(|| first_with(*n)),
+        PortRef::Name(name) => ports
+            .iter()
+            .find(|p| p.name.as_deref() == Some(name.as_str())),
+    };
+    let port = port.ok_or_else(|| Problem::ServicePortNotFound {
+        service: service.to_string(),
+        port: match port_ref {
+            PortRef::Number(n) | PortRef::HttpNumber(n) => n.to_string(),
+            PortRef::Name(n) => n.clone(),
+        },
+    })?;
+    // `(port, protocol)` is unique within a Service, so comparing protocols
+    // tells whether `port` is the first entry carrying its number.
+    let cluster_id = if first_with(port.port).map(port_protocol) == Some(port_protocol(port)) {
+        format!("{namespace}.{service}.{}", port.port)
+    } else {
+        format!(
+            "{namespace}.{service}.{}.{}",
+            port.port,
+            port_protocol(port).to_ascii_lowercase()
+        )
+    };
+    Ok((port, cluster_id))
+}
+
+/// The Kubernetes standard application protocol (KEP-3726) for HTTP/2 over
+/// cleartext with prior knowledge.
+const APP_PROTOCOL_H2C: &str = "kubernetes.io/h2c";
+/// The Kubernetes standard application protocol for WebSocket over TLS.
+const APP_PROTOCOL_WSS: &str = "kubernetes.io/wss";
+
+/// What a Service port's `appProtocol` asks of the connection an **HTTP**
+/// route (Ingress, HTTPRoute) opens to its backends — Gateway API GEP-1911,
+/// which requires the `kubernetes.io/*` constants to be recognised and a
+/// backend the route cannot speak to to be reported.
+///
+/// Only the two constants Sōzu has an answer for are acted on. Every other
+/// value — unset, `http`, `kubernetes.io/ws`, and the free-form `grpc`,
+/// `http2`, `tcp`, `https` or mesh-specific spellings Services carry in front
+/// of backends that also speak HTTP/1.1 — keeps the HTTP/1.1 every route got
+/// before; refusing them would un-program routes that work. `https` would need
+/// backend TLS too, but it is not a Kubernetes constant and is left alone.
+///
+/// Deliberately **not** consulted by TCPRoute/UDPRoute: a layer-4 route
+/// forwards bytes, so a TLS port behind one is plain passthrough.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HttpBackendProtocol {
+    /// HTTP/1.1, Sōzu's default towards a backend.
+    Http1,
+    /// `kubernetes.io/h2c`: the cluster gets Sōzu's `http2`. On Sōzu 2.3.2 an
+    /// HTTP/2 client (HTTPS listener, ALPN h2) and an HTTP/1.1 client alike
+    /// then reach the backend as HTTP/2 — measured, see
+    /// `docs/probes/h2c-backend_sozu-2.3.2_2026-10-19.txt`.
+    H2c,
+    /// `kubernetes.io/wss`: WebSocket over TLS. Sōzu 2.3.2 has no TLS towards
+    /// a backend (`AddBackend` carries an address, never a TLS setting), so
+    /// the route cannot speak the declared protocol.
+    ///
+    /// Reported ([`Self::problem`]) and still programmed as before: cleartext
+    /// HTTP/1.1 to the TLS port, which fails there. Taking the rule out would
+    /// let another rule answer its requests instead — `/ws` to such a port
+    /// next to `/` to another would send `/ws` to the `/` backend. Nor is it
+    /// pointed at an empty cluster for Sōzu's `503`: every other invalid
+    /// `backendRef` drops its match today, and an error answer of Sōzu's own,
+    /// for all of them, is #78.
+    Unsupported { port: i32, app_protocol: String },
+}
+
+impl HttpBackendProtocol {
+    /// Classify the port a backend reference names; an HTTP route names a
+    /// number as [`PortRef::HttpNumber`], so this is the TCP entry when the
+    /// number is also exposed over UDP or SCTP. A reference that does not resolve is
+    /// `Http1` here: [`add_service_route`] reports why.
+    pub(crate) fn of(index: &Index, namespace: &str, service: &str, port_ref: &PortRef) -> Self {
+        let Ok((port, _)) = service_port(index, namespace, service, port_ref) else {
+            return Self::Http1;
+        };
+        match port.app_protocol.as_deref() {
+            Some(APP_PROTOCOL_H2C) => Self::H2c,
+            Some(APP_PROTOCOL_WSS) => Self::Unsupported {
+                port: port.port,
+                app_protocol: APP_PROTOCOL_WSS.to_string(),
+            },
+            _ => Self::Http1,
+        }
+    }
+
+    /// What to report about a route to `service`'s port: an `appProtocol`
+    /// Sōzu cannot speak. Never a reason to leave the route out.
+    pub(crate) fn problem(&self, service: &str) -> Option<Problem> {
+        match self {
+            Self::Unsupported { port, app_protocol } => Some(Problem::UnsupportedAppProtocol {
+                service: service.to_string(),
+                port: *port,
+                app_protocol: app_protocol.clone(),
+            }),
+            Self::Http1 | Self::H2c => None,
+        }
+    }
+
+    /// Apply the protocol to the cluster an HTTP route resolved to.
+    ///
+    /// Only ever turns `http2` on; [`add_service_route`] creates the cluster
+    /// with it off. A cluster is one Service port entry ([`service_port`]
+    /// gives a TCP/UDP twin its own id), and `appProtocol` belongs to that
+    /// entry, so every HTTP route reaching one cluster classifies it the same
+    /// way and the order routes are built in cannot change the outcome. A
+    /// layer-4 route resolving to the same entry shares the cluster but never
+    /// touches the flag, and Sōzu's TCP and UDP proxies never read it (2.3.2:
+    /// `cluster.http2` reaches only the HTTP router and health checks,
+    /// `lib/src/server.rs:3289`, and `ConfigState::add_cluster` does not
+    /// validate it), so a cluster both kinds share is served correctly by each.
+    pub(crate) fn configure(&self, clusters: &mut BTreeMap<String, ir::Cluster>, cluster_id: &str) {
+        if *self == Self::H2c {
+            if let Some(cluster) = clusters.get_mut(cluster_id) {
+                cluster.http2 = true;
+            }
+        }
+    }
+}
+
+/// The port of one EndpointSlice that carries `svc_port`'s pods, if any.
+///
+/// Matched by name, the Service port's: the EndpointSlice controller writes
+/// each slice port with its Service port's name and protocol, an unnamed one
+/// as `""` where the Service has no name at all, so the two spellings are one.
+/// A slice whose only port does not match falls back to it, as long as it
+/// could be this port: unnamed, and of this port's protocol. Never `first()`
+/// of several, which would route to the wrong container port. And never a
+/// sole port named for another Service port or carrying another protocol:
+/// the controller groups pods by the ports they resolve, so pods exposing only
+/// one port's named `targetPort` get a slice of their own carrying that port
+/// alone, and falling back to it would dial it for every Service port — both
+/// entries of a TCP/UDP twin ([`service_port`]) included.
+fn slice_port<'s>(ports: &'s [EndpointPort], svc_port: &ServicePort) -> Option<&'s EndpointPort> {
+    fn name(name: &Option<String>) -> &str {
+        name.as_deref().unwrap_or("")
+    }
+    if let Some(named) = ports.iter().find(|p| name(&p.name) == name(&svc_port.name)) {
+        return Some(named);
+    }
+    match ports {
+        // An EndpointSlice port's protocol is `TCP` when unset too.
+        [sole]
+            if name(&sole.name).is_empty()
+                && sole.protocol.as_deref().unwrap_or("TCP") == port_protocol(svc_port) =>
+        {
+            Some(sole)
+        }
+        _ => None,
+    }
+}
+
 /// Resolve an Ingress backend (service + port) to (cluster_id, pod addresses).
 /// Non-fatal findings (an ignored FQDN slice) are appended to `problems`;
 /// the `Err` variant is reserved for failures that leave nothing to program.
@@ -1212,31 +1439,7 @@ fn resolve_backends(
     port_ref: &PortRef,
     problems: &mut Vec<Problem>,
 ) -> Result<(String, i32, Vec<SocketAddr>), Problem> {
-    let svc = index
-        .services
-        .get(&(namespace.to_string(), service.to_string()))
-        .ok_or_else(|| Problem::ServiceNotFound {
-            service: service.to_string(),
-        })?;
-
-    let ports = svc.spec.as_ref().and_then(|s| s.ports.as_ref());
-    let port = ports.and_then(|ports| {
-        ports.iter().find(|p| match port_ref {
-            PortRef::Number(n) => p.port == *n,
-            PortRef::Name(name) => p.name.as_deref() == Some(name.as_str()),
-        })
-    });
-    let svc_port = port.ok_or_else(|| Problem::ServicePortNotFound {
-        service: service.to_string(),
-        port: match port_ref {
-            PortRef::Number(n) => n.to_string(),
-            PortRef::Name(n) => n.clone(),
-        },
-    })?;
-
-    // EndpointSlice port whose name matches the Service port name (both may be None).
-    let want_port_name = svc_port.name.clone();
-    let cluster_id = format!("{namespace}.{service}.{}", svc_port.port);
+    let (svc_port, cluster_id) = service_port(index, namespace, service, port_ref)?;
 
     let mut addrs = Vec::new();
     if let Some(slices) = index
@@ -1259,20 +1462,8 @@ fn resolve_backends(
             }
             let pod_port = slice
                 .ports
-                .as_ref()
-                .and_then(|ports| {
-                    // Match the EndpointSlice port by name (the Service port name).
-                    // Only fall back to the sole port when there is exactly one —
-                    // never guess `first()` on a multi-port slice (would route to
-                    // the wrong container port).
-                    ports.iter().find(|p| p.name == want_port_name).or_else(|| {
-                        if ports.len() == 1 {
-                            ports.first()
-                        } else {
-                            None
-                        }
-                    })
-                })
+                .as_deref()
+                .and_then(|ports| slice_port(ports, svc_port))
                 .and_then(|p| p.port);
             // The wire type is i32; a value outside u16 cannot be a real port
             // (API validation forbids it), but truncating with `as` would
@@ -1383,6 +1574,9 @@ pub(crate) fn add_service_route(
         https_redirect: false,
         max_connections_per_ip: s.max_connections_per_ip,
         retry_after: s.retry_after,
+        // Set by an HTTP route only (`HttpBackendProtocol::configure`): a
+        // layer-4 route ignores `appProtocol`.
+        http2: false,
     });
     let backend_ids: Vec<String> = addrs
         .iter()
@@ -2066,7 +2260,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     continue;
                 };
                 let port_ref = match &svc_backend.port {
-                    Some(p) if p.number.is_some() => PortRef::Number(p.number.unwrap_or_default()),
+                    Some(p) if p.number.is_some() => {
+                        PortRef::HttpNumber(p.number.unwrap_or_default())
+                    }
                     Some(p) if p.name.is_some() => {
                         PortRef::Name(p.name.clone().unwrap_or_default())
                     }
@@ -2078,6 +2274,19 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         continue;
                     }
                 };
+
+                // GEP-1911 is Gateway API; an Ingress has no condition to put
+                // it in. A port Sōzu cannot speak to is warned about and
+                // still programmed as before (cleartext HTTP/1.1), as on an
+                // HTTPRoute: taking the path out would hand its requests to
+                // another path, or a 404.
+                let protocol =
+                    HttpBackendProtocol::of(&index, &namespace, &svc_backend.name, &port_ref);
+                if let Some(problem) = protocol.problem(&svc_backend.name) {
+                    if !problems.contains(&problem) {
+                        problems.push(problem);
+                    }
+                }
 
                 match add_service_route(
                     &index,
@@ -2091,6 +2300,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 ) {
                     Err(problem) => problems.push(problem),
                     Ok((cluster_id, has_endpoints)) => {
+                        protocol.configure(&mut clusters, &cluster_id);
                         if !has_endpoints {
                             problems.push(Problem::NoReadyEndpoints {
                                 service: svc_backend.name.clone(),

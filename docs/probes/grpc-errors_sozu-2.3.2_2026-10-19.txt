@@ -1,0 +1,88 @@
+# What a gRPC client reads from Sōzu's own error answers, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# Hosts (second config of the same harness): `foo` -> http2 = true to grpc-go 1.75.0's interop server; `grpch1`
+# -> the same server with http2 unset; `dead` -> http2 = true to a port nothing listens on; `empty` -> a cluster
+# with no backend; `nohost` -> no frontend at all; `victim` -> a second interop server the run kills mid-stream;
+# `raw` -> a frame-logging h2c server. Client "grpcprobe" (grpc-go 1.75.0) on the HTTPS listener, a unary
+# EmptyCall unless stated; `E-slowfirst` sends the first response message, and so the response HEADERS, after
+# 35 s, past the 30 s back timeout.
+# Raw output, verbatim: r2-errors-interop-2.3.2.log, then r2-main-2.3.2.log (request-trailer frames R1-R3,
+# the same error cases, E-slowfirst, E-kill).
+
+# ---- r2-errors-interop-2.3.2.log
+grpc-h2-backends-r2-232 clevercloud/sozu:2.3.2 Up 1 second
+== E-unary host=foo      t=  0.0s unary EmptyCall -> code=OK msg=""
+== E-unary host=grpch1   t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 502 (Bad Gateway); malformed header: missing HTTP content-type"
+== E-unary host=dead     t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+== E-unary host=empty    t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+== E-unary host=nohost   t=  0.0s unary EmptyCall -> code=Unimplemented msg="unexpected HTTP status code received from server: 404 (Not Found); malformed header: missing HTTP content-type"
+== E-kill host=victim: server stream, backend process killed at t~3s
+t=  0.0s msg 0 size 8
+t=  3.0s recv err code=Internal msg="stream terminated by RST_STREAM with error code: INTERNAL_ERROR"
+   [killed victim at 19:11:32]
+== E-unary host=victim (after kill) t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+== E-body: what the 503/404 answers look like to a gRPC client (curl --http2, gRPC headers)
+HTTP/2 503 
+HTTP/2 404 
+empty_unary                    rc=0 
+large_unary                    rc=0 
+client_streaming               rc=0 
+server_streaming               rc=0 
+ping_pong                      rc=0 
+empty_stream                   rc=0 
+timeout_on_sleeping_server     rc=0 
+cancel_after_begin             rc=0 
+cancel_after_first_response    rc=0 
+status_code_and_message        rc=0 
+special_status_message         rc=0 
+custom_metadata                rc=0 
+unimplemented_method           rc=0 
+unimplemented_service          rc=0 
+== interop empty_unary over the cleartext HTTP listener (h2c prior knowledge)
+rc=1 2026/10/19 19:11:33 FATAL: [interop] /TestService/EmptyCall RPC failed:  rpc error: code = Unavailable desc = connection error: desc = "error reading server preface: http2: failed reading the frame payload: http2: frame too large, note that the frame header lo
+stopped
+
+# ---- r2-main-2.3.2.log
+grpc-h2-backends-r2-232 clevercloud/sozu:2.3.2 Up 1 second
+== R1 request trailers, client=h2(TLS) -> http2 cluster -> frame-logging h2c backend
+status=200 proto=HTTP/2.0 content-length="" body-err=<nil>
+  body: HEADERS end=false [:method=POST :authority=raw.test.google.fr:29443 :path=/reqtrailers :scheme=https te=trailers]
+  DATA len=10 end=false
+  TRAILERS end=true [x-req-trailer=client-sent grpc-timeout=1S]
+  
+  client-received-trailers: 
+== R2 request trailers, client=h1(TLS, chunked) -> http2 cluster -> frame-logging h2c backend
+status=200 proto=HTTP/1.1 content-length="" body-err=<nil>
+  body: HEADERS end=false [:method=POST :authority=raw.test.google.fr:29443 :path=/reqtrailers :scheme=https te=trailers]
+  DATA len=10 end=false
+  TRAILERS end=true [grpc-timeout=1S x-req-trailer=client-sent]
+  
+  client-received-trailers: 
+== R3 gRPC unary (grpc-go, deadline 20s) -> frame-logging backend: what request frames reach it
+t=  0.0s unary EmptyCall -> code=Unknown msg="transport: received unexpected content-type \"text/plain\""
+-- backend frame log:
+2026/10/19 19:03:28 stream 1:
+HEADERS end=false [:method=POST :authority=raw.test.google.fr:29443 :path=/reqtrailers :scheme=https te=trailers]
+DATA len=10 end=false
+TRAILERS end=true [x-req-trailer=client-sent grpc-timeout=1S]
+2026/10/19 19:03:28 stream 1:
+HEADERS end=false [:method=POST :authority=raw.test.google.fr:29443 :path=/reqtrailers :scheme=https te=trailers]
+DATA len=10 end=false
+TRAILERS end=true [grpc-timeout=1S x-req-trailer=client-sent]
+2026/10/19 19:03:28 stream 1:
+HEADERS end=false [:method=POST :authority=raw.test.google.fr :path=/grpc.testing.TestService/EmptyCall :scheme=https content-type=application/grpc te=trailers grpc-timeout=19976775u]
+DATA len=5 end=false
+DATA len=0 end=true
+== E-unary host=foo      t=  0.0s unary EmptyCall -> code=OK msg=""
+== E-unary host=grpch1   t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 502 (Bad Gateway); malformed header: missing HTTP content-type"
+== E-unary host=dead     t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+== E-unary host=empty    t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+== E-unary host=nohost   t=  0.0s unary EmptyCall -> code=Unimplemented msg="unexpected HTTP status code received from server: 404 (Not Found); malformed header: missing HTTP content-type"
+== E-slowfirst host=foo: first message (and response HEADERS) after 35 s (back_timeout default 30)
+t= 30.1s recv err code=Unavailable msg="unexpected HTTP status code received from server: 504 (Gateway Timeout); malformed header: missing HTTP content-type"
+== E-kill host=victim: server stream, backend process killed at t~3s
+t=  0.0s msg 0 size 8
+   [killed victim at 19:04:02]
+t=  3.0s recv err code=Internal msg="stream terminated by RST_STREAM with error code: INTERNAL_ERROR"

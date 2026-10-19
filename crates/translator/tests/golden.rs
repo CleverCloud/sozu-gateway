@@ -64,6 +64,7 @@ fn cluster(id: &str, lb: ir::LbAlgorithm, sticky: bool) -> ir::Cluster {
         https_redirect: false,
         max_connections_per_ip: None,
         retry_after: None,
+        http2: false,
     }
 }
 
@@ -1292,6 +1293,53 @@ fn cluster_connection_limit_maps_to_request() {
         ..Default::default()
     };
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+/// A cluster whose backends speak h2c asks Sōzu for HTTP/2 towards them; the
+/// cluster next to it keeps the request it always had (`http2` absent).
+#[test]
+fn h2c_cluster_maps_to_http2() {
+    let mut grpc = cluster("grpc", ir::LbAlgorithm::RoundRobin, false);
+    grpc.http2 = true;
+    let model = ir::Ir {
+        clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false), grpc],
+        ..Default::default()
+    };
+    insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+/// `http2` of each `AddCluster` a reconcile emits, by cluster id.
+fn cluster_http2(reqs: &[Request]) -> Vec<(String, Option<bool>)> {
+    reqs.iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddCluster(c)) => Some((c.cluster_id.clone(), c.http2)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A Service port gaining or losing `kubernetes.io/h2c` reaches Sōzu as one
+/// `AddCluster` upsert, both ways, and nothing else moves. Off is the field
+/// left out, never `Some(false)`: the worker reads it as `unwrap_or(false)`
+/// and an upsert replaces the whole cluster, so `None` resets the backend to
+/// HTTP/1.1 (measured on 2.3.2, see docs/probes/h2c-backend_*).
+#[test]
+fn reconcile_flips_http2_both_ways() {
+    let off = sample_ir();
+    let mut on = sample_ir();
+    on.clusters[0].http2 = true;
+
+    let up = tr::reconcile(&off, &on).expect("reconcile");
+    assert_eq!(up.len(), 1, "{}", dump(&up));
+    assert_eq!(cluster_http2(&up), [("app".to_string(), Some(true))]);
+    insta::assert_json_snapshot!("reconcile_turns_http2_on", up);
+
+    let down = tr::reconcile(&on, &off).expect("reconcile");
+    assert_eq!(down.len(), 1, "{}", dump(&down));
+    assert_eq!(cluster_http2(&down), [("app".to_string(), None)]);
+    insta::assert_json_snapshot!("reconcile_turns_http2_off", down);
+
+    assert!(tr::reconcile(&on, &on).expect("reconcile").is_empty());
 }
 
 #[test]

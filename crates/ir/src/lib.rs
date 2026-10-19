@@ -141,6 +141,17 @@ pub struct Cluster {
     /// `Retry-After` header (seconds) sent on the `429` when the cap is hit.
     #[serde(default)]
     pub retry_after: Option<u32>,
+    /// The backends speak HTTP/2 with prior knowledge (h2c): Sōzu's
+    /// `Cluster.http2`, set when an HTTP route reaches a Service port declaring
+    /// `appProtocol: kubernetes.io/h2c` (Gateway API GEP-1911). Without it Sōzu
+    /// speaks HTTP/1.1 to the backend, which an h2c-only server refuses.
+    ///
+    /// Skipped when `false`, so a cluster that does not set it serialises
+    /// exactly as before; a plain field rather than an enum variant, so an
+    /// older controller reading a shadow that carries it ignores it instead
+    /// of failing the whole parse (see `docs/UPGRADING.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub http2: bool,
 }
 
 /// One backend endpoint: a **pod IP:port** (never a ClusterIP).

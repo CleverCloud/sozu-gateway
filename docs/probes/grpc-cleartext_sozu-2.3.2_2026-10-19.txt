@@ -1,0 +1,74 @@
+# HTTP/2 offered in cleartext to Sōzu's HTTP listener, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# Second config of the same harness. H1: a Python client sends the raw HTTP/2 prior-knowledge preface to
+# 127.0.0.1:29080; H2: `curl --http2-prior-knowledge` (curl 8.5.0); H3: `curl --http2`, an HTTP/1.1 request
+# offering `Upgrade: h2c`, to `h1tr` (http2 unset), a Go net/http server speaking only HTTP/1.1 — which
+# ignores the offer. The T-* lines probe trailers through `h2tr` (http2 = true, h2c trailer echo) and
+# `h1tr`; the four T-req cases failed client-side on a probe bug (Go refuses `Content-Length` as a trailer
+# key), and no claim rests on them.
+# Raw output, verbatim: r2-trailers-2.3.2.log.
+
+# ---- r2-trailers-2.3.2.log
+grpc-h2-backends-r2-232 clevercloud/sozu:2.3.2 Up 1 second
+== H1 raw h2c prior-knowledge preface to the cleartext HTTP listener
+received 1478 bytes; first line: HTTP/1.1 400 Bad Request
+    Cache-Control: no-cache
+    Connection: close
+    Sozu-Id: 01M5ARMSVQEYDNM3PTR1ND6ZW5
+starts with an HTTP/2 SETTINGS frame: False
+== H2 curl --http2-prior-knowledge (cleartext)
+http_version=0 status=000
+== H3 curl --http2 (cleartext, Upgrade: h2c offer)
+http_version=1.1 status=200
+== T-resp client=h2(TLS) cluster=h2tr path=/resp-cl
+status=200 proto=HTTP/2.0 content-length="15" body-err=<nil>
+  body: proto=HTTP/2.0
+  
+  client-received-trailers: grpc-message="probe" grpc-status="7" x-probe-trailer="end-of-stream"
+== T-resp client=h1(TLS) cluster=h2tr path=/resp-cl
+status=200 proto=HTTP/1.1 content-length="15" body-err=<nil>
+  body: proto=HTTP/2.0
+  
+  client-received-trailers: 
+== T-resp client=h2(TLS) cluster=h2tr path=/resp-nocl
+status=200 proto=HTTP/2.0 content-length="" body-err=<nil>
+  body: proto=HTTP/2.0
+  
+  client-received-trailers: grpc-message="probe" grpc-status="7" x-probe-trailer="end-of-stream"
+== T-resp client=h1(TLS) cluster=h2tr path=/resp-nocl
+status=200 proto=HTTP/1.1 content-length="" body-err=<nil>
+  body: proto=HTTP/2.0
+  
+  client-received-trailers: grpc-message="probe" grpc-status="7" x-forwarded-for="" x-probe-trailer="end-of-stream"
+== T-resp client=h2(TLS) cluster=h1tr path=/resp-cl
+status=200 proto=HTTP/2.0 content-length="15" body-err=<nil>
+  body: proto=HTTP/1.1
+  
+  client-received-trailers: 
+== T-resp client=h1(TLS) cluster=h1tr path=/resp-cl
+status=200 proto=HTTP/1.1 content-length="15" body-err=<nil>
+  body: proto=HTTP/1.1
+  
+  client-received-trailers: 
+== T-resp client=h2(TLS) cluster=h1tr path=/resp-nocl
+status=200 proto=HTTP/2.0 content-length="" body-err=<nil>
+  body: proto=HTTP/1.1
+  
+  client-received-trailers: grpc-message="probe" grpc-status="7" x-forwarded-for="6.6.6.6" x-probe-trailer="end-of-stream"
+== T-resp client=h1(TLS) cluster=h1tr path=/resp-nocl
+status=200 proto=HTTP/1.1 content-length="" body-err=<nil>
+  body: proto=HTTP/1.1
+  
+  client-received-trailers: grpc-message="probe" grpc-status="7" x-forwarded-for="6.6.6.6" x-probe-trailer="end-of-stream"
+== T-req client=h2(TLS) TE:trailers cluster=h2tr /reqtrailers
+request error: Post "https://h2tr.test.google.fr:29443/reqtrailers": http2: invalid Trailer key "Content-Length"
+== T-req client=h1(TLS) TE:trailers cluster=h2tr /reqtrailers
+request error: Post "https://h2tr.test.google.fr:29443/reqtrailers": invalid Trailer key "Content-Length"
+== T-req client=h2(TLS) TE:trailers cluster=h1tr /reqtrailers
+request error: Post "https://h1tr.test.google.fr:29443/reqtrailers": http2: invalid Trailer key "Content-Length"
+== T-req client=h1(TLS) TE:trailers cluster=h1tr /reqtrailers
+request error: Post "https://h1tr.test.google.fr:29443/reqtrailers": invalid Trailer key "Content-Length"
+│ h2.trailer.spoof_vector_elided            │            │ 4     │
+│ h2.trailers_dropped_content_length        │            │ 1     │

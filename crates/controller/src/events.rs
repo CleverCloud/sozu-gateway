@@ -176,6 +176,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
 mod tests {
     use super::*;
     use sozu_gw_builder::{ClaimedName, IngressResult};
+    use std::sync::Arc;
 
     fn out_with_ingress_problem(service: &str) -> BuildOutput {
         BuildOutput {
@@ -269,6 +270,85 @@ mod tests {
         ] {
             assert!(note.contains(detail), "{note}");
         }
+    }
+
+    /// An Ingress to a `kubernetes.io/wss` port stays programmed; the
+    /// Warning Event is the only place its owner learns that Sōzu sends
+    /// cleartext HTTP/1.1 to it.
+    #[test]
+    fn an_ingress_to_a_wss_port_gets_a_warning_event() {
+        fn object<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {
+            Arc::new(serde_json::from_value(v).unwrap())
+        }
+        let inputs = sozu_gw_builder::Inputs {
+            ingresses: vec![object(serde_json::json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "ingressClassName": "sozu", "rules": [{ "host": "ws.example.com",
+                    "http": { "paths": [{ "path": "/", "pathType": "Prefix",
+                        "backend": { "service": { "name": "ws", "port": { "number": 443 } } } }] } }] }
+            }))],
+            services: vec![object(serde_json::json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "ports": [{ "port": 443, "appProtocol": "kubernetes.io/wss" }] }
+            }))],
+            ..Default::default()
+        };
+        let out = sozu_gw_builder::build(&sozu_gw_builder::BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1, "still programmed");
+        let map = collect_problems(&out);
+        let (owner, problems) = map.first_key_value().expect("one owner");
+        assert_eq!(owner.kind, "Ingress");
+        let reasons: Vec<&str> = problems.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(reasons.contains(&"UnsupportedAppProtocol"), "{problems:?}");
+        let (_, note) = problems
+            .iter()
+            .find(|(r, _)| r == "UnsupportedAppProtocol")
+            .unwrap();
+        assert!(note.contains("cleartext HTTP/1.1"), "{note}");
+    }
+
+    /// An HTTPRoute to a `kubernetes.io/wss` port, which reads
+    /// `ResolvedRefs: False` and stays programmed, gets the same Warning
+    /// Event on the route.
+    #[test]
+    fn an_httproute_to_a_wss_port_gets_a_warning_event() {
+        fn object<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {
+            Arc::new(serde_json::from_value(v).unwrap())
+        }
+        let inputs = sozu_gw_builder::Inputs {
+            gateway_classes: vec![object(serde_json::json!({
+                "metadata": { "name": "sozu" },
+                "spec": { "controllerName": "sozu.io/gateway-controller" }
+            }))],
+            gateways: vec![object(serde_json::json!({
+                "metadata": { "name": "gw", "namespace": "demo" },
+                "spec": { "gatewayClassName": "sozu",
+                    "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }] }
+            }))],
+            http_routes: vec![object(serde_json::json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "parentRefs": [{ "name": "gw" }],
+                    "rules": [{ "backendRefs": [{ "name": "ws", "port": 443 }] }] }
+            }))],
+            services: vec![object(serde_json::json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "ports": [{ "port": 443, "appProtocol": "kubernetes.io/wss" }] }
+            }))],
+            ..Default::default()
+        };
+        let out = sozu_gw_builder::build(&sozu_gw_builder::BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1, "still programmed");
+        let map = collect_problems(&out);
+        let (owner, problems) = map
+            .iter()
+            .find(|(owner, _)| owner.kind == "HTTPRoute")
+            .expect("the route owns a problem");
+        assert_eq!(owner.name, "ws");
+        let (_, note) = problems
+            .iter()
+            .find(|(r, _)| r == "UnsupportedAppProtocol")
+            .unwrap_or_else(|| panic!("{problems:?}"));
+        assert!(note.contains("cleartext HTTP/1.1"), "{note}");
     }
 
     #[test]

@@ -1080,6 +1080,70 @@ mod tests {
         }
     }
 
+    /// GEP-1911 end to end: an HTTPRoute whose backend port declares
+    /// `kubernetes.io/wss` reads `ResolvedRefs: False` / `UnsupportedProtocol`
+    /// with the reason in the message, and stays `Accepted` with its rule
+    /// still programmed: the status says what the route cannot do without
+    /// taking the route out.
+    #[test]
+    fn a_wss_backend_reads_unsupported_protocol() {
+        fn object<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Arc<T> {
+            Arc::new(serde_json::from_value(v).unwrap())
+        }
+        let inputs = sozu_gw_builder::Inputs {
+            gateway_classes: vec![object(json!({
+                "metadata": { "name": "sozu" },
+                "spec": { "controllerName": "sozu.io/gateway-controller" }
+            }))],
+            gateways: vec![object(json!({
+                "metadata": { "name": "gw", "namespace": "demo" },
+                "spec": { "gatewayClassName": "sozu",
+                    "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }] }
+            }))],
+            http_routes: vec![object(json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "parentRefs": [{ "name": "gw" }],
+                    "rules": [{ "backendRefs": [{ "name": "ws", "port": 443 }] }] }
+            }))],
+            services: vec![object(json!({
+                "metadata": { "name": "ws", "namespace": "demo" },
+                "spec": { "ports": [{ "port": 443, "appProtocol": "kubernetes.io/wss" }] }
+            }))],
+            ..Default::default()
+        };
+        let out = sozu_gw_builder::build(&sozu_gw_builder::BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1, "still programmed");
+        assert_eq!(
+            out.ir.frontends[0].cluster_id.as_deref(),
+            Some("demo.ws.443")
+        );
+        let parents = route_parents(
+            "sozu.io/gateway-controller",
+            &out.routes[0],
+            &[],
+            Some(1),
+            &GatewayScope::default(),
+        );
+        let accepted = &parents[0].conditions[0];
+        assert_eq!(
+            (accepted.status.as_str(), accepted.reason.as_str()),
+            ("True", "Accepted")
+        );
+        let refs = &parents[0].conditions[1];
+        assert_eq!(refs.status, "False");
+        assert_eq!(refs.reason, "UnsupportedProtocol");
+        assert!(
+            refs.message.contains("kubernetes.io/wss"),
+            "{}",
+            refs.message
+        );
+        assert!(
+            refs.message.contains("still sends it cleartext HTTP/1.1"),
+            "{}",
+            refs.message
+        );
+    }
+
     #[test]
     fn backend_reference_errors_stay_in_the_resolved_refs_message() {
         let mut unresolved = parent(Some("tcp"), true);

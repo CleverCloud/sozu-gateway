@@ -4,6 +4,145 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## A Service port declaring `kubernetes.io/h2c` gets HTTP/2
+
+The controller now reads a backend Service port's `appProtocol` on HTTP routes
+(Ingress and HTTPRoute), as Gateway API GEP-1911 asks. `kubernetes.io/h2c`
+makes Sōzu speak HTTP/2 with prior knowledge to that port's pods
+(`Cluster.http2`). Before, every backend got HTTP/1.1: a server that speaks
+only h2c, a grpc-go server for one, could not answer it, clients got `502`
+([measured](probes/h2c-backend_sozu-2.3.2_2026-10-19.txt); with grpc-go,
+`grpch1` in [this record](probes/grpc-errors_sozu-2.3.2_2026-10-19.txt)), and
+the HTTPRoute still read `ResolvedRefs: True`.
+
+**What changes for a Service that already declares `kubernetes.io/h2c`.** The
+first reconcile after the upgrade sends one `AddCluster` per such port, and the
+next request, even on an open keep-alive connection, reaches the pods as
+HTTP/2: from HTTP/2 clients on the HTTPS listener (ALPN h2) and from HTTP/1.1
+clients on either listener, which Sōzu converts
+([measured](probes/h2c-backend_sozu-2.3.2_2026-10-19.txt); the open
+keep-alive connection [here](probes/grpc-http2-flip_sozu-2.3.2_2026-10-19.txt),
+where `sozu cluster h2` flipped the flag with an `AddCluster` of its own).
+Removing the `appProtocol` switches the port back the same way. Two things are
+lost on such a port, both measured on 2.3.2
+([record](probes/h2c-backend_sozu-2.3.2_2026-10-19.txt)):
+
+- **A pod that does not speak h2c fails.** Sōzu opens HTTP/2 to it, gets
+  nothing it can use back, and clients get `503` where they used to be served
+  over HTTP/1.1. Declare `kubernetes.io/h2c` only on ports that speak it.
+- **HTTP/1.1 upgrades stop working, silently.** Sōzu does not carry an
+  `Upgrade` onto an HTTP/2 backend connection: it forwards a WebSocket
+  handshake as a plain HTTP/2 `GET` with `Upgrade` and `Connection` removed. A
+  pod that serves both protocols on one port, as Go h2c servers do, answers
+  `200`, and the client gets `200` where it used to get `101`, with no error
+  anywhere ([again](probes/grpc-verify_sozu-2.3.2_2026-10-19.txt), `W`).
+  Serve WebSockets from a port that does not declare h2c. (WebSocket over
+  HTTP/2 from clients is not an alternative: Sōzu advertises no RFC 8441
+  extended CONNECT — read from Sōzu 2.3.2's source, whose SETTINGS always
+  carry `SETTINGS_ENABLE_CONNECT_PROTOCOL` as 0,
+  `lib/src/protocol/mux/h2.rs:679` and `2018-2021`.)
+
+**`kubernetes.io/wss` is reported, and still programmed as before.** Sōzu has
+no TLS towards a backend, so a route cannot speak the declared protocol. An
+HTTPRoute to such a port now reads `ResolvedRefs: False` /
+`UnsupportedProtocol`, where it read `True`, and gets an
+`UnsupportedAppProtocol` Warning Event; an **Ingress** gets the Warning Event.
+Neither is taken out: both keep sending cleartext HTTP/1.1 to the TLS port, as
+they did, which fails there. Dropping the rule's match would let another rule
+answer its requests instead — with `/ws` to such a port next to `/` to another,
+`/ws` would reach the `/` backend. Nor is it pointed at an empty cluster for
+Sōzu's `503`: every other invalid `backendRef` drops its match today, and an
+error answer of Sōzu's own, for all of them, is
+[#78](https://github.com/CleverCloud/sozu-gateway/issues/78). TCPRoute and
+UDPRoute ignore `appProtocol`: a layer-4 route to a TLS port is passthrough and
+keeps working.
+
+**Every other value is unchanged:** unset, `http`, `kubernetes.io/ws`, and
+free-form values such as `grpc`, `http2`, `h2c`, `tcp` or mesh-specific ones
+keep HTTP/1.1. So does `https`, which would need backend TLS too, but it is not
+a Kubernetes standard value and is neither honoured nor refused.
+
+**A port number a Service exposes over both UDP and TCP** (`53/UDP` and
+`53/TCP`, say) now resolves, for an HTTP route, to the TCP entry — its
+`appProtocol` and its pod port — wherever the Service lists it. An HTTPRoute
+or a numeric Ingress backend used to take whichever entry was listed first, so
+a UDP entry listed first sent HTTP to the UDP entry's pod port. Each such entry
+is now its own cluster: the first one listed keeps the `namespace.service.port`
+id and a later one gets its protocol appended (`namespace.service.53.tcp`), so
+an HTTP route and a UDPRoute to one number no longer pool their pod ports. An
+Ingress naming the later entry by name moves to the suffixed cluster on the
+first reconcile, as does an HTTP route by number when the UDP entry is listed
+first. That changes its backend ids (`cluster#address`) too: on a Service
+annotated `sozu.io/sticky-sessions`, the sticky id is a hash of the backend id,
+so its clients are re-pinned once, and with `metrics.perCluster` its series
+come back under new `cluster_id` and `backend_id` labels. Reordering the two
+entries in the Service later moves the bare id to the other one, with the same
+effects on both. TCPRoute and UDPRoute still take the first entry listed.
+
+**A single-port EndpointSlice feeds only the Service port it can belong to.**
+The EndpointSlice controller gives pods that resolve only one port's named
+`targetPort` a slice carrying that port alone, and a slice's sole port used to
+be taken for every port of the Service, whatever its name or protocol: the two
+entries of a TCP/UDP twin pooled each other's pods, and so did two TCP ports.
+A sole port that does not carry the Service port's name is now used only when
+it has none (`""` included, how the controller spells an unnamed Service port)
+and the Service port's protocol. A hand-written slice whose port names differ
+from the Service's stops feeding it: name them as the controller does.
+
+**This needs Sōzu 2.3.** On 2.2.1, HTTP/1.1 clients of an h2c cluster wait
+for the 30 s back timeout and get `504`
+([measured](probes/h2c-backend_sozu-2.2.1_2026-10-19.txt)), and large HTTP/2
+streams to one were cut short
+([measured](probes/grpc-quick-interop_sozu-2.2.1_2026-10-19.txt), `Q7`/`Q7b`;
+with grpc-go, `client-stream` in
+[this record](probes/grpc-streams_sozu-2.2.1_2026-10-19.txt)). The chart's
+image is 2.3.2; do not run this controller against an older data plane.
+
+**gRPC** reaches an h2c port through an HTTPRoute or an Ingress on the
+**HTTPS** listener only. Sōzu's cleartext listener refuses HTTP/2 with prior
+knowledge, which is how gRPC clients speak without TLS
+([measured](probes/grpc-quick-interop_sozu-2.3.2_2026-10-19.txt), and
+deliberate upstream: Sōzu 2.3.2 `lib/src/http.rs:764-782`), so gRPC over
+`http://` fails before routing. A TCPRoute, which forwards bytes, could still
+carry it without L7 routing; that was not measured. What else to expect,
+measured on 2.3.2 with grpc-go 1.75.0 unless marked otherwise:
+
+- A stream with no DATA or HEADERS for **30 s** is reset; HTTP/2 PINGs do not
+  count as activity ([measured](probes/grpc-streams_sozu-2.3.2_2026-10-19.txt)).
+  Send application-level heartbeats more often than that (a stream exchanging
+  a message every 10 s outlived 80 s, same record), or raise
+  `sozu.timeouts.back` and `sozu.timeouts.front`, which apply to every route on
+  the listener: with both at 300 s, a 70 s silence went through
+  ([measured](probes/grpc-idle-timeouts_sozu-2.3.2_2026-10-19.txt)).
+- At most **100 concurrent streams** per client connection, Sōzu's default
+  (`lib/src/protocol/mux/h2.rs:173`); a channel opening more queues them on the
+  client side: 300 calls holding their stream 1 s each, on one channel, all
+  succeeded, in 3.04 s
+  ([measured](probes/grpc-streams_sozu-2.3.2_2026-10-19.txt)).
+- RPCs are balanced **per client connection**, not per RPC: every call on one
+  gRPC channel goes to the same pod until that connection ends, the pod sends
+  GOAWAY, or it leaves the endpoints; four channels opened together each stayed
+  on one pod ([measured](probes/grpc-backend-changes_sozu-2.3.2_2026-10-19.txt)).
+  Few long-lived clients leave the load skewed across pods.
+- A pod that stops gracefully (GOAWAY) or leaves the endpoints while streams
+  are open loses nothing when the Service has at least two ready endpoints
+  ([measured](probes/grpc-backend-changes_sozu-2.3.2_2026-10-19.txt), with two).
+- A Sōzu soft stop closes HTTP/2 client connections on the HTTPS listener, and
+  any gRPC stream still open on them, **5 s** after it starts, whatever the
+  drain budget — unless the listener sets
+  `h2_graceful_shutdown_deadline_seconds`, whose default that is. Read from
+  Sōzu 2.3.2's source (`lib/src/https.rs:1478-1484`), not measured.
+- Sōzu's own error answers map onto gRPC codes by HTTP status: `502`, `503`
+  and `504` become `UNAVAILABLE`, `404` becomes `UNIMPLEMENTED`
+  ([measured](probes/grpc-errors_sozu-2.3.2_2026-10-19.txt)).
+
+**Downgrading the controller** keeps working (`http2` is a plain field an older
+build ignores), but Sōzu keeps speaking HTTP/2 to such a port until its cluster
+is re-sent for another reason or Sōzu restarts: an older controller never
+re-sends it for this one.
+
+---
+
 ## A contested SNI name is served by its oldest claimant's certificate
 
 When objects at one HTTPS listener named the same host with different
