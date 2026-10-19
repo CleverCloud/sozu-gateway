@@ -1,8 +1,8 @@
 //! Hostnames Sōzu's router cannot parse are refused per object.
 //!
 //! Kubernetes validates an Ingress host and a Gateway API `Hostname` against
-//! the RFC 1123 label grammar only. Sōzu 2.2.1 also runs every frontend
-//! hostname through `idna::domain_to_ascii` and rejects the whole request when
+//! the RFC 1123 label grammar only. Sōzu (2.3.2, as 2.2.1 did) also runs every
+//! frontend hostname through `idna::domain_to_ascii` and rejects the whole request when
 //! it fails, which (translation being all-or-nothing) fails every reconcile of
 //! the shared instance. These tests pin that such a name is reported on the
 //! object that carries it and that nothing else stops converging.
@@ -18,7 +18,8 @@ use sozu_gw_builder::{build, BuildConfig, BuildOutput, Inputs, Problem};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 use sozu_gw_ir as ir;
 
-/// Names Sōzu 2.2.1 refuses ("parsing hostname failed"), each for a different
+/// Names Sōzu refuses ("parsing hostname failed"; measured on 2.2.1, the same
+/// on 2.3.2), each for a different
 /// IDNA reason, although the apiserver admits every one of them.
 const REFUSED: &[&str] = &[
     // Punycode that decodes to nothing valid.
@@ -33,7 +34,7 @@ const REFUSED: &[&str] = &[
     "*.xn--4gbrim.example.com",
 ];
 
-/// Names Sōzu 2.2.1 parses, including a valid A-label and a plain label in a
+/// Names Sōzu parses (2.2.1 and 2.3.2), including a valid A-label and a plain label in a
 /// right-to-left domain.
 const ACCEPTED: &[&str] = &[
     "good.example.com",

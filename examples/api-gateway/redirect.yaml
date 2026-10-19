@@ -2,7 +2,8 @@
 #
 # A redirect rule has NO backendRef (the Gateway API forbids combining them):
 # Sōzu answers the redirect itself, so no Deployment/Service is needed here.
-#   scheme + statusCode are supported; host/path/port targets are not yet.
+#   scheme + statusCode are supported, and so are hostname, path
+#   (ReplaceFullPath, which drops the query string) and port targets.
 #
 # Verify:
 #   curl -i -H 'Host: old.example.com' http://<lb-ip>/

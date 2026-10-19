@@ -58,13 +58,14 @@ impl PathMatch {
     /// Compile to the Sōzu rule with **Kubernetes** semantics. Two measured
     /// facts about Sōzu 2.2.x drive the shape: path rules are matched against
     /// the request target with the query string still attached, and a `Regex`
-    /// rule is `is_match`ed unanchored. Sōzu's next router (unreleased, `main`
-    /// at 47eb07c) instead wraps every `Regex` value in `\A(?:…)\z`, so a rule
+    /// rule is `is_match`ed unanchored. Sōzu 2.3.0 and later (upstream
+    /// 47eb07c) instead wrap every `Regex` value in `\A(?:…)\z`, so a rule
     /// must span the whole target. Every pattern emitted here is therefore
     /// written **full-span** — anchored at both ends by us, with an explicit
     /// tail consuming the remainder — so it matches the same targets under
-    /// both routers and the data-plane upgrade needs no translator change
-    /// (see `sozu_rules_match_the_same_targets_unanchored_and_anchored`).
+    /// both routers: the move to 2.3 needed no change to the generated path
+    /// rules, and a downgrade to 2.2.x would need none either (see
+    /// `sozu_rules_match_the_same_targets_unanchored_and_anchored`).
     ///
     /// The tail is `(?-u:.*)`: any byte but LF, not any *UTF-8 character*.
     /// Sōzu compiles with `regex::bytes`, whose `.` in the default Unicode
@@ -83,13 +84,14 @@ impl PathMatch {
     /// - `Exact`: the whole path, query string allowed. Sōzu's `Equals` compares
     ///   the query-bearing target literally, so `/get?x=1` would not match
     ///   `Equals("/get")` — and Sōzu 2.2.x cannot remove an `Equals` rule it
-    ///   holds (its rule equality has no `Equals` arm; fixed upstream after
-    ///   2.2.1), so a route once added as `Equals` kept matching after its
-    ///   removal was acknowledged. A regex has neither problem. The trailing
-    ///   slash is kept literal: Exact means exact.
+    ///   holds (its rule equality has no `Equals` arm; 2.3.0 adds it, 795b95d),
+    ///   so a route once added as `Equals` kept matching after its removal was
+    ///   acknowledged. A regex has neither problem, and the query string alone
+    ///   keeps `Exact` a regex on 2.3. The trailing slash is kept literal:
+    ///   Exact means exact.
     /// - `Regex`: the user's own pattern, verbatim (validated by the builder).
-    ///   Its meaning *does* change with the router: unanchored today,
-    ///   full-span tomorrow. That is documented for users, not papered over.
+    ///   Its meaning *does* change with the router: unanchored on 2.2.x,
+    ///   full-span on 2.3. That is documented for users, not papered over.
     pub fn sozu_rule(&self) -> SozuPathRule {
         match self {
             PathMatch::Regex(v) => SozuPathRule::Regex(v.clone()),
@@ -181,8 +183,9 @@ pub struct Frontend {
 /// The identity Sōzu stores an HTTP(S) frontend under: which frontend map it
 /// lands in (`https`, one map per protocol) and the map key itself.
 ///
-/// Sōzu 2.2.1 keys the map on `RequestHttpFrontend`'s `Display`, the
-/// **unescaped** string `{address};{hostname};{kind}{rule}[;{method}]`, and
+/// Sōzu keys the map on `RequestHttpFrontend`'s `Display`, the
+/// **unescaped** string `{address};{hostname};{kind}{rule}[;{method}]` (2.2.1
+/// and 2.3.2 alike; 2.3 appends header predicates, which we never set), and
 /// rejects an add on an occupied key. Because the rule and method are joined
 /// with a bare `;`, two routes that differ as tuples can share one key: a regex
 /// `/x;GET` with no method and a regex `/x` restricted to `GET` both key as
@@ -382,11 +385,13 @@ mod tests {
     }
 
     /// The two routers a generated rule must satisfy: Sōzu 2.2.1 runs
-    /// `regex::bytes::Regex::new(value).is_match(target)` unanchored, and its
-    /// successor wraps the value as `\A(?:value)\z` first (47eb07c). Each
-    /// pattern is compiled both ways, on the `regex` version Sōzu builds
-    /// against, and must give the same answer on every target — including a
-    /// remainder that is not valid UTF-8, which Sōzu's HTTP/1 parser can admit.
+    /// `regex::bytes::Regex::new(value).is_match(target)` unanchored, and 2.3.0
+    /// and later wrap the value as `\A(?:value)\z` first (47eb07c). The
+    /// shipped data plane is 2.3.2; the unanchored half is kept so a downgrade
+    /// to 2.2.x routes the same. Each pattern is compiled both ways, on the
+    /// `regex` version Sōzu builds against, and must give the same answer on
+    /// every target — including a remainder that is not valid UTF-8, which
+    /// Sōzu's HTTP/1 parser can admit.
     #[test]
     fn sozu_rules_match_the_same_targets_unanchored_and_anchored() {
         /// A request target and whether the rule must match it.
@@ -449,7 +454,7 @@ mod tests {
                 assert_eq!(
                     anchored.is_match(target),
                     *expected,
-                    "{path:?} on {shown:?}, anchored (Sōzu main)"
+                    "{path:?} on {shown:?}, anchored (Sōzu 2.3)"
                 );
             }
         }

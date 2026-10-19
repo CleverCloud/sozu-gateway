@@ -29,10 +29,12 @@ spec:
     spec:
       {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
       # Long enough for the data plane's preStop drain below to finish; when it
-      # expires the kubelet SIGKILLs, which is exactly what the drain exists to
+      # expires the kubelet sends SIGTERM (a hard stop of workers still draining,
+      # on Sōzu 2.3) and then SIGKILL, which is exactly what the drain exists to
       # avoid. Widened only because the drain needs the room — with the hook off
-      # it is left alone, since a longer wait for a proxy that ignores SIGTERM is
-      # a longer outage, not a safer one.
+      # it is left alone: Sōzu 2.3 soft-stops on SIGTERM by itself (listeners
+      # close at once, in-flight HTTP/1 drains), and on a 2.2.x image, which
+      # ignored SIGTERM, a longer wait would only be a longer outage.
       terminationGracePeriodSeconds: {{ include "sozu-gateway.drainGrace" . | int }}
       {{- end }}
       serviceAccountName: {{ include "sozu-gateway.serviceAccountName" . }}
@@ -67,12 +69,16 @@ spec:
             capabilities:
               drop: ["ALL"]
           args: ["start", "-c", "/etc/sozu/config.toml"]
-          # Why this exists at all: see `sozu.drain` in values.yaml. `--timeout`
-          # is a real duration because 0 is applied as zero nanoseconds rather
-          # than as "no timeout"; the budget is what the grace period leaves
-          # after the delay, so it runs out at the same moment the kubelet's
-          # does. Overrunning it is a SIGKILL moments later, not a clean stop —
-          # do not "fix" it by widening the budget past the grace period.
+          # Why this exists at all: see `sozu.drain` in values.yaml. On Sōzu 2.3
+          # a soft `shutdown` waits for the drain and ignores `--timeout`, so the
+          # grace period is the only bound and the hook's exit status reports
+          # the drain's outcome. The flag is kept for a 2.2.x image, where a 0
+          # was applied as zero nanoseconds (measured; 2.3.2 maps 0 to "no
+          # timeout", as its CLI documents, and the chart never renders 0): the
+          # budget is what the grace period leaves after the delay, so it runs
+          # out at the same moment the kubelet's does. Overrunning it is a hard
+          # stop moments later, not a clean one — do not "fix" it by widening
+          # the budget past the grace period.
           {{- if eq (include "sozu-gateway.drainEnabled" .) "true" }}
           lifecycle:
             preStop:

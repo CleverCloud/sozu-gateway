@@ -1,0 +1,181 @@
+== image clevercloud/sozu:2.3.2 (sozu 2.3.2 ()); probe binary rrp2-lib232
+== sozu rewrite/redirect probe ==
+socket=/home/vscode/.cache/sozu-upstream/probe-http-filters-rewrite/run2/sozu.sock listener=127.0.0.1:28591 dial=127.0.0.1:28591 backend=127.0.0.1:29191
+
+frontends programmed; probing
+
+--- baseline.probe ---
+Q: control: plain proxying, no rewrite — the backend must see /original
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[baseline.probe] x-env=[]
+
+--- path-only.probe ---
+Q: URLRewrite ReplaceFullPath: rewrite_path alone, no rewrite_host — does the backend see /rewritten, and does the request complete?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=[path-only.probe] x-env=[]
+
+--- host-and-path.probe ---
+Q: the known-bad shape, re-measured: rewrite_host rewrites the backend authority, so the proxy dials elsewhere (expected 408/504)
+   redirect=Forward scheme=UseSame rewrite_host=Some("elsewhere.probe") rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=[elsewhere.probe | elsewhere.probe] x-env=[]
+
+--- dollar-literal.probe ---
+Q: template grammar: is a literal `$` in rewrite_path reinterpreted?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/lit$PATH[0]eral") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /lit/originaleral HTTP/1.1 backend-host=[dollar-literal.probe] x-env=[]
+
+--- redirect-301.probe ---
+Q: PERMANENT + rewrite_host/path: the documented case — what Location?
+   redirect=Permanent scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 301 Moved Permanently | Location: https://new.probe/new
+
+--- redirect-302.probe ---
+Q: FOUND + rewrite_host/path: UNDOCUMENTED, and Gateway API's default statusCode. If Location echoes the request, the feature dies here
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://new.probe/new
+
+--- redirect-308.probe ---
+Q: PERMANENT_REDIRECT + rewrite_host/path: UNDOCUMENTED — what Location?
+   redirect=PermanentRedirect scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=None
+A: HTTP/1.1 308 Permanent Redirect | Location: https://new.probe/new
+
+--- dollar-bare.probe ---
+Q: a literal `$` that starts no known token — passed through, or eaten?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/price$100") rewrite_port=None
+A: FRONTEND REJECTED — AddHttpFrontend(dollar-bare.probe) rejected by Sōzu: could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=10
+
+--- query.probe ---
+Q: does rewrite_path keep the query string? Gateway's ReplaceFullPath replaces the path and leaves the query alone
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten") rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten HTTP/1.1 backend-host=[query.probe] x-env=[]
+
+--- prefix-capture.probe ---
+Q: what does $PATH[1] capture on the regex a Kubernetes prefix compiles to? Its only group is the boundary `(/|?|$)`, so ReplacePrefixMatch has no remainder to graft on
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/pfx[$PATH[1]]") rewrite_port=None
+   path rule: Regex "^/foo(/|\\?|$)"  request: /foo/bar/baz
+A: HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+--- hdr-set-request.probe ---
+Q: Gateway `set` must OVERWRITE. The proto says HeaderPosition mirrors HAProxy set-header, which replaces. Client sends X-Env: staging, frontend sets X-Env: prod — does the backend see one value or two?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-set-request.probe] x-env=[X-Env: staging | X-Env: prod]
+
+--- hdr-set-request-absent.probe ---
+Q: same set, but the client sends no X-Env — the header must appear once
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-set-request-absent.probe] x-env=[X-Env: prod]
+
+--- hdr-delete-request.probe ---
+Q: empty val is documented as delete-by-name (HAProxy del-header parity)
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-delete-request.probe] x-env=[]
+
+--- hdr-set-response.probe ---
+Q: the response side of the same question: the backend answers X-Served-By: backend and the frontend sets X-Served-By: sozu
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend ; X-Served-By: sozu] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-set-response.probe] x-env=[]
+
+--- redirect-host-only.probe ---
+Q: the exact HTTPRouteRedirectHostAndStatus shape: rewrite_host with NO rewrite_path and NO scheme. The suite compares the Location's scheme, host, port AND path, defaulting the unspecified ones to the request's — so the path must come back as /original and the scheme as http
+   redirect=Found scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: http://example.org/original
+
+--- redirect-host-only-301.probe ---
+Q: same, under PERMANENT — the test's second case
+   redirect=Permanent scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 301 Moved Permanently | Location: http://example.org/original
+
+--- redirect-host-query.probe ---
+Q: does a redirect Location keep the request's query string?
+   redirect=Found scheme=UseSame rewrite_host=Some("example.org") rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: http://example.org/original?q=1&x=2
+
+--- redirect-port.probe ---
+Q: rewrite_port on a redirect: does Location carry an explicit port? Gateway's RequestRedirect has a `port` field
+   redirect=Found scheme=UseHttps rewrite_host=Some("new.probe") rewrite_path=Some("/new") rewrite_port=Some(8443)
+A: HTTP/1.1 302 Found | Location: https://new.probe:8443/new
+
+--- redirect-302-scheme-only.probe ---
+Q: FOUND with no rewrite: the shape we ship today, as a comparison point
+   redirect=Found scheme=UseHttps rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 302 Found | Location: https://redirect-302-scheme-only.probe/original
+
+--- prefix-today.probe ---
+Q: the prefix regex sozu_rule emits today has no capture group at all: is $PATH[1] refused at add?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/xyz$PATH[1]") rewrite_port=None
+   path rule: Regex "^/foo(?:[/?](?-u:.*))?$"  request: /foo/bar
+A: FRONTEND REJECTED — AddHttpFrontend(prefix-today.probe) rejected by Sōzu: could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=12
+
+--- prefix-cap3.probe ---
+Q: ReplacePrefixMatch /foo -> /xyz on the 3-group prefix regex: remainder and query kept?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/xyz$PATH[1]$PATH[2]$PATH[3]") rewrite_port=None
+   path rule: Regex "^/foo(?:(/)((?-u:[^?\\n]*)))?((?:\\?(?-u:.*))?)$"  request: /foo/bar?q=1
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /xyz/bar?q=1 HTTP/1.1 backend-host=[prefix-cap3.probe] x-env=[]
+
+--- prefix-cap3-bare.probe ---
+Q: same rule, request /foo: the rewrite must be /xyz, not /xyz/
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/xyz$PATH[1]$PATH[2]$PATH[3]") rewrite_port=None
+   path rule: Regex "^/foo(?:(/)((?-u:[^?\\n]*)))?((?:\\?(?-u:.*))?)$"  request: /foo
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /xyz HTTP/1.1 backend-host=[prefix-cap3-bare.probe] x-env=[]
+
+--- prefix-cap3-slash.probe ---
+Q: ReplacePrefixMatch /foo -> / on the same regex, request /foo: must be /
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/$PATH[2]$PATH[3]") rewrite_port=None
+   path rule: Regex "^/foo(?:(/)((?-u:[^?\\n]*)))?((?:\\?(?-u:.*))?)$"  request: /foo
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET / HTTP/1.1 backend-host=[prefix-cap3-slash.probe] x-env=[]
+
+--- prefix-cap3-full.probe ---
+Q: ReplaceFullPath /new under a PathPrefix match: group 3 carries the query
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/new$PATH[3]") rewrite_port=None
+   path rule: Regex "^/foo(?:(/)((?-u:[^?\\n]*)))?((?:\\?(?-u:.*))?)$"  request: /foo/bar?q=1
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /new?q=1 HTTP/1.1 backend-host=[prefix-cap3-full.probe] x-env=[]
+
+--- exact-cap.probe ---
+Q: ReplaceFullPath under an Exact match whose regex captures the query
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/rewritten$PATH[1]") rewrite_port=None
+   path rule: Regex "^/original((?:\\?(?-u:.*))?)$"  request: /original?q=1&x=2
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /rewritten?q=1&x=2 HTTP/1.1 backend-host=[exact-cap.probe] x-env=[]
+
+--- redirect-path-query.probe ---
+Q: redirect with a literal path (what the builder emits today for ReplaceFullPath): does Location keep the query?
+   redirect=Found scheme=UseSame rewrite_host=None rewrite_path=Some("/new") rewrite_port=None
+   path rule: Regex "^/original(?:\\?(?-u:.*))?$"  request: /original?q=1&x=2
+A: HTTP/1.1 302 Found | Location: http://redirect-path-query.probe/new
+
+--- redirect-path-querycap.probe ---
+Q: same redirect on the query-capturing Exact regex
+   redirect=Found scheme=UseSame rewrite_host=None rewrite_path=Some("/new$PATH[1]") rewrite_port=None
+   path rule: Regex "^/original((?:\\?(?-u:.*))?)$"  request: /original?q=1&x=2
+A: HTTP/1.1 302 Found | Location: http://redirect-path-querycap.probe/new?q=1&x=2
+
+--- dollar-double.probe ---
+Q: is `$$` an escape for a literal `$`?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=Some("/price$$100") rewrite_port=None
+A: FRONTEND REJECTED — AddHttpFrontend(dollar-double.probe) rejected by Sōzu: could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=11
+
+--- hdr-host-set.probe ---
+Q: Gateway `set Host` as the builder emits it (delete + append): how many Host lines reach the backend?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-host-set.probe | override.probe] x-env=[]
+
+--- hdr-host-remove.probe ---
+Q: Gateway `remove Host`: is the Host line removed?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-host-remove.probe] x-env=[]
+
+--- hdr-crlf.probe ---
+Q: a header value with CRLF, which the v1.6.1 CRD admits: refused, filtered or injected?
+   redirect=Forward scheme=UseSame rewrite_host=None rewrite_path=None rewrite_port=None
+A: HTTP/1.1 200 OK | resp X-Served-By=[X-Served-By: backend] | body: request-line=GET /original HTTP/1.1 backend-host=[hdr-crlf.probe] x-env=[X-Env: a | X-Smuggled: 1]
+
+--- redirect-crlf.probe ---
+Q: a redirect path with CRLF: is the Location split?
+   redirect=Found scheme=UseSame rewrite_host=None rewrite_path=Some("/new\r\nX-Smuggled: 1") rewrite_port=None
+A: HTTP/1.1 302 Found | Location: http://redirect-crlf.probe/new | resp X-Served-By=[X-Smuggled: 1]
+
+== done ==
+== probe exit 0
+== sozu log: errors
+2026-10-19T19:16:39.794374Z 1792437399794374467 1 ERROR MAIN	could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=10
+2026-10-19T19:16:39.798809Z 1792437399798809881 1 ERROR MAIN	could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=12
+2026-10-19T19:16:39.805424Z 1792437399805424734 1 ERROR MAIN	could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=11

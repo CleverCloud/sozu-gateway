@@ -111,10 +111,13 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// By default `no_clusters`: each worker answers with its proxy-level metrics
 /// only. A per-cluster query makes every worker put *all* of its cluster and
-/// backend metrics in a single response, and Sōzu 2.2.1's worker requeues a
+/// backend metrics in a single response, and Sōzu's worker requeues a
 /// response larger than `max_command_buffer_size` forever instead of dropping
 /// it — that worker then stops serving traffic and commands, spinning a core,
-/// while every probe stays green. The size grows with the number of clusters
+/// while every probe stays green. Measured on 2.2.1 and again on 2.3.2, where
+/// the message is about 12% larger (`backend_header_time`; see
+/// `docs/probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt`). The size
+/// grows with the number of clusters
 /// that have seen traffic, so on a large enough cluster a routine scrape takes
 /// the gateway down. Filtering by `cluster_ids` does not bound it either: at
 /// backend detail (which `sozu top` switches on at runtime) one cluster grows

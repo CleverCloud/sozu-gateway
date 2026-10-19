@@ -1,5 +1,8 @@
-//! Measurement probe: what Sōzu 2.2.0 actually does with `rewrite_host` /
+//! Measurement probe: what Sōzu actually does with `rewrite_host` /
 //! `rewrite_path`, on the forwarding path and under each redirect policy.
+//! First written against 2.2.0; the later cases (`prefix-cap3*`, `exact-cap`,
+//! `redirect-path-query*`, `hdr-host-*`, `*-crlf`) were added for the 2.3.2
+//! bump and run against 2.2.1 and 2.3.2 alike.
 //!
 //! Two questions the project has been answering from the proto's doc comments
 //! rather than from the wire, and both gate a user-visible feature:
@@ -341,7 +344,187 @@ const CASES: &[Case] = &[
         headers: &[],
         send: &[],
     },
+    Case {
+        host: "prefix-today.probe",
+        question: "the prefix regex sozu_rule emits today has no capture group at all: is $PATH[1] refused at add?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/xyz$PATH[1]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, TODAY_PREFIX_FOO)),
+        target: Some("/foo/bar"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "prefix-cap3.probe",
+        question: "ReplacePrefixMatch /foo -> /xyz on the 3-group prefix regex: remainder and query kept?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/xyz$PATH[1]$PATH[2]$PATH[3]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP3_PREFIX_FOO)),
+        target: Some("/foo/bar?q=1"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "prefix-cap3-bare.probe",
+        question: "same rule, request /foo: the rewrite must be /xyz, not /xyz/",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/xyz$PATH[1]$PATH[2]$PATH[3]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP3_PREFIX_FOO)),
+        target: Some("/foo"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "prefix-cap3-slash.probe",
+        question: "ReplacePrefixMatch /foo -> / on the same regex, request /foo: must be /",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/$PATH[2]$PATH[3]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP3_PREFIX_FOO)),
+        target: Some("/foo"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "prefix-cap3-full.probe",
+        question: "ReplaceFullPath /new under a PathPrefix match: group 3 carries the query",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/new$PATH[3]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP3_PREFIX_FOO)),
+        target: Some("/foo/bar?q=1"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "exact-cap.probe",
+        question: "ReplaceFullPath under an Exact match whose regex captures the query",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/rewritten$PATH[1]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP_EXACT_ORIGINAL)),
+        target: Some("/original?q=1&x=2"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "redirect-path-query.probe",
+        question: "redirect with a literal path (what the builder emits today for ReplaceFullPath): does Location keep the query?",
+        redirect: RedirectPolicy::Found,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/new"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, TODAY_EXACT_ORIGINAL)),
+        target: Some("/original?q=1&x=2"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "redirect-path-querycap.probe",
+        question: "same redirect on the query-capturing Exact regex",
+        redirect: RedirectPolicy::Found,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/new$PATH[1]"),
+        rewrite_port: None,
+        path: Some((PathRuleKind::Regex, CAP_EXACT_ORIGINAL)),
+        target: Some("/original?q=1&x=2"),
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "dollar-double.probe",
+        question: "is `$$` an escape for a literal `$`?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/price$$100"),
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[],
+        send: &[],
+    },
+    Case {
+        host: "hdr-host-set.probe",
+        question: "Gateway `set Host` as the builder emits it (delete + append): how many Host lines reach the backend?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "Host", ""), (HeaderPosition::Request, "Host", "override.probe")],
+        send: &[],
+    },
+    Case {
+        host: "hdr-host-remove.probe",
+        question: "Gateway `remove Host`: is the Host line removed?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "Host", "")],
+        send: &[],
+    },
+    Case {
+        host: "hdr-crlf.probe",
+        question: "a header value with CRLF, which the v1.6.1 CRD admits: refused, filtered or injected?",
+        redirect: RedirectPolicy::Forward,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: None,
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[(HeaderPosition::Request, "X-Env", "a\r\nX-Smuggled: 1")],
+        send: &[],
+    },
+    Case {
+        host: "redirect-crlf.probe",
+        question: "a redirect path with CRLF: is the Location split?",
+        redirect: RedirectPolicy::Found,
+        scheme: RedirectScheme::UseSame,
+        rewrite_host: None,
+        rewrite_path: Some("/new\r\nX-Smuggled: 1"),
+        rewrite_port: None,
+        path: None,
+        target: None,
+        headers: &[],
+        send: &[],
+    },
 ];
+
+/// The prefix rule `ir::PathMatch::sozu_rule` emits for `/foo` today.
+const TODAY_PREFIX_FOO: &str = "^/foo(?:[/?](?-u:.*))?$";
+/// The same language with three groups: 1 = the boundary `/`, 2 = the rest of
+/// the path, 3 = the query with its `?`. Enough for ReplacePrefixMatch (to a
+/// prefix or to `/`) and for a ReplaceFullPath that keeps the query.
+const CAP3_PREFIX_FOO: &str = "^/foo(?:(/)((?-u:[^?\\n]*)))?((?:\\?(?-u:.*))?)$";
+/// The rule `sozu_rule` emits for an Exact `/original` today.
+const TODAY_EXACT_ORIGINAL: &str = "^/original(?:\\?(?-u:.*))?$";
+/// The same language, with the query captured as group 1.
+const CAP_EXACT_ORIGINAL: &str = "^/original((?:\\?(?-u:.*))?)$";
 
 /// A minimal HTTP/1.1 echo: answers 200 with the request line and Host header
 /// in the body, so a rewritten path or authority is visible from the outside.
@@ -352,7 +535,10 @@ fn spawn_echo_backend(addr: SocketAddr) -> Result<()> {
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().expect("clone"));
                 let mut request_line = String::new();
-                let mut host = String::new();
+                // Every Host line: a rewrite that leaves two on the wire is a
+                // 400 at a strict backend (Go net/http, nginx), and recording
+                // only the last one is how that went unseen.
+                let mut hosts: Vec<String> = Vec::new();
                 // Every occurrence, in order: one X-Env means replaced, two
                 // means appended, and that is the whole question.
                 let mut seen: Vec<String> = Vec::new();
@@ -364,16 +550,16 @@ fn spawn_echo_backend(addr: SocketAddr) -> Result<()> {
                     }
                     let lower = line.to_ascii_lowercase();
                     if let Some(v) = lower.strip_prefix("host:") {
-                        host = v.trim().to_string();
+                        hosts.push(v.trim().to_string());
                     }
-                    if lower.starts_with("x-env:") {
+                    if lower.starts_with("x-env:") || lower.starts_with("x-smuggled:") {
                         seen.push(line.trim().to_string());
                     }
                 }
                 let body = format!(
-                    "request-line={} backend-host={} x-env=[{}]\n",
+                    "request-line={} backend-host=[{}] x-env=[{}]\n",
                     request_line.trim(),
-                    host,
+                    hosts.join(" | "),
                     seen.join(" | ")
                 );
                 let mut stream = stream;
@@ -453,7 +639,7 @@ fn digest(raw: &str) -> String {
         if let Some(v) = lower.strip_prefix("location:") {
             location = Some(v.trim().to_string());
         }
-        if lower.starts_with("x-served-by:") {
+        if lower.starts_with("x-served-by:") || lower.starts_with("x-smuggled:") {
             served_by.push(line.trim().to_string());
         }
     }

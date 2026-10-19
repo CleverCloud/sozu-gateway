@@ -2,13 +2,15 @@
 //! failed part-way, and whether the controller adopts it.
 //!
 //! Sōzu's main process is stood in for by `sozu-command-lib`'s own
-//! `ConfigState` (2.2.1, the linked version), fed the way the agent feeds
+//! `ConfigState` (the linked version, 2.3.2), fed the way the agent feeds
 //! Sōzu: in order; a teardown of something already gone settled, a
 //! frontend's after evicting whatever still holds its key; a duplicate
 //! listener add settled; a duplicate frontend add repaired (evict, re-add);
 //! a replace on a listener holding no certificate sent as an add; anything
 //! else refused, which stops the batch. [`Sozu::V23`] layers on top the 2.3
-//! behaviours a lagging baseline trips over (see [`dispatch`]).
+//! behaviours a lagging baseline trips over (see [`dispatch`]). The linked
+//! 2.3.2 state carries them itself, so every case run in both modes also
+//! checks that the stand-in agrees with it.
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -176,12 +178,12 @@ fn sorted(ir: &ir::Ir) -> ir::Ir {
 /// Which data plane the stand-in behaves like.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sozu {
-    V221,
+    Linked,
     V23,
 }
 
-/// What the main process does with one request. `V221` is the linked
-/// `ConfigState` as is. `V23` adds what 2.3 changed and a lagging baseline
+/// What the main process does with one request. `Linked` is the linked
+/// `ConfigState` as is (2.3.2; it was 2.2.1 when these rules were written). `V23` adds what 2.3 changed and a lagging baseline
 /// runs into: an `AddBackend` naming a cluster it does not hold is refused;
 /// `RemoveCluster` takes the cluster's backends and frontends with it;
 /// removing the last certificate at a listener drops the listener's entry,
@@ -325,6 +327,14 @@ fn settle(sozu: Sozu, state: &mut ConfigState, request: &Request) -> bool {
             }
             _ => false,
         },
+        // Sōzu 2.3.2 refuses a UDP address another cluster holds with an
+        // error of its own; the agent repairs it as it does `Exists`.
+        Err(StateError::UdpFrontendAddressTaken { .. })
+            if matches!(request.request_type, Some(RequestType::AddUdpFrontend(_))) =>
+        {
+            evict_holder(state, request);
+            dispatch(sozu, state, request).is_ok()
+        }
         Err(_) => false,
     }
 }
@@ -870,8 +880,8 @@ fn a_layer4_frontend_is_dropped_with_its_listener_only() {
     // after it), then a refusal.
     let mut failed = batch[..listener_teardown].to_vec();
     failed.push(refused());
-    let mut sozu = state_of(Sozu::V221, &previous);
-    let acknowledged = feed(Sozu::V221, &mut sozu, &failed);
+    let mut sozu = state_of(Sozu::Linked, &previous);
+    let acknowledged = feed(Sozu::Linked, &mut sozu, &failed);
     assert_eq!(acknowledged, listener_teardown);
     let replayed = tr::apply_acknowledged(&previous, &desired, &failed[..acknowledged]);
     assert_eq!(replayed.l4_frontends, previous.l4_frontends);
@@ -891,8 +901,8 @@ fn a_layer4_frontend_is_dropped_with_its_listener_only() {
     for baseline in [&replayed, &previous] {
         let retry = tr::reconcile(baseline, &desired).expect("translate");
         let mut after = sozu.clone();
-        assert_eq!(feed(Sozu::V221, &mut after, &retry), retry.len());
-        assert_eq!(holds(&after), holds(&state_of(Sozu::V221, &desired)));
+        assert_eq!(feed(Sozu::Linked, &mut after, &retry), retry.len());
+        assert_eq!(holds(&after), holds(&state_of(Sozu::Linked, &desired)));
     }
 
     // Once a listener's removal is acknowledged, its frontend goes too.
@@ -948,7 +958,7 @@ fn a_layer4_listener_the_ir_cannot_spell_keeps_the_previous_shadow() {
     };
     let frontend = |state: &ConfigState| holds(state).contains("tcp 0.0.0.0:5432 -> z");
 
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         // The listener added (and activated), its frontend not yet.
         let batch = tr::reconcile(&previous, &with_z).expect("translate");
         let stop = batch
@@ -1019,13 +1029,13 @@ fn a_cluster_a_failed_batch_removed_is_added_back_before_its_backends() {
     let batch = tr::reconcile(&case.previous, &case.desired).expect("translate");
     let mut failed = batch.clone();
     failed.push(refused());
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         let mut held = state_of(sozu, &case.previous);
         assert_eq!(feed(sozu, &mut held, &failed), batch.len(), "{sozu:?}");
 
         // From the unchanged baseline `x` itself did not change, so the new
-        // backend goes out alone. 2.3 refuses it on every reconcile; 2.2.1
-        // takes it and keeps serving no route for `x`.
+        // backend goes out alone. 2.3 refuses it on every reconcile (2.2.1
+        // took it and kept serving no route for `x`).
         let stale = tr::reconcile(&case.previous, &case.third).expect("translate");
         assert!(
             matches!(stale.as_slice(), [only] if matches!(only.request_type, Some(RequestType::AddBackend(_)))),
@@ -1033,7 +1043,7 @@ fn a_cluster_a_failed_batch_removed_is_added_back_before_its_backends() {
         );
         let mut stale_held = held.clone();
         let acknowledged = feed(sozu, &mut stale_held, &stale);
-        assert_eq!(acknowledged, usize::from(sozu == Sozu::V221), "{sozu:?}");
+        assert_eq!(acknowledged, 0, "{sozu:?}");
         assert_ne!(holds(&stale_held), holds(&state_of(sozu, &case.third)));
 
         // The replay describes what Sōzu holds, so the controller adopts
@@ -1086,7 +1096,7 @@ fn a_route_a_failed_batch_re_pointed_is_removed_when_deleted() {
             .filter(|line| line.contains(";k.example.com;") && line.contains(r#""cluster_id":"b""#))
             .count()
     };
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         let mut held = state_of(sozu, &case.previous);
         assert_eq!(feed(sozu, &mut held, &failed), batch.len(), "{sozu:?}");
         assert_eq!(
@@ -1130,7 +1140,8 @@ fn a_route_a_failed_batch_re_pointed_is_removed_when_deleted() {
 /// wherever the batch stopped Sōzu still holds the cluster, and so does the
 /// baseline the controller adopts: the replay once the listener is gone,
 /// the previous shadow while the listener is held without its frontend. The
-/// new backend goes to a cluster Sōzu holds, on 2.3 as on 2.2.1. (With the
+/// new backend goes to a cluster Sōzu holds, which 2.2.1 did not require
+/// either. (With the
 /// cluster removed before the listener teardown, the kept shadow sent the
 /// backend alone, and 2.3 refused it on every reconcile.) What the retry
 /// leaves out of place is the documented listener state alone.
@@ -1154,7 +1165,7 @@ fn a_cluster_whose_removal_did_not_land_takes_its_new_backend() {
         .iter()
         .position(|r| matches!(r.request_type, Some(RequestType::RemoveTcpFrontend(_))))
         .expect("the route is removed");
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         for stop in frontend_removal + 1..batch.len() {
             let context = format!("{sozu:?}, stopped at {stop}");
             let mut held = state_of(sozu, &previous);
@@ -1185,7 +1196,8 @@ fn a_cluster_whose_removal_did_not_land_takes_its_new_backend() {
 }
 
 /// Certificates are outside the guard, and an add of a fingerprint Sōzu
-/// already holds is a no-op there, names included (2.2.1 and 2.3.2 alike).
+/// already holds is a no-op there, names included (2.3.2, read from its
+/// source; 2.2.1 behaved the same).
 /// Over a drift the shadow never knew of, the certificate installed with
 /// other names, the replay records the desired names: after two failed
 /// batches the shadow lists them while Sōzu keeps the old ones, and nothing
@@ -1207,7 +1219,7 @@ fn a_certificate_add_over_a_drift_records_names_sozu_does_not_hold() {
             .collect()
     };
 
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         let mut held = state_of(sozu, &previous);
         let install = tr::ir_to_requests(&ir::Ir {
             certificates: vec![drift.clone()],
@@ -1279,7 +1291,7 @@ fn a_cluster_upsert_ahead_of_its_udp_route_removal_keeps_the_previous_shadow() {
         "{batch:?}"
     );
     let head = &batch[..1];
-    for sozu in [Sozu::V221, Sozu::V23] {
+    for sozu in [Sozu::Linked, Sozu::V23] {
         let mut held = state_of(sozu, &case.previous);
         assert_eq!(feed(sozu, &mut held, &[batch[0].clone(), refused()]), 1);
 
@@ -1409,7 +1421,7 @@ fn wherever_a_batch_stops_the_adopted_baseline_converges() {
                     .all(|f| p.l4_frontends.contains(f) || d.l4_frontends.contains(f))
         };
         let mut rejected = 0;
-        for sozu in [Sozu::V221, Sozu::V23] {
+        for sozu in [Sozu::Linked, Sozu::V23] {
             let before = holds(&state_of(sozu, &case.previous));
             for stop in 0..=batch.len() {
                 let context = format!("{} on {sozu:?}, stopped at {stop}", case.name);
@@ -1461,5 +1473,49 @@ fn wherever_a_batch_stops_the_adopted_baseline_converges() {
             }
         }
         assert_eq!(rejected > 0, layer4, "{}", case.name);
+    }
+}
+
+/// A UDP address another cluster holds, a drift the shadow missed. The
+/// linked 2.3.2 state refuses the add with an error of its own
+/// (`UdpFrontendAddressTaken`), not `Exists`; the agent repairs both alike
+/// (evict the holder, add again), and so does each stand-in mode, leaving
+/// the address to the desired cluster alone.
+#[test]
+fn a_udp_address_another_cluster_holds_is_repaired_in_both_modes() {
+    let mut drifted = applied();
+    drifted.clusters.push(cluster("u"));
+    drifted.clusters.push(cluster("v"));
+    drifted.backends.push(backend("u", "10.0.3.1:53"));
+    drifted.backends.push(backend("v", "10.0.3.2:53"));
+    drifted.l4_frontends = vec![l4(ir::L4Protocol::Udp, 5353, "u")];
+    let mut desired = drifted.clone();
+    desired.l4_frontends = vec![l4(ir::L4Protocol::Udp, 5353, "v")];
+    let add = tr::ir_to_requests(&desired)
+        .into_iter()
+        .find(|r| matches!(r.request_type, Some(RequestType::AddUdpFrontend(_))))
+        .expect("the desired UDP route");
+    let udp_routes = |state: &ConfigState| -> BTreeSet<String> {
+        holds(state)
+            .into_iter()
+            .filter(|line| line.starts_with("udp ") && !line.starts_with("udp listener"))
+            .collect()
+    };
+    assert!(matches!(
+        dispatch(Sozu::Linked, &mut state_of(Sozu::Linked, &drifted), &add),
+        Err(StateError::UdpFrontendAddressTaken { .. })
+    ));
+    for sozu in [Sozu::Linked, Sozu::V23] {
+        let mut held = state_of(sozu, &drifted);
+        assert_eq!(
+            feed(sozu, &mut held, std::slice::from_ref(&add)),
+            1,
+            "{sozu:?}"
+        );
+        assert_eq!(
+            udp_routes(&held),
+            udp_routes(&state_of(sozu, &desired)),
+            "{sozu:?}"
+        );
     }
 }

@@ -18,7 +18,7 @@ fn config() -> ProvisionConfig {
                     "serviceAccountName":"worker", "automountServiceAccountToken":false,
                     "securityContext":{"runAsUser":1000}, "terminationGracePeriodSeconds":120,
                     "containers":[
-                        {"name":"sozu","image":"clevercloud/sozu:2.2.1","resources":{"requests":{"cpu":"100m"}},"lifecycle":{"preStop":{"exec":{"command":["sozu","shutdown"]}}}},
+                        {"name":"sozu","image":"clevercloud/sozu:2.3.2","resources":{"requests":{"cpu":"100m"}},"lifecycle":{"preStop":{"exec":{"command":["sozu","shutdown"]}}}},
                         {"name":"controller","image":"controller:test","env":[{"name":"SOZU_GW_EXPOSURE","value":"[]"},{"name":"SOZU_GW_PROVISION_TEMPLATE","value":"/template.json"},{"name":"SOZU_GW_INGRESS_ONLY","value":"true"}]}
                     ],
                     "volumes":[{"name":"sozu-config","configMap":{"name":"template-sozu"}}],
@@ -1007,7 +1007,7 @@ async fn recreated_owned_resource_with_the_same_version_is_not_mistaken_for_cach
         let state = state.lock().unwrap();
         assert_eq!(
             state.objects[&path]["spec"]["template"]["spec"]["containers"][0]["image"],
-            "clevercloud/sozu:2.2.1"
+            "clevercloud/sozu:2.3.2"
         );
         let (_, _, patch) = state
             .requests

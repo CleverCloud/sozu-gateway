@@ -8,8 +8,12 @@ updates:
       cargo:
         patterns: ["*"]
     # The builder refuses tenant input with the crates Sōzu parses it with, so
-    # these must stay at the versions Sōzu 2.2.1 resolves; they move with the
+    # these must stay at the versions Sōzu 2.3.2 resolves; they move with the
     # Sōzu version (crates/builder/tests/sozu_lock_pins.rs fails on drift).
+    # rustls, rustls-webpki, rustls-pki-types and ring are pinned by the same
+    # test but deliberately not ignored: they are the controller's own TLS
+    # stack too, so their updates must keep arriving; one turns that test red
+    # and is then taken together with the Sōzu version that ships it.
     ignore:
       - dependency-name: "regex"
       - dependency-name: "regex-syntax"
@@ -17,6 +21,9 @@ updates:
       - dependency-name: "idna"
       - dependency-name: "idna_adapter"
       - dependency-name: "icu_*"
+      - dependency-name: "x509-parser"
+      - dependency-name: "der-parser"
+      - dependency-name: "asn1-rs"
 
   - package-ecosystem: github-actions
     directory: "/"

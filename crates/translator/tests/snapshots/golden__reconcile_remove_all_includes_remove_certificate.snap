@@ -1,6 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
-
+assertion_line: 718
 expression: reqs
 ---
 [
@@ -32,7 +32,8 @@ expression: reqs
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -64,7 +65,8 @@ expression: reqs
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -96,7 +98,8 @@ expression: reqs
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },

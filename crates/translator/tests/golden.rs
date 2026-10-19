@@ -212,7 +212,7 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
     // live Sōzu: the `\?` branch because Sōzu matches path rules against the
     // request target with the query string still attached, and the `^` because
     // Full-span on purpose: Sōzu 2.2.1 does not anchor regexes itself (an
-    // unanchored rule would also match `/xx/foo`) and its successor anchors
+    // unanchored rule would also match `/xx/foo`) and 2.3.0 and later anchor
     // every one, so the rule carries both anchors and consumes the remainder.
     assert_eq!(
         emitted_path(&one_prefix_route("/foo")),
@@ -1008,6 +1008,68 @@ fn cluster_connection_limit_maps_to_request() {
         ..Default::default()
     };
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
+}
+
+#[test]
+fn a_udp_cluster_carries_no_per_ip_cap() {
+    // Sōzu 2.3 would turn the cap into a silent per-source UDP flow limit;
+    // the same annotation keeps capping a TCP cluster.
+    let mut dns = cluster("dns", ir::LbAlgorithm::RoundRobin, false);
+    dns.max_connections_per_ip = Some(10);
+    let mut pg = cluster("pg", ir::LbAlgorithm::RoundRobin, false);
+    pg.max_connections_per_ip = Some(10);
+    let model = ir::Ir {
+        clusters: vec![dns, pg],
+        l4_frontends: vec![
+            ir::L4Frontend {
+                protocol: ir::L4Protocol::Udp,
+                listener: addr("0.0.0.0:5353"),
+                cluster_id: "dns".into(),
+            },
+            ir::L4Frontend {
+                protocol: ir::L4Protocol::Tcp,
+                listener: addr("0.0.0.0:5432"),
+                cluster_id: "pg".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    let caps: Vec<(String, Option<u64>, bool)> = tr::ir_to_requests(&model)
+        .into_iter()
+        .filter_map(|r| match r.request_type {
+            Some(RequestType::AddCluster(c)) => {
+                Some((c.cluster_id, c.max_connections_per_ip, c.udp.is_some()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        caps,
+        [("dns".into(), None, true), ("pg".into(), Some(10), false)]
+    );
+}
+
+#[test]
+fn a_frontend_naming_an_undeclared_cluster_is_refused() {
+    // Upstream's diff re-adds such a frontend after removing its cluster; our
+    // tiers would add it first and Sōzu 2.3's cascade would then delete it.
+    let previous = sample_ir();
+    let mut desired = previous.clone();
+    let named = desired.frontends[0]
+        .cluster_id
+        .clone()
+        .expect("sample frontends name a cluster");
+    desired.clusters.retain(|c| c.id != named);
+    desired.backends.retain(|b| b.cluster_id != named);
+    let err = tr::reconcile(&previous, &desired).unwrap_err();
+    assert!(
+        matches!(&err, tr::TranslatorError::UnknownCluster(_, id) if *id == named),
+        "{err:?}"
+    );
+    assert!(
+        tr::reconcile(&desired.clone(), &previous).is_ok(),
+        "only the desired state is checked"
+    );
 }
 
 #[test]

@@ -22,13 +22,16 @@ sozu-command-lib = { workspace = true }
 # every reconcile of the shared instance (translation is all-or-nothing).
 #
 # A `Regex` path rule is compiled by Sōzu with `regex::bytes::Regex::new`
-# (default flags, no builder limits). The lock resolves this to 1.13.1, the
-# version Sōzu 2.2.1 builds against, so the accepted grammar is the same;
+# (default flags, no builder limits), as written and wrapped in `\A(?:…)\z`.
+# The lock resolves this to 1.13.1, the version Sōzu 2.3.2 builds against, so
+# the accepted grammar is the same;
 # tests/sozu_lock_pins.rs fails if a lock refresh moves it (or regex-syntax).
 regex = "1"
-# A `tls.key` is parsed by Sōzu with `rustls_pki_types::PrivateKeyDer` and
-# loaded with the ring provider; the pairing check against `tls.crt` is ours.
-# `ring` is what the lock already resolves rustls to (via kube): no aws-lc.
+# A `tls.key` is parsed by Sōzu with `rustls_pki_types::PrivateKeyDer`,
+# loaded with the ring provider (the image is built `crypto-ring`), and paired
+# with `tls.crt` by `CertifiedKey::keys_match` (webpki parses the leaf). The
+# lock holds rustls, webpki, pki-types and ring at Sōzu 2.3.2's versions,
+# which tests/sozu_lock_pins.rs checks.
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 # A sticky backend's cookie value is an HMAC of its backend id keyed by the
 # Service UID: stable wherever the same objects are read, opaque to clients.
@@ -37,7 +40,7 @@ ring = { version = "0.17", default-features = false }
 # Every frontend hostname is parsed by Sōzu's router with
 # `idna::domain_to_ascii` (default features, UTS-46 with the compiled Unicode
 # data), and a failure rejects the whole `Add*Frontend` request. Pinned to the
-# version Sōzu 2.2.1 builds against; its Unicode backend (idna_adapter, icu_*)
+# version Sōzu 2.3.2 builds against; its Unicode backend (idna_adapter, icu_*)
 # is held at Sōzu's versions by the lock alone, which tests/sozu_lock_pins.rs
 # checks.
 idna = "=1.1.0"

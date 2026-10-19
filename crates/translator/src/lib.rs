@@ -5,17 +5,23 @@
 //!  - **Routing graph** (clusters / backends / frontends): we reuse Sōzu's own
 //!    `ConfigState::diff`, so the semantics match the data plane exactly.
 //!  - **Certificates**: we diff them ourselves, by fingerprint. This (a) lets us
-//!    emit `ReplaceCertificate` for zero-gap rotation, and (b) avoids a
-//!    debug-assert in sozu-command-lib 2.1.0 that fires when `ConfigState::diff`
-//!    removes the last certificate at a listener address (an empty cert bucket
-//!    is left behind and the replay check is not normalised for it).
+//!    emit `ReplaceCertificate` for zero-gap rotation, where Sōzu 2.3's own
+//!    certificate diff moves a certificate with a non-atomic Remove + Add (a
+//!    gap), and turns an order-only or same-fingerprint change into
+//!    Remove(X) + Add(X) — a pair `canonicalize` would reorder into a lost
+//!    certificate, since adds tier before removes — and (b) kept
+//!    clear of a debug-assert in sozu-command-lib 2.1.0–2.2.1 that fired when
+//!    `ConfigState::diff` removed the last certificate at a listener address.
 //!
 //! Output is canonicalised into dependency-safe tiers (adds: listeners →
 //! clusters → backends → certificates → frontends; removes in reverse, except
 //! that cluster removals come last, after the listener teardown). Frontend *removes*
 //! are ordered before frontend *adds*: Sōzu keys a route by host+path (not by
 //! cluster_id), so re-pointing a route at another cluster is a Remove+Add on the
-//! same key, and adding first would be rejected as a duplicate. A new/replacement
+//! same key, and adding first would be rejected as a duplicate. Since Sōzu 2.3.0
+//! a cluster removal also drops the cluster's frontends and backends, and the
+//! diff leaves those out; they are spelled out again so they tier the same way
+//! (see `expand_cluster_removals`). A new/replacement
 //! certificate lands before the old one is removed → no TLS gap. This also makes
 //! the otherwise HashSet-ordered routing diff deterministic.
 #![forbid(unsafe_code)]
@@ -45,6 +51,8 @@ pub enum TranslatorError {
     Certificate(String),
     #[error("conflicting L4 frontends: {0}")]
     L4Conflict(String),
+    #[error("{0} names cluster {1:?}, which the desired state does not declare")]
+    UnknownCluster(&'static str, String),
 }
 
 // ----------------------------------------------------------------------------
@@ -86,11 +94,18 @@ fn cluster_request(c: &ir::Cluster, udp: bool) -> Request {
         sticky_session: c.sticky_session,
         https_redirect: c.https_redirect,
         load_balancing: lb_algorithm(c.load_balancing),
-        max_connections_per_ip: c.max_connections_per_ip,
+        // Sōzu 2.3 applies a UDP cluster's per-IP cap to new flows per source
+        // (99e6aee2), where 2.2 ignored it, and counts every client source
+        // port as a flow. The `sozu.io/max-connections-per-ip` annotation was
+        // never meant for datagrams — clients behind a NAT or a node SNAT
+        // would lose new flows silently — so a UDP cluster keeps none.
+        max_connections_per_ip: if udp { None } else { c.max_connections_per_ip },
         retry_after: c.retry_after,
-        // Distinct sockets behind one source IP are distinct UDP clients.
-        // Sōzu's source-IP-only default otherwise reuses the first socket's
-        // return address for later datagrams from other source ports.
+        // Distinct sockets behind one source IP are distinct UDP clients. Since
+        // Sōzu 2.3.0 a flow is always keyed on the source IP and port
+        // (fcdec35e) and this only feeds backend selection; on 2.2 the
+        // source-IP-only default reused the first socket's return address for
+        // later datagrams from other source ports.
         udp: udp.then(|| UdpClusterConfig {
             affinity_key: Some(UdpAffinityKey::SourceIpPort as i32),
             ..Default::default()
@@ -125,6 +140,7 @@ fn backend_request(b: &ir::Backend) -> Request {
         sticky_id: b.sticky_id.clone(),
         load_balancing_parameters: b.weight.map(|weight| LoadBalancingParams { weight }),
         backup: None,
+        unix_path: None,
     })
     .into()
 }
@@ -352,6 +368,7 @@ fn tcp_listener_add(addr: SocketAddr) -> Request {
         // to what a pre-2.2.0 Sōzu already accepts.
         sni_preread_timeout: None,
         sni_preread_max_bytes: None,
+        interface: None,
     })
     .into()
 }
@@ -365,6 +382,7 @@ fn udp_listener_add(addr: SocketAddr) -> Request {
         max_rx_datagram_size: 1500,
         max_flows: 0,
         active: true,
+        interface: None,
     })
     .into()
 }
@@ -374,6 +392,7 @@ fn activate_listener(addr: SocketAddr, proxy: ListenerType) -> Request {
         address: addr.into(),
         proxy: proxy as i32,
         from_scm: false,
+        interface: None,
     })
     .into()
 }
@@ -480,7 +499,7 @@ fn tier(req: &Request) -> u8 {
         | Some(RequestType::AddUdpListener(_)) => 0,
         Some(RequestType::ActivateListener(_)) => 1,
         Some(RequestType::AddCluster(_)) => 2,
-        Some(RequestType::AddBackend(_)) => 3,
+        Some(RequestType::AddBackend(_)) | Some(RequestType::AddUnixBackend(_)) => 3,
         Some(RequestType::AddCertificate(_)) | Some(RequestType::ReplaceCertificate(_)) => 4,
         // Frontend removes precede frontend adds. Sōzu keys a route by
         // `address;hostname;path[;method]` (cluster_id is NOT part of the key),
@@ -489,13 +508,24 @@ fn tier(req: &Request) -> u8 {
         // `add_http_frontend` hit an Occupied entry → `StateError::Exists`, and
         // the trailing Remove would then delete the route outright. Removing
         // first leaves the entry Vacant for the re-add (a tiny, unavoidable gap
-        // since Sōzu 2.1.0 has no atomic frontend replace).
+        // since Sōzu, 2.3.2 included, has no atomic frontend replace).
+        //
+        // Sōzu 2.3 carries a frontend with header predicates or a
+        // `silent_close` redirect on dedicated verbs (`RequestType::add_http_frontend`
+        // and siblings pick them, `ConfigState::diff` included); they tier with
+        // the plain ones so a route keeps its place whatever it carries.
         Some(RequestType::RemoveHttpFrontend(_))
         | Some(RequestType::RemoveHttpsFrontend(_))
+        | Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(_))
+        | Some(RequestType::RemoveHttpsFrontendWithHeaderPredicates(_))
         | Some(RequestType::RemoveTcpFrontend(_))
         | Some(RequestType::RemoveUdpFrontend(_)) => 5,
         Some(RequestType::AddHttpFrontend(_))
         | Some(RequestType::AddHttpsFrontend(_))
+        | Some(RequestType::AddHttpFrontendWithHeaderPredicates(_))
+        | Some(RequestType::AddHttpsFrontendWithHeaderPredicates(_))
+        | Some(RequestType::AddHttpFrontendWithSilentClose(_))
+        | Some(RequestType::AddHttpsFrontendWithSilentClose(_))
         | Some(RequestType::AddTcpFrontend(_))
         | Some(RequestType::AddUdpFrontend(_)) => 6,
         Some(RequestType::RemoveBackend(_)) => 7,
@@ -510,7 +540,7 @@ fn tier(req: &Request) -> u8 {
         // cluster going (its frontends and backends are removed before, and
         // a listener does not name one), and on 2.3, where the removal takes
         // the cluster's frontends and backends with it, they are gone by
-        // then. Last, a batch that fails before a cluster's removal lands
+        // then: the batch removes them explicitly (`expand_cluster_removals`). Last, a batch that fails before a cluster's removal lands
         // still holds the cluster, and one whose cluster removal landed has
         // finished its layer-4 listener teardown: a failure never leaves a
         // removed cluster next to a listener the IR cannot describe, which
@@ -528,6 +558,66 @@ fn canonicalize(mut requests: Vec<Request>) -> Vec<Request> {
         (tier(req), key)
     });
     requests
+}
+
+/// Every backend and frontend of the desired state names a cluster it declares.
+///
+/// The builder only routes to a Service it resolved, and resolving one inserts
+/// its cluster, so this never fails on its output. It guards the batch shape
+/// [`expand_cluster_removals`] relies on: `ConfigState::diff` would re-add a
+/// frontend still naming a cluster it removes *after* that cluster's
+/// `RemoveCluster` (upstream's "add back" case), while the tiers place the add
+/// first and the 2.3 cascade would then delete it — reported as applied.
+/// Refusing the state loudly beats applying it wrong. The previous state, read
+/// back from disk, is not checked: it describes what was applied.
+fn check_cluster_references(desired: &ir::Ir) -> Result<(), TranslatorError> {
+    let declared: BTreeSet<&str> = desired.clusters.iter().map(|c| c.id.as_str()).collect();
+    let unknown = |id: &str| !declared.contains(id);
+    if let Some(b) = desired.backends.iter().find(|b| unknown(&b.cluster_id)) {
+        return Err(TranslatorError::UnknownCluster(
+            "a backend",
+            b.cluster_id.clone(),
+        ));
+    }
+    if let Some(id) = desired
+        .frontends
+        .iter()
+        .filter_map(|f| f.cluster_id.as_deref())
+        .find(|id| unknown(id))
+    {
+        return Err(TranslatorError::UnknownCluster(
+            "an HTTP frontend",
+            id.to_string(),
+        ));
+    }
+    if let Some(f) = desired.l4_frontends.iter().find(|f| unknown(&f.cluster_id)) {
+        return Err(TranslatorError::UnknownCluster(
+            "an L4 frontend",
+            f.cluster_id.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Spell out what each `RemoveCluster` of a diff removes.
+///
+/// Since Sōzu 2.3.0 `RemoveCluster` also drops every frontend and backend
+/// naming the cluster, and `ConfigState::diff` relies on it: it emits the
+/// cluster removal first and no removal for what the cascade takes. That
+/// order is lost to `canonicalize`, which tiers cluster removes after frontend
+/// adds, so a route re-pointed from a removed cluster to another would be added
+/// while the old one still holds its key (`StateError::Exists`). With the
+/// explicit removes back in the batch they tier ahead of the adds again, and
+/// the cascade finds nothing left to drop.
+fn expand_cluster_removals(previous: &ConfigState, requests: Vec<Request>) -> Vec<Request> {
+    let mut out = Vec::with_capacity(requests.len());
+    for req in requests {
+        if let Some(RequestType::RemoveCluster(cluster_id)) = &req.request_type {
+            out.extend(previous.cluster_removal_requests(cluster_id));
+        }
+        out.push(req);
+    }
+    out
 }
 
 /// Drop every `RemoveBackend` whose (cluster_id, backend_id, address) triple
@@ -702,7 +792,12 @@ pub fn ir_to_requests(ir: &ir::Ir) -> Vec<Request> {
 /// keeps `previous` as its shadow and swaps it to `desired` only after a
 /// successful apply.
 pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, TranslatorError> {
-    let mut requests = routing_state(previous)?.diff(&routing_state(desired)?);
+    check_cluster_references(desired)?;
+    let previous_state = routing_state(previous)?;
+    let mut requests = expand_cluster_removals(
+        &previous_state,
+        previous_state.diff(&routing_state(desired)?),
+    );
     requests.extend(certificate_requests(
         &previous.certificates,
         &desired.certificates,

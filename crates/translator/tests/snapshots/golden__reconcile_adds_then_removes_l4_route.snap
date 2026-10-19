@@ -1,5 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
+assertion_line: 1117
 expression: add
 ---
 [
@@ -21,7 +22,8 @@ expression: add
         "connect_timeout": 3,
         "active": true,
         "sni_preread_timeout": null,
-        "sni_preread_max_bytes": null
+        "sni_preread_max_bytes": null,
+        "interface": null
       }
     }
   },
@@ -37,7 +39,8 @@ expression: add
           "port": 5432
         },
         "proxy": 2,
-        "from_scm": false
+        "from_scm": false,
+        "interface": null
       }
     }
   },
@@ -59,7 +62,14 @@ expression: add
         "max_connections_per_ip": null,
         "retry_after": null,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   },
@@ -78,7 +88,8 @@ expression: add
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },

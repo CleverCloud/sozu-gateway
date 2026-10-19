@@ -1,6 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
-
+assertion_line: 974
 expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
 ---
 [
@@ -22,7 +22,14 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         "max_connections_per_ip": null,
         "retry_after": null,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   },
@@ -43,7 +50,8 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         "load_balancing_parameters": {
           "weight": 5
         },
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -62,7 +70,8 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -118,7 +127,8 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -150,7 +160,8 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   }

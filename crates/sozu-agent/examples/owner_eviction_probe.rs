@@ -41,6 +41,7 @@ fn listing(sock: &str) -> Result<String> {
         https: false,
         tcp: false,
         domain: None,
+        cluster_id: None,
     })
     .into();
     channel.write_message(&query).context("write")?;
@@ -154,6 +155,7 @@ fn main() -> Result<()> {
                 address: address.into(),
                 proxy: ListenerType::Tcp as i32,
                 from_scm: false,
+                interface: None,
             })
             .into(),
         );
@@ -171,6 +173,7 @@ fn main() -> Result<()> {
             address: udp_address.into(),
             proxy: ListenerType::Udp as i32,
             from_scm: false,
+            interface: None,
         })
         .into(),
     );
