@@ -102,6 +102,20 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} | grep -A1 SOZU_GW_WATCH_TIMEOUT_SECS | grep -q '"60"'
     helm template {{HELM_RELEASE}} {{CHART}} --set controller.watchTimeoutSecs=0 | grep -A1 SOZU_GW_WATCH_TIMEOUT_SECS | grep -q '"0"'
     ! helm template {{HELM_RELEASE}} {{CHART}} --set controller.watchTimeoutSecs=null | grep -q SOZU_GW_WATCH_TIMEOUT_SECS
+    # Health checks are off unless asked for, and the whole block is always
+    # rendered from the chart's defaults — also when it is absent, as
+    # --reuse-values from a release predating it replays values. A value the
+    # controller would refuse at startup must fail the render instead.
+    helm template {{HELM_RELEASE}} {{CHART}} | grep -A1 SOZU_GW_DEFAULT_HEALTH_CHECK | grep -q '"off"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.mode=false | grep -A1 SOZU_GW_DEFAULT_HEALTH_CHECK | grep -q '"off"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck=null | grep -A1 SOZU_GW_HEALTH_CHECK_INTERVAL_SECS | grep -q '"3"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.mode=tcp --set sozu.healthCheck.timeoutSeconds=null | grep -A1 SOZU_GW_HEALTH_CHECK_TIMEOUT_SECS | grep -q '"2"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.mode=tcp | grep -A1 SOZU_GW_DEFAULT_HEALTH_CHECK | grep -q '"tcp"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set-json sozu.healthCheck.intervalSeconds=1000000 | grep -A1 SOZU_GW_HEALTH_CHECK_INTERVAL_SECS | grep -q '"1000000"'
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.mode=http > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.intervalSeconds=0 > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.timeoutSeconds=2s > /dev/null 2>&1
+    ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.healthCheck.interval=3 > /dev/null 2>&1
     # The Pod's own ports are not up for grabs by an exposure entry.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"},{"name":"pg","port":9100,"bind":9100,"protocol":"TCP","transport":"TCP"}]' > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set-json 'exposure=[{"name":"metrics","port":9999,"bind":9999,"protocol":"TCP","transport":"TCP"},{"name":"http","port":80,"bind":8080,"protocol":"HTTP","transport":"TCP"},{"name":"https","port":443,"bind":8443,"protocol":"HTTPS","transport":"TCP"}]' > /dev/null 2>&1

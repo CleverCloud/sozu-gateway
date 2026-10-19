@@ -152,6 +152,49 @@ pub struct Cluster {
     /// of failing the whole parse (see `docs/UPGRADING.md`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub http2: bool,
+    /// Active health check Sōzu runs against every backend of the cluster;
+    /// `None` runs none. Skipped when `None`, so a cluster without one
+    /// serialises exactly as before and an older controller reading a shadow
+    /// that carries one ignores the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheck>,
+}
+
+/// A TCP-connect health check (Sōzu 2.3's `HEALTH_CHECK_MODE_TCP`): a backend
+/// is healthy when a TCP connection to it is established within `timeout_secs`.
+/// Nothing is sent and the probe closes the connection itself, so it detects a
+/// black-holed, refusing or vanished backend. It does not reliably detect a
+/// hung application: the kernel completes the handshake without the
+/// application calling `accept`, until its accept queue is full.
+///
+/// Each Sōzu worker probes on its own and leaves an unhealthy backend out of
+/// every selection, sticky ones included, until `healthy_threshold` probes in
+/// a row succeed again — except when no backend passes normal selection
+/// (health or connect back-off). It then fails open: it ignores health and
+/// routes to every backend it is not backing off from after failed
+/// connections, so an unhealthy backend can take traffic while a healthy one
+/// is backing off (v2.3.2 `lib/src/backends.rs`, `Backend::can_open` and
+/// `BackendList::select_tiers`).
+///
+/// There is deliberately no mode field: an enum gaining an `Http` variant later
+/// would be a variant an older controller cannot parse, failing its whole
+/// shadow (see `docs/UPGRADING.md`). An HTTP probe would come as an optional
+/// field of its own, which an older controller ignores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheck {
+    /// Seconds between two probes of one backend. Sōzu adds a per-cluster
+    /// jitter of up to a fifth of it, and starts no probe while the previous
+    /// one to that backend is still in flight.
+    pub interval_secs: u32,
+    /// Seconds a probe may take to connect before it counts as a failure.
+    pub timeout_secs: u32,
+    /// Consecutive successful probes that bring an unhealthy backend back.
+    pub healthy_threshold: u32,
+    /// Consecutive failed probes that take a healthy backend out.
+    pub unhealthy_threshold: u32,
+    /// Port the probe dials on the backend's IP instead of its data port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// One backend endpoint: a **pod IP:port** (never a ClusterIP).

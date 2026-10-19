@@ -13,6 +13,7 @@ fn graph() -> Ir {
             max_connections_per_ip: None,
             retry_after: None,
             http2: false,
+            health_check: None,
         }],
         l4_frontends: vec![L4Frontend {
             cluster_id: "shared".into(),

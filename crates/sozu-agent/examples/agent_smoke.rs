@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
             max_connections_per_ip: None,
             retry_after: None,
             http2: false,
+            health_check: None,
         }],
         backends: vec![ir::Backend {
             cluster_id: cluster_id.clone(),

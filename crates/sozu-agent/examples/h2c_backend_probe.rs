@@ -580,6 +580,7 @@ fn model(http2: bool, a: &Addrs) -> ir::Ir {
         max_connections_per_ip: None,
         retry_after: None,
         http2,
+        health_check: None,
     };
     let backend = |cluster_id: &str, address: SocketAddr| ir::Backend {
         cluster_id: cluster_id.to_string(),

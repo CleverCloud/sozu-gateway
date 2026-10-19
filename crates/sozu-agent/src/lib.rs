@@ -1847,6 +1847,7 @@ mod tests {
             max_connections_per_ip: None,
             retry_after: None,
             http2: false,
+            health_check: None,
         };
         let backend = |n: u8| ir::Backend {
             cluster_id: "c".to_string(),

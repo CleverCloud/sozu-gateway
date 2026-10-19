@@ -36,10 +36,11 @@ use std::net::SocketAddr;
 use sozu_command_lib::certificate::{parse_pem, split_certificate_chain};
 use sozu_command_lib::proto::command::{
     request::RequestType, ActivateListener, AddBackend, AddCertificate, CertificateAndKey, Cluster,
-    Header, HeaderPosition, ListenerType, LoadBalancingAlgorithms, LoadBalancingParams, PathRule,
-    PathRuleKind, RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
-    RequestHttpFrontend, RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig,
-    UdpAffinityKey, UdpClusterConfig, UdpListenerConfig,
+    Header, HeaderPosition, HealthCheckConfig, HealthCheckMode, ListenerType,
+    LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind, RedirectPolicy,
+    RedirectScheme, RemoveCertificate, ReplaceCertificate, Request, RequestHttpFrontend,
+    RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig, UdpAffinityKey,
+    UdpClusterConfig, UdpListenerConfig,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -132,9 +133,46 @@ fn cluster_request(c: &ir::Cluster, udp: bool) -> Request {
         // by the TCP and UDP proxies, so a cluster an L4 route shares is
         // unaffected.
         http2: c.http2.then_some(true),
+        // A TCP-connect check means nothing to datagrams, and Sōzu 2.3.2 does
+        // not refuse one on a UDP cluster (`command/src/state.rs`), so it is
+        // left out here; the builder has already dropped and reported it.
+        health_check: if udp {
+            None
+        } else {
+            c.health_check.as_ref().map(health_check_config)
+        },
         ..Default::default()
     })
     .into()
+}
+
+/// The wire form of a TCP-connect health check — what the builder validates
+/// with `validate_health_check_config` before the check enters the IR, so the
+/// two must stay field for field the same (a builder test checks that the
+/// builder admits exactly the checks `ConfigState` accepts from here).
+///
+/// Every field is spelled out rather than taken from `Default`: the proto
+/// default is an HTTP probe with an empty `uri`, which Sōzu refuses ("health
+/// check URI must start with '/'"), failing the whole `AddCluster` and, since
+/// translation is all-or-nothing, every reconcile. `uri` is `/` although the
+/// TCP mode ignores it: a Sōzu older than 2.3.0 has no `mode` field, runs
+/// `GET <uri>` instead, and refuses an empty one the same way.
+pub fn health_check_config(check: &ir::HealthCheck) -> HealthCheckConfig {
+    HealthCheckConfig {
+        uri: "/".to_string(),
+        interval: check.interval_secs,
+        timeout: check.timeout_secs,
+        healthy_threshold: check.healthy_threshold,
+        unhealthy_threshold: check.unhealthy_threshold,
+        expected_status: 0,
+        mode: HealthCheckMode::Tcp as i32,
+        accepted_statuses: vec![],
+        port: check.port.map(u32::from),
+        // Protected probe headers (2.3.2) need a preflight, a two-phase
+        // exchange and re-injection after every Sōzu restart; a TCP probe
+        // sends nothing, and Sōzu refuses headers in TCP mode anyway.
+        headers: vec![],
+    }
 }
 
 fn cluster_requests(ir: &ir::Ir) -> Vec<Request> {

@@ -154,6 +154,10 @@ pub(crate) struct GatewayBuildResults {
     pub routes: Vec<RouteResult>,
     /// Layer-4 frontends from TCPRoute/UDPRoute, port conflicts already settled.
     pub l4_frontends: Vec<ir::L4Frontend>,
+    /// The layer-4 route parents those frontends come from, in tie-break
+    /// order: what the health-check settlement reads once the HTTP(S)
+    /// frontends are arbitrated too (`settle_health_checks`).
+    pub l4_carriers: Vec<L4Carrier>,
 }
 
 /// A listener protocol this controller serves, and the one route kind that
@@ -816,7 +820,7 @@ pub(crate) fn build_gateway(
     // 4. TCPRoutes / UDPRoutes on the layer-4 listeners. Same Service→pod-IP
     // resolver, same Gateway admission rules; the port conflicts they can
     // create are settled inside, never left to the translator.
-    let l4_frontends = attach_l4_routes(
+    let (l4_frontends, l4_carriers) = attach_l4_routes(
         inputs,
         index,
         clusters,
@@ -856,6 +860,7 @@ pub(crate) fn build_gateway(
         gateways,
         routes,
         l4_frontends,
+        l4_carriers,
     }
 }
 
@@ -1756,6 +1761,18 @@ impl L4RouteView {
     fn key(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
+
+    /// `(namespace, name)` of the Service the route's backendRef names.
+    fn backend_service(&self) -> Option<(String, String)> {
+        self.backend_refs.first().map(|br| {
+            (
+                br.namespace
+                    .clone()
+                    .unwrap_or_else(|| self.namespace.clone()),
+                br.name.clone(),
+            )
+        })
+    }
 }
 
 /// One claim a route parent makes on a layer-4 socket, held until conflicts are
@@ -1769,6 +1786,10 @@ struct L4Claim {
     /// message naming the bind would name a number nobody wrote down.
     advertised: u16,
     cluster_id: String,
+    /// `namespace/name` of the backend Service, and whether it turns a health
+    /// check on itself: what a dropped health check is reported against.
+    service: String,
+    asks_for_health_check: bool,
     /// Where a loss is reported: index into the route results, then into that
     /// result's parents.
     route: usize,
@@ -1776,6 +1797,25 @@ struct L4Claim {
     /// Tie-break: oldest `creationTimestamp` first (absent last), then
     /// `namespace/name`.
     order: (bool, String, String),
+}
+
+/// A layer-4 route parent whose claim ended up routing: its socket's winner,
+/// or a benign duplicate of the winner. Everything the health-check
+/// settlement needs, which runs after this module returns
+/// (`crate::settle_health_checks`): which cluster carries TCP or UDP, and
+/// where to report a check lost to UDP.
+pub(crate) struct L4Carrier {
+    pub(crate) protocol: ir::L4Protocol,
+    pub(crate) cluster_id: String,
+    /// `namespace/name` of the backend Service.
+    pub(crate) service: String,
+    /// The Service turns the check on itself (`sozu.io/health-check: tcp`).
+    pub(crate) asks_for_health_check: bool,
+    /// Index into the route results, then into that result's parents.
+    pub(crate) route: usize,
+    pub(crate) parent: usize,
+    /// `namespace/name` of the route, how a report names it.
+    pub(crate) route_name: String,
 }
 
 /// Resolve one layer-4 route's backendRef down to a cluster id.
@@ -1907,7 +1947,7 @@ fn attach_l4_routes(
     gw_listeners: &BTreeMap<(String, String), Vec<ListenerInfo>>,
     routes: &mut Vec<RouteResult>,
     attached: &mut BTreeMap<(String, String, String), i32>,
-) -> Vec<ir::L4Frontend> {
+) -> (Vec<ir::L4Frontend>, Vec<L4Carrier>) {
     let mut views: Vec<L4RouteView> = Vec::new();
     views.extend(inputs.tcp_routes.iter().map(|r| L4RouteView::of_tcp(r)));
     views.extend(inputs.udp_routes.iter().map(|r| L4RouteView::of_udp(r)));
@@ -1973,6 +2013,13 @@ fn attach_l4_routes(
                     &mut resolved_refs_reason,
                 );
                 if let Some(cluster_id) = cluster_id {
+                    let (service_ns, service_name) = view.backend_service().unwrap_or_default();
+                    let asks_for_health_check = crate::service_asks_for_health_check(
+                        index
+                            .services
+                            .get(&(service_ns.clone(), service_name.clone()))
+                            .copied(),
+                    );
                     // One claim per (parent, socket). A parentRef without a
                     // sectionName can address several listeners; each is its own
                     // socket and its own possible conflict.
@@ -1983,6 +2030,8 @@ fn attach_l4_routes(
                             listener: bind,
                             advertised: u16::try_from(l.port).unwrap_or_default(),
                             cluster_id: cluster_id.clone(),
+                            service: format!("{service_ns}/{service_name}"),
+                            asks_for_health_check,
                             route: routes.len(),
                             parent: parents.len(),
                             order: (
@@ -2033,6 +2082,9 @@ fn attach_l4_routes(
 
     let mut l4_frontends = Vec::new();
     let mut winners: BTreeMap<(ir::L4Protocol, SocketAddr), (String, String)> = BTreeMap::new();
+    // Every claim that ends up routing: the socket's winner and its benign
+    // duplicates.
+    let mut routing: Vec<usize> = Vec::new();
     for i in settled {
         let claim = &claims[i];
         let socket = (claim.protocol, claim.listener);
@@ -2044,11 +2096,12 @@ fn attach_l4_routes(
                     listener: claim.listener,
                     cluster_id: claim.cluster_id.clone(),
                 });
+                routing.push(i);
             }
             // Same socket, same cluster: two routes (or two parentRefs of one
             // route) asking for the identical thing. Sōzu would apply either
             // with the same effect, so this is a benign overlap, not a clash.
-            Some((cluster, _)) if *cluster == claim.cluster_id => {}
+            Some((cluster, _)) if *cluster == claim.cluster_id => routing.push(i),
             Some((_, winner)) => {
                 let problem = Problem::L4RouteConflict {
                     port: claim.advertised,
@@ -2066,7 +2119,22 @@ fn attach_l4_routes(
         }
     }
     l4_frontends.sort_by_key(|f| (f.protocol, f.listener));
-    l4_frontends
+    let carriers = routing
+        .into_iter()
+        .map(|i| {
+            let claim = &claims[i];
+            L4Carrier {
+                protocol: claim.protocol,
+                cluster_id: claim.cluster_id.clone(),
+                service: claim.service.clone(),
+                asks_for_health_check: claim.asks_for_health_check,
+                route: claim.route,
+                parent: claim.parent,
+                route_name: claim.order.2.clone(),
+            }
+        })
+        .collect();
+    (l4_frontends, carriers)
 }
 
 /// Is a cross-namespace reference allowed by a `ReferenceGrant` in the target

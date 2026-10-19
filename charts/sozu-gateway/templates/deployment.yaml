@@ -1,5 +1,6 @@
 {{- define "sozu-gateway.deployment" -}}
 {{- include "sozu-gateway.validateDrain" . }}
+{{- include "sozu-gateway.validateHealthCheck" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -166,6 +167,9 @@ spec:
             - name: SOZU_GW_KUBE_READ_TIMEOUT_SECS
               value: {{ .Values.controller.kubeReadTimeoutSecs | quote }}
             {{- end }}
+            # Health-check default for Services without `sozu.io/health-check`,
+            # from `sozu.healthCheck` (off unless set).
+            {{- include "sozu-gateway.healthCheckEnv" . | nindent 12 }}
             {{- if .Values.metrics.enabled }}
             - name: SOZU_GW_METRICS_LISTEN
               value: "0.0.0.0:{{ .Values.metrics.port }}"

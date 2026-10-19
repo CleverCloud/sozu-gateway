@@ -37,7 +37,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use sozu_gw_agent::SozuAgentHandle;
-use sozu_gw_builder::{build, BuildConfig, ExposedPort, Inputs};
+use sozu_gw_builder::{build, BuildConfig, ExposedPort, HealthCheckDefault, Inputs};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
 
@@ -221,6 +221,82 @@ struct Args {
     /// arm running `watch_timeout_secs`.
     #[arg(long, env = "SOZU_GW_KUBE_READ_TIMEOUT_SECS", default_value = "0")]
     kube_read_timeout_secs: u64,
+    /// Active health check for a Service that does not choose one with the
+    /// `sozu.io/health-check` annotation: `off`, or `tcp` — each Sōzu worker
+    /// connects to every backend once per interval and leaves out of rotation
+    /// one that fails `--health-check-unhealthy-threshold` probes in a row.
+    /// A UDP cluster never gets one. Off by default: probes are connections
+    /// every replica's every worker opens to every backend, and a backend
+    /// speaking another protocol may log each one.
+    #[arg(
+        long,
+        env = "SOZU_GW_DEFAULT_HEALTH_CHECK",
+        value_enum,
+        default_value_t = HealthCheckMode::Off
+    )]
+    default_health_check: HealthCheckMode,
+    /// Seconds between two probes of a backend, for every check that does not
+    /// set `sozu.io/health-check-interval`.
+    #[arg(
+        long,
+        env = "SOZU_GW_HEALTH_CHECK_INTERVAL_SECS",
+        default_value_t = HealthCheckDefault::DEFAULT_CHECK.interval_secs
+    )]
+    health_check_interval_secs: u32,
+    /// Seconds a probe may take to connect. Keep it below the interval: Sōzu
+    /// starts no probe of a backend while the previous one is in flight.
+    #[arg(
+        long,
+        env = "SOZU_GW_HEALTH_CHECK_TIMEOUT_SECS",
+        default_value_t = HealthCheckDefault::DEFAULT_CHECK.timeout_secs
+    )]
+    health_check_timeout_secs: u32,
+    /// Successful probes in a row that bring a backend back.
+    #[arg(
+        long,
+        env = "SOZU_GW_HEALTH_CHECK_HEALTHY_THRESHOLD",
+        default_value_t = HealthCheckDefault::DEFAULT_CHECK.healthy_threshold
+    )]
+    health_check_healthy_threshold: u32,
+    /// Failed probes in a row that take a backend out.
+    #[arg(
+        long,
+        env = "SOZU_GW_HEALTH_CHECK_UNHEALTHY_THRESHOLD",
+        default_value_t = HealthCheckDefault::DEFAULT_CHECK.unhealthy_threshold
+    )]
+    health_check_unhealthy_threshold: u32,
+}
+
+/// `--default-health-check`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthCheckMode {
+    Off,
+    Tcp,
+}
+
+/// The health-check default the flags describe.
+fn health_check_default(args: &Args) -> HealthCheckDefault {
+    HealthCheckDefault {
+        enabled: args.default_health_check == HealthCheckMode::Tcp,
+        check: sozu_gw_ir::HealthCheck {
+            interval_secs: args.health_check_interval_secs,
+            timeout_secs: args.health_check_timeout_secs,
+            healthy_threshold: args.health_check_healthy_threshold,
+            unhealthy_threshold: args.health_check_unhealthy_threshold,
+            port: None,
+        },
+    }
+}
+
+/// Refuse at startup a health-check timing Sōzu would refuse — whatever the
+/// mode, since it is also what a Service's own `sozu.io/health-check: tcp`
+/// starts from. Let through, every Service inheriting it would be reported
+/// `InvalidHealthCheck` on every pass and run no check at all.
+fn validate_health_check_default(default: &HealthCheckDefault) -> Result<()> {
+    if let Some(reason) = sozu_gw_builder::health_check_refusal(&default.check) {
+        anyhow::bail!("the --health-check-* timing is refused by Sōzu: {reason}");
+    }
+    Ok(())
 }
 
 /// Reflector read handles for every watched resource type.
@@ -883,6 +959,7 @@ async fn reconcile(
         class_is_default: class_is_default(stores, &args.class_name),
         controller_name: args.controller_name.clone(),
         exposure: exposure.to_vec(),
+        health_check: health_check_default(args),
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
@@ -1073,6 +1150,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     args.gateway_scope.validate().map_err(anyhow::Error::msg)?;
     validate_watch_timeout(args.watch_timeout_secs)?;
+    validate_health_check_default(&health_check_default(&args))?;
     info!(?args, "starting sozu gateway controller");
 
     // The exposure table decides both what a Gateway listener may declare and
@@ -2133,6 +2211,70 @@ mod tests {
                 err.contains("295") && err.contains(&refused.to_string()),
                 "{refused} must be refused naming the limit, got: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn health_checks_default_off_with_the_documented_timing() {
+        let args = Args::parse_from(["sozu-gw-controller"]);
+        let default = health_check_default(&args);
+        assert!(!default.enabled);
+        assert_eq!(default.check, HealthCheckDefault::DEFAULT_CHECK);
+        assert!(validate_health_check_default(&default).is_ok());
+
+        let args = Args::parse_from([
+            "sozu-gw-controller",
+            "--default-health-check",
+            "tcp",
+            "--health-check-interval-secs",
+            "5",
+            "--health-check-timeout-secs",
+            "1",
+            "--health-check-healthy-threshold",
+            "3",
+            "--health-check-unhealthy-threshold",
+            "4",
+        ]);
+        assert_eq!(
+            health_check_default(&args),
+            HealthCheckDefault {
+                enabled: true,
+                check: sozu_gw_ir::HealthCheck {
+                    interval_secs: 5,
+                    timeout_secs: 1,
+                    healthy_threshold: 3,
+                    unhealthy_threshold: 4,
+                    port: None,
+                },
+            }
+        );
+        assert!(
+            Args::try_parse_from(["sozu-gw-controller", "--default-health-check", "http"]).is_err()
+        );
+    }
+
+    #[test]
+    fn a_health_check_timing_sozu_refuses_is_refused_at_startup() {
+        // Whatever the mode: a Service's own `sozu.io/health-check: tcp`
+        // starts from this timing too, and every such Service would otherwise
+        // run no check and be reported on every pass.
+        for (flag, mode) in [
+            ("--health-check-interval-secs", "off"),
+            ("--health-check-timeout-secs", "tcp"),
+            ("--health-check-healthy-threshold", "off"),
+            ("--health-check-unhealthy-threshold", "tcp"),
+        ] {
+            let args = Args::parse_from([
+                "sozu-gw-controller",
+                "--default-health-check",
+                mode,
+                flag,
+                "0",
+            ]);
+            let err = validate_health_check_default(&health_check_default(&args))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("must be > 0"), "{flag}: {err}");
         }
     }
 

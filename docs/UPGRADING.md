@@ -4,6 +4,39 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Active TCP health checks, opt-in
+
+New and off by default, so nothing changes until you ask: `sozu.healthCheck`
+in the chart (`mode: "tcp"`, interval 3 s, timeout 2 s, thresholds 2/2) turns
+a TCP-connect check on for every Service not routed over UDP, and the
+`sozu.io/health-check` annotations turn it on, off or retune it per Service
+(see [features](features.md#annotations)). At that timing a backend that stopped
+answering was out of rotation 6.3 to 9.4 s later in the runs recorded on Sōzu
+2.3.2, where a TCPRoute otherwise loses about one connection in N for as long
+as a black-holed pod IP stays listed
+([probe](probes/health-check_sozu-2.3.2_2026-10-19.txt)). A
+`helm upgrade --reuse-values` from an older release renders it off.
+
+Two things to know before turning it on:
+
+- **It needs the Sōzu image the chart pins (2.3.2).** A Sōzu older than 2.3.0
+  ignores the TCP mode and sends `GET /` instead, which marks every backend
+  that does not answer HTTP 2xx down — measured on 2.2.1, a TCP backend went
+  down and the cluster fell back to routing to all of its backends
+  ([probe](probes/health-check_sozu-2.2.1_2026-10-19.txt)). Do not combine
+  checks with an overridden `image.sozu.tag`.
+- **An invalid annotation is reported, not ignored.** Unlike the other
+  `sozu.io/*` annotations, a `sozu.io/health-check*` value Sōzu would refuse
+  becomes an `InvalidHealthCheck` Warning Event, and that Service runs no check
+  at all.
+
+Downgrading is safe for the shadow file: the check is an optional field, not a
+new variant, so an older controller reads it and ignores it. It does not
+remove a check from Sōzu, though: the check stays active until that Service's
+cluster next changes, or until Sōzu restarts.
+
+---
+
 ## A Service port declaring `kubernetes.io/h2c` gets HTTP/2
 
 The controller now reads a backend Service port's `appProtocol` on HTTP routes

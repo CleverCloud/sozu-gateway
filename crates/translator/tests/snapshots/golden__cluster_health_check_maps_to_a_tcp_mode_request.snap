@@ -1,0 +1,21 @@
+---
+source: crates/translator/tests/golden.rs
+expression: checks_of(&requests)
+---
+[
+  [
+    "pg",
+    {
+      "uri": "/",
+      "interval": 3,
+      "timeout": 2,
+      "healthy_threshold": 2,
+      "unhealthy_threshold": 2,
+      "expected_status": 0,
+      "mode": 1,
+      "accepted_statuses": [],
+      "port": 9187,
+      "headers": []
+    }
+  ]
+]
