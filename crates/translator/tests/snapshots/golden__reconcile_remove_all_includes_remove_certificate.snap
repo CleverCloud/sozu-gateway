@@ -150,16 +150,6 @@ expression: reqs
   },
   {
     "request_type": {
-      "REMOVE_CLUSTER": "api"
-    }
-  },
-  {
-    "request_type": {
-      "REMOVE_CLUSTER": "app"
-    }
-  },
-  {
-    "request_type": {
       "REMOVE_CERTIFICATE": {
         "address": {
           "ip": {
@@ -171,6 +161,16 @@ expression: reqs
         },
         "fingerprint": "2e6f2ec7b75dd33cd3e83b6d5a7d0954d74348d44c5a90f23133b13f65a0d15b"
       }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CLUSTER": "api"
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CLUSTER": "app"
     }
   }
 ]

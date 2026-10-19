@@ -1,0 +1,237 @@
+# partial_apply_probe against docker clevercloud/sozu:2.2.1 (deploy config, 2 workers), 2026-10-19
+# What the shadow becomes after a failed batch: (a) unchanged (the controller before replaying);
+# (b) the acknowledged removals replayed, the adds left out; (c) every acknowledged request replayed,
+# whatever it leaves; (d) that replay adopted only when it describes the routing state the
+# acknowledged requests left exactly, else unchanged (this change). `back`: a removed cluster wanted
+# back with a new backend. `repoint`: a route re-pointed to another live cluster, then deleted.
+# `udp`: a cluster switched to random while its UDP route (which gives it UDP affinity) goes, the
+# batch failed right after the cluster's upsert, then the route wanted back; `udp-revert`: the same,
+# then the first state wanted back. One Sōzu, objects of their own per run; frontends listed by the
+# main process, filtered to the run's objects; the UDP cluster as the main process and each worker
+# hold it.
+
+== partial apply probe ==
+== (a) back: shadow after a failed batch: unchanged (the controller before replaying) ==
+1. apply S: [AddCluster(x-back-a), AddCluster(y-back-a), AddBackend(x-back-a-1), AddBackend(y-back-a-3), AddCertificate, AddHttpsFrontend(x.back-a.probe->x-back-a), AddHttpFrontend(x.back-a.probe->x-back-a), AddHttpFrontend(y.back-a.probe->y-back-a)] -> applied
+   frontends: [http x.back-a.probe/ -> x-back-a, http y.back-a.probe/ -> y-back-a, https x.back-a.probe/ -> x-back-a]
+2. remove x-back-a, a later request refused: [RemoveHttpsFrontend(x.back-a.probe->x-back-a), RemoveHttpFrontend(x.back-a.probe->x-back-a), RemoveBackend(x-back-a-1), RemoveCluster(x-back-a), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http y.back-a.probe/ -> y-back-a]
+   shadow lists cluster x-back-a: true
+3. x-back-a back with a second backend: [AddBackend(x-back-a-2)] -> applied
+   frontends: [http y.back-a.probe/ -> y-back-a]
+4. next reconcile, a new route on y-back-a: [AddHttpFrontend(y2.back-a.probe->y-back-a)] -> applied
+   frontends: [http y.back-a.probe/ -> y-back-a, http y2.back-a.probe/ -> y-back-a]
+5. next reconcile, unchanged: no requests
+   frontends: [http y.back-a.probe/ -> y-back-a, http y2.back-a.probe/ -> y-back-a]
+== (b) back: shadow after a failed batch: the acknowledged removals replayed, the adds left out ==
+1. apply S: [AddCluster(x-back-b), AddCluster(y-back-b), AddBackend(x-back-b-1), AddBackend(y-back-b-3), AddCertificate, AddHttpsFrontend(x.back-b.probe->x-back-b), AddHttpFrontend(x.back-b.probe->x-back-b), AddHttpFrontend(y.back-b.probe->y-back-b)] -> applied
+   frontends: [http x.back-b.probe/ -> x-back-b, http y.back-b.probe/ -> y-back-b, https x.back-b.probe/ -> x-back-b]
+2. remove x-back-b, a later request refused: [RemoveHttpsFrontend(x.back-b.probe->x-back-b), RemoveHttpFrontend(x.back-b.probe->x-back-b), RemoveBackend(x-back-b-1), RemoveCluster(x-back-b), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http y.back-b.probe/ -> y-back-b]
+   shadow lists cluster x-back-b: false
+3. x-back-b back with a second backend: [AddCluster(x-back-b), AddBackend(x-back-b-1), AddBackend(x-back-b-2), AddHttpsFrontend(x.back-b.probe->x-back-b), AddHttpFrontend(x.back-b.probe->x-back-b)] -> applied
+   frontends: [http x.back-b.probe/ -> x-back-b, http y.back-b.probe/ -> y-back-b, https x.back-b.probe/ -> x-back-b]
+4. next reconcile, a new route on y-back-b: [AddHttpFrontend(y2.back-b.probe->y-back-b)] -> applied
+   frontends: [http x.back-b.probe/ -> x-back-b, http y.back-b.probe/ -> y-back-b, http y2.back-b.probe/ -> y-back-b, https x.back-b.probe/ -> x-back-b]
+5. next reconcile, unchanged: no requests
+   frontends: [http x.back-b.probe/ -> x-back-b, http y.back-b.probe/ -> y-back-b, http y2.back-b.probe/ -> y-back-b, https x.back-b.probe/ -> x-back-b]
+== (c) back: shadow after a failed batch: every acknowledged request replayed, whatever it leaves ==
+1. apply S: [AddCluster(x-back-c), AddCluster(y-back-c), AddBackend(x-back-c-1), AddBackend(y-back-c-3), AddCertificate, AddHttpsFrontend(x.back-c.probe->x-back-c), AddHttpFrontend(x.back-c.probe->x-back-c), AddHttpFrontend(y.back-c.probe->y-back-c)] -> applied
+   frontends: [http x.back-c.probe/ -> x-back-c, http y.back-c.probe/ -> y-back-c, https x.back-c.probe/ -> x-back-c]
+2. remove x-back-c, a later request refused: [RemoveHttpsFrontend(x.back-c.probe->x-back-c), RemoveHttpFrontend(x.back-c.probe->x-back-c), RemoveBackend(x-back-c-1), RemoveCluster(x-back-c), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http y.back-c.probe/ -> y-back-c]
+   shadow lists cluster x-back-c: false
+3. x-back-c back with a second backend: [AddCluster(x-back-c), AddBackend(x-back-c-1), AddBackend(x-back-c-2), AddHttpsFrontend(x.back-c.probe->x-back-c), AddHttpFrontend(x.back-c.probe->x-back-c)] -> applied
+   frontends: [http x.back-c.probe/ -> x-back-c, http y.back-c.probe/ -> y-back-c, https x.back-c.probe/ -> x-back-c]
+4. next reconcile, a new route on y-back-c: [AddHttpFrontend(y2.back-c.probe->y-back-c)] -> applied
+   frontends: [http x.back-c.probe/ -> x-back-c, http y.back-c.probe/ -> y-back-c, http y2.back-c.probe/ -> y-back-c, https x.back-c.probe/ -> x-back-c]
+5. next reconcile, unchanged: no requests
+   frontends: [http x.back-c.probe/ -> x-back-c, http y.back-c.probe/ -> y-back-c, http y2.back-c.probe/ -> y-back-c, https x.back-c.probe/ -> x-back-c]
+== (d) back: shadow after a failed batch: every acknowledged request replayed when that is exact, else unchanged (this change) ==
+1. apply S: [AddCluster(x-back-d), AddCluster(y-back-d), AddBackend(x-back-d-1), AddBackend(y-back-d-3), AddCertificate, AddHttpsFrontend(x.back-d.probe->x-back-d), AddHttpFrontend(x.back-d.probe->x-back-d), AddHttpFrontend(y.back-d.probe->y-back-d)] -> applied
+   frontends: [http x.back-d.probe/ -> x-back-d, http y.back-d.probe/ -> y-back-d, https x.back-d.probe/ -> x-back-d]
+2. remove x-back-d, a later request refused: [RemoveHttpsFrontend(x.back-d.probe->x-back-d), RemoveHttpFrontend(x.back-d.probe->x-back-d), RemoveBackend(x-back-d-1), RemoveCluster(x-back-d), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35 [replay exact: adopted]
+   frontends: [http y.back-d.probe/ -> y-back-d]
+   shadow lists cluster x-back-d: false
+3. x-back-d back with a second backend: [AddCluster(x-back-d), AddBackend(x-back-d-1), AddBackend(x-back-d-2), AddHttpsFrontend(x.back-d.probe->x-back-d), AddHttpFrontend(x.back-d.probe->x-back-d)] -> applied
+   frontends: [http x.back-d.probe/ -> x-back-d, http y.back-d.probe/ -> y-back-d, https x.back-d.probe/ -> x-back-d]
+4. next reconcile, a new route on y-back-d: [AddHttpFrontend(y2.back-d.probe->y-back-d)] -> applied
+   frontends: [http x.back-d.probe/ -> x-back-d, http y.back-d.probe/ -> y-back-d, http y2.back-d.probe/ -> y-back-d, https x.back-d.probe/ -> x-back-d]
+5. next reconcile, unchanged: no requests
+   frontends: [http x.back-d.probe/ -> x-back-d, http y.back-d.probe/ -> y-back-d, http y2.back-d.probe/ -> y-back-d, https x.back-d.probe/ -> x-back-d]
+== (a) repoint: shadow after a failed batch: unchanged (the controller before replaying) ==
+1. apply S: [AddCluster(a-repoint-a), AddCluster(b-repoint-a), AddBackend(a-repoint-a-1), AddBackend(b-repoint-a-3), AddHttpsFrontend(k.repoint-a.probe->a-repoint-a), AddHttpFrontend(a.repoint-a.probe->a-repoint-a), AddHttpFrontend(k.repoint-a.probe->a-repoint-a), AddHttpFrontend(b.repoint-a.probe->b-repoint-a)] -> applied
+   frontends: [http a.repoint-a.probe/ -> a-repoint-a, http b.repoint-a.probe/ -> b-repoint-a, http k.repoint-a.probe/ -> a-repoint-a, https k.repoint-a.probe/ -> a-repoint-a]
+2. re-point k.repoint-a.probe to b-repoint-a, a later request refused: [RemoveHttpsFrontend(k.repoint-a.probe->a-repoint-a), RemoveHttpFrontend(k.repoint-a.probe->a-repoint-a), AddHttpsFrontend(k.repoint-a.probe->b-repoint-a), AddHttpFrontend(k.repoint-a.probe->b-repoint-a), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http a.repoint-a.probe/ -> a-repoint-a, http b.repoint-a.probe/ -> b-repoint-a, http k.repoint-a.probe/ -> b-repoint-a, https k.repoint-a.probe/ -> b-repoint-a]
+   shadow routes k.repoint-a.probe: [http -> a-repoint-a, https -> a-repoint-a]
+3. delete k.repoint-a.probe: [RemoveHttpsFrontend(k.repoint-a.probe->a-repoint-a), RemoveHttpFrontend(k.repoint-a.probe->a-repoint-a)] -> applied
+   frontends: [http a.repoint-a.probe/ -> a-repoint-a, http b.repoint-a.probe/ -> b-repoint-a]
+4. next reconcile, unchanged: no requests
+   frontends: [http a.repoint-a.probe/ -> a-repoint-a, http b.repoint-a.probe/ -> b-repoint-a]
+== (b) repoint: shadow after a failed batch: the acknowledged removals replayed, the adds left out ==
+1. apply S: [AddCluster(a-repoint-b), AddCluster(b-repoint-b), AddBackend(a-repoint-b-1), AddBackend(b-repoint-b-3), AddHttpsFrontend(k.repoint-b.probe->a-repoint-b), AddHttpFrontend(a.repoint-b.probe->a-repoint-b), AddHttpFrontend(k.repoint-b.probe->a-repoint-b), AddHttpFrontend(b.repoint-b.probe->b-repoint-b)] -> applied
+   frontends: [http a.repoint-b.probe/ -> a-repoint-b, http b.repoint-b.probe/ -> b-repoint-b, http k.repoint-b.probe/ -> a-repoint-b, https k.repoint-b.probe/ -> a-repoint-b]
+2. re-point k.repoint-b.probe to b-repoint-b, a later request refused: [RemoveHttpsFrontend(k.repoint-b.probe->a-repoint-b), RemoveHttpFrontend(k.repoint-b.probe->a-repoint-b), AddHttpsFrontend(k.repoint-b.probe->b-repoint-b), AddHttpFrontend(k.repoint-b.probe->b-repoint-b), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http a.repoint-b.probe/ -> a-repoint-b, http b.repoint-b.probe/ -> b-repoint-b, http k.repoint-b.probe/ -> b-repoint-b, https k.repoint-b.probe/ -> b-repoint-b]
+   shadow routes k.repoint-b.probe: []
+3. delete k.repoint-b.probe: no requests
+   frontends: [http a.repoint-b.probe/ -> a-repoint-b, http b.repoint-b.probe/ -> b-repoint-b, http k.repoint-b.probe/ -> b-repoint-b, https k.repoint-b.probe/ -> b-repoint-b]
+4. next reconcile, unchanged: no requests
+   frontends: [http a.repoint-b.probe/ -> a-repoint-b, http b.repoint-b.probe/ -> b-repoint-b, http k.repoint-b.probe/ -> b-repoint-b, https k.repoint-b.probe/ -> b-repoint-b]
+== (c) repoint: shadow after a failed batch: every acknowledged request replayed, whatever it leaves ==
+1. apply S: [AddCluster(a-repoint-c), AddCluster(b-repoint-c), AddBackend(a-repoint-c-1), AddBackend(b-repoint-c-3), AddHttpsFrontend(k.repoint-c.probe->a-repoint-c), AddHttpFrontend(a.repoint-c.probe->a-repoint-c), AddHttpFrontend(k.repoint-c.probe->a-repoint-c), AddHttpFrontend(b.repoint-c.probe->b-repoint-c)] -> applied
+   frontends: [http a.repoint-c.probe/ -> a-repoint-c, http b.repoint-c.probe/ -> b-repoint-c, http k.repoint-c.probe/ -> a-repoint-c, https k.repoint-c.probe/ -> a-repoint-c]
+2. re-point k.repoint-c.probe to b-repoint-c, a later request refused: [RemoveHttpsFrontend(k.repoint-c.probe->a-repoint-c), RemoveHttpFrontend(k.repoint-c.probe->a-repoint-c), AddHttpsFrontend(k.repoint-c.probe->b-repoint-c), AddHttpFrontend(k.repoint-c.probe->b-repoint-c), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   frontends: [http a.repoint-c.probe/ -> a-repoint-c, http b.repoint-c.probe/ -> b-repoint-c, http k.repoint-c.probe/ -> b-repoint-c, https k.repoint-c.probe/ -> b-repoint-c]
+   shadow routes k.repoint-c.probe: [https -> b-repoint-c, http -> b-repoint-c]
+3. delete k.repoint-c.probe: [RemoveHttpsFrontend(k.repoint-c.probe->b-repoint-c), RemoveHttpFrontend(k.repoint-c.probe->b-repoint-c)] -> applied
+   frontends: [http a.repoint-c.probe/ -> a-repoint-c, http b.repoint-c.probe/ -> b-repoint-c]
+4. next reconcile, unchanged: no requests
+   frontends: [http a.repoint-c.probe/ -> a-repoint-c, http b.repoint-c.probe/ -> b-repoint-c]
+== (d) repoint: shadow after a failed batch: every acknowledged request replayed when that is exact, else unchanged (this change) ==
+1. apply S: [AddCluster(a-repoint-d), AddCluster(b-repoint-d), AddBackend(a-repoint-d-1), AddBackend(b-repoint-d-3), AddHttpsFrontend(k.repoint-d.probe->a-repoint-d), AddHttpFrontend(a.repoint-d.probe->a-repoint-d), AddHttpFrontend(k.repoint-d.probe->a-repoint-d), AddHttpFrontend(b.repoint-d.probe->b-repoint-d)] -> applied
+   frontends: [http a.repoint-d.probe/ -> a-repoint-d, http b.repoint-d.probe/ -> b-repoint-d, http k.repoint-d.probe/ -> a-repoint-d, https k.repoint-d.probe/ -> a-repoint-d]
+2. re-point k.repoint-d.probe to b-repoint-d, a later request refused: [RemoveHttpsFrontend(k.repoint-d.probe->a-repoint-d), RemoveHttpFrontend(k.repoint-d.probe->a-repoint-d), AddHttpsFrontend(k.repoint-d.probe->b-repoint-d), AddHttpFrontend(k.repoint-d.probe->b-repoint-d), RemoveCertificate(zz)] -> FAILED, 4 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35 [replay exact: adopted]
+   frontends: [http a.repoint-d.probe/ -> a-repoint-d, http b.repoint-d.probe/ -> b-repoint-d, http k.repoint-d.probe/ -> b-repoint-d, https k.repoint-d.probe/ -> b-repoint-d]
+   shadow routes k.repoint-d.probe: [https -> b-repoint-d, http -> b-repoint-d]
+3. delete k.repoint-d.probe: [RemoveHttpsFrontend(k.repoint-d.probe->b-repoint-d), RemoveHttpFrontend(k.repoint-d.probe->b-repoint-d)] -> applied
+   frontends: [http a.repoint-d.probe/ -> a-repoint-d, http b.repoint-d.probe/ -> b-repoint-d]
+4. next reconcile, unchanged: no requests
+   frontends: [http a.repoint-d.probe/ -> a-repoint-d, http b.repoint-d.probe/ -> b-repoint-d]
+== (a) udp: shadow after a failed batch: unchanged (the controller before replaying) ==
+1. apply S: [AddUdpListener(0.0.0.0:15301), ActivateListener(0.0.0.0:15301), AddCluster(u-udp-a, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-a-5), AddUdpFrontend(0.0.0.0:15301->u-udp-a)] -> applied
+   sozu cluster u-udp-a: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15301 -> u-udp-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15301]
+2. u-udp-a to random, its route dropped, refused after the upsert: [AddCluster(u-udp-a, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15301->u-udp-a), DeactivateListener(0.0.0.0:15301), RemoveListener(0.0.0.0:15301)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-a: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15301 -> u-udp-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15301]
+3. random, the route back: [AddCluster(u-udp-a, RANDOM, udp affinity SOURCE_IP_PORT)] -> applied
+   sozu cluster u-udp-a: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15301 -> u-udp-a]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15301]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-a: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15301 -> u-udp-a]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15301]
+== (b) udp: shadow after a failed batch: the acknowledged removals replayed, the adds left out ==
+1. apply S: [AddUdpListener(0.0.0.0:15302), ActivateListener(0.0.0.0:15302), AddCluster(u-udp-b, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-b-5), AddUdpFrontend(0.0.0.0:15302->u-udp-b)] -> applied
+   sozu cluster u-udp-b: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15302 -> u-udp-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15302]
+2. u-udp-b to random, its route dropped, refused after the upsert: [AddCluster(u-udp-b, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15302->u-udp-b), DeactivateListener(0.0.0.0:15302), RemoveListener(0.0.0.0:15302)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-b: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15302 -> u-udp-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15302]
+3. random, the route back: [AddCluster(u-udp-b, RANDOM, udp affinity SOURCE_IP_PORT)] -> applied
+   sozu cluster u-udp-b: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15302 -> u-udp-b]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15302]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-b: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15302 -> u-udp-b]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15302]
+== (c) udp: shadow after a failed batch: every acknowledged request replayed, whatever it leaves ==
+1. apply S: [AddUdpListener(0.0.0.0:15303), ActivateListener(0.0.0.0:15303), AddCluster(u-udp-c, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-c-5), AddUdpFrontend(0.0.0.0:15303->u-udp-c)] -> applied
+   sozu cluster u-udp-c: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15303 -> u-udp-c]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15303]
+2. u-udp-c to random, its route dropped, refused after the upsert: [AddCluster(u-udp-c, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15303->u-udp-c), DeactivateListener(0.0.0.0:15303), RemoveListener(0.0.0.0:15303)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-c: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15303 -> u-udp-c]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15303]
+3. random, the route back: no requests
+   sozu cluster u-udp-c: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15303 -> u-udp-c]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15303]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-c: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15303 -> u-udp-c]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15303]
+== (d) udp: shadow after a failed batch: every acknowledged request replayed when that is exact, else unchanged (this change) ==
+1. apply S: [AddUdpListener(0.0.0.0:15304), ActivateListener(0.0.0.0:15304), AddCluster(u-udp-d, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-d-5), AddUdpFrontend(0.0.0.0:15304->u-udp-d)] -> applied
+   sozu cluster u-udp-d: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15304 -> u-udp-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15304]
+2. u-udp-d to random, its route dropped, refused after the upsert: [AddCluster(u-udp-d, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15304->u-udp-d), DeactivateListener(0.0.0.0:15304), RemoveListener(0.0.0.0:15304)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35 [replay not exact: shadow kept]
+   sozu cluster u-udp-d: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15304 -> u-udp-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15304]
+3. random, the route back: [AddCluster(u-udp-d, RANDOM, udp affinity SOURCE_IP_PORT)] -> applied
+   sozu cluster u-udp-d: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15304 -> u-udp-d]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15304]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-d: [0: RANDOM, udp affinity SOURCE_IP_PORT; 1: RANDOM, udp affinity SOURCE_IP_PORT; main: RANDOM, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15304 -> u-udp-d]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15304]
+== (a) udp-revert: shadow after a failed batch: unchanged (the controller before replaying) ==
+1. apply S: [AddUdpListener(0.0.0.0:15305), ActivateListener(0.0.0.0:15305), AddCluster(u-udp-revert-a, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-revert-a-5), AddUdpFrontend(0.0.0.0:15305->u-udp-revert-a)] -> applied
+   sozu cluster u-udp-revert-a: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15305 -> u-udp-revert-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15305]
+2. u-udp-revert-a to random, its route dropped, refused after the upsert: [AddCluster(u-udp-revert-a, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15305->u-udp-revert-a), DeactivateListener(0.0.0.0:15305), RemoveListener(0.0.0.0:15305)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-revert-a: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15305 -> u-udp-revert-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15305]
+3. S back: no requests
+   sozu cluster u-udp-revert-a: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15305 -> u-udp-revert-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15305]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-revert-a: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15305 -> u-udp-revert-a]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15305]
+== (b) udp-revert: shadow after a failed batch: the acknowledged removals replayed, the adds left out ==
+1. apply S: [AddUdpListener(0.0.0.0:15306), ActivateListener(0.0.0.0:15306), AddCluster(u-udp-revert-b, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-revert-b-5), AddUdpFrontend(0.0.0.0:15306->u-udp-revert-b)] -> applied
+   sozu cluster u-udp-revert-b: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15306 -> u-udp-revert-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15306]
+2. u-udp-revert-b to random, its route dropped, refused after the upsert: [AddCluster(u-udp-revert-b, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15306->u-udp-revert-b), DeactivateListener(0.0.0.0:15306), RemoveListener(0.0.0.0:15306)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-revert-b: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15306 -> u-udp-revert-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15306]
+3. S back: no requests
+   sozu cluster u-udp-revert-b: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15306 -> u-udp-revert-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15306]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-revert-b: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15306 -> u-udp-revert-b]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15306]
+== (c) udp-revert: shadow after a failed batch: every acknowledged request replayed, whatever it leaves ==
+1. apply S: [AddUdpListener(0.0.0.0:15307), ActivateListener(0.0.0.0:15307), AddCluster(u-udp-revert-c, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-revert-c-5), AddUdpFrontend(0.0.0.0:15307->u-udp-revert-c)] -> applied
+   sozu cluster u-udp-revert-c: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15307 -> u-udp-revert-c]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15307]
+2. u-udp-revert-c to random, its route dropped, refused after the upsert: [AddCluster(u-udp-revert-c, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15307->u-udp-revert-c), DeactivateListener(0.0.0.0:15307), RemoveListener(0.0.0.0:15307)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35
+   sozu cluster u-udp-revert-c: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15307 -> u-udp-revert-c]
+   shadow: RANDOM, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15307]
+3. S back: [AddCluster(u-udp-revert-c, ROUND_ROBIN, udp affinity SOURCE_IP_PORT)] -> applied
+   sozu cluster u-udp-revert-c: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15307 -> u-udp-revert-c]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15307]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-revert-c: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15307 -> u-udp-revert-c]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15307]
+== (d) udp-revert: shadow after a failed batch: every acknowledged request replayed when that is exact, else unchanged (this change) ==
+1. apply S: [AddUdpListener(0.0.0.0:15308), ActivateListener(0.0.0.0:15308), AddCluster(u-udp-revert-d, ROUND_ROBIN, udp affinity SOURCE_IP_PORT), AddBackend(u-udp-revert-d-5), AddUdpFrontend(0.0.0.0:15308->u-udp-revert-d)] -> applied
+   sozu cluster u-udp-revert-d: [0: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; 1: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; main: ROUND_ROBIN, udp affinity SOURCE_IP_PORT]
+   frontends: [udp 0.0.0.0:15308 -> u-udp-revert-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15308]
+2. u-udp-revert-d to random, its route dropped, refused after the upsert: [AddCluster(u-udp-revert-d, RANDOM, no udp config), RemoveCertificate(zz), RemoveUdpFrontend(0.0.0.0:15308->u-udp-revert-d), DeactivateListener(0.0.0.0:15308), RemoveListener(0.0.0.0:15308)] -> FAILED, 1 of 5 acknowledged: sozu rejected the request: could not apply request on the main process state: Could not remove certificate: fingerprint_bytes=35 [replay not exact: shadow kept]
+   sozu cluster u-udp-revert-d: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15308 -> u-udp-revert-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15308]
+3. S back: no requests
+   sozu cluster u-udp-revert-d: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15308 -> u-udp-revert-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15308]
+4. next reconcile, unchanged: no requests
+   sozu cluster u-udp-revert-d: [0: RANDOM, no udp config; 1: RANDOM, no udp config; main: RANDOM, no udp config]
+   frontends: [udp 0.0.0.0:15308 -> u-udp-revert-d]
+   shadow: ROUND_ROBIN, udp affinity SOURCE_IP_PORT; routes [udp 0.0.0.0:15308]

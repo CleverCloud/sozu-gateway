@@ -78,8 +78,55 @@ caches and Sōzu — but **not** between the caches and the apiserver. It re-rea
 reflectors, so a cache that has stopped receiving events re-diffs to "no change": the resync is
 then a no-op that still counts as a successful reconcile.
 
-- The shadow advances **only on a fully successful apply**. On failure it stays put, and
-  re-diffing from the unchanged shadow converges — NOT because the requests are idempotent
+- The shadow advances **to the desired IR only on a fully successful apply**. On failure the
+  requests Sōzu acknowledged are **replayed onto the previous applied IR, in order** (the agent's
+  `ApplyError::replayable`, fed to `translator::replay_if_exact` with the desired IR the batch was
+  diffed towards: an add sets what that IR holds under the translator's key for the object, a
+  removal drops what it took out), and the result is **adopted only when it describes exactly the
+  routing state a simulation of those requests leaves** — dispatched, the way the agent got them
+  acknowledged, onto the `ConfigState` the translator builds from the previous IR, and compared
+  with the replayed IR's. That is a proof against the previous shadow, not an observation of Sōzu:
+  drift the shadow already missed, the effects of the request the batch stopped on, and
+  certificates are outside it. An adopted replay is persisted at once; otherwise the shadow stays
+  put, as it did before anything was replayed. A shadow that ignores what landed diffs wrongly from
+  then on. A removal it still lists makes an object the desired state wants again diff to nothing:
+  the route silently stayed missing on 2.2.1, and on 2.3 an `AddBackend` to the removed, unchanged
+  cluster went out without its `AddCluster` and was refused `ClusterNotFound` on every reconcile,
+  blocking unrelated changes. An add it misses makes an object the desired state drops again diff
+  to nothing: a route re-pointed to another live cluster keeps serving it once deleted (both
+  measured, `docs/probes/partial-apply_*`). The request the batch stopped on never counts, since
+  its effects are not reliably established (2.2.1 can refuse a `ReplaceCertificate` after dropping
+  the old certificate; a lost reply says nothing), and the 60 s apply timeout replays nothing,
+  since the count never reaches the controller. **The replayed head also stops before the first
+  teardown the agent settled without proof** that the main process dropped the object: only the
+  main process's own refusal, or a worker answering `OK`, proves it. When every worker refuses a
+  frontend removal, 2.3's main process reverts it in its own state (`should_rollback_fanout`,
+  for the changes `ConfigState::rollback_for` inverts: frontend removals, listener and frontend
+  additions, listener activation), and a worker it forks later is fed that state; an eviction
+  every worker refused leaves the route in the main process the same way. The answer tells
+  neither the version (2.2.1 reverts nothing) nor whether the verb has an inverse, so the agent
+  cuts at every such teardown, backend, cluster and certificate removals included. A fully
+  successful batch still advances the shadow to the desired IR over such a leftover — the
+  main/worker divergence is a follow-up. A certificate add is replayed as the desired
+  certificate, but Sōzu takes an add of a fingerprint it already holds as a no-op, names and
+  material included: over a drift the shadow missed (that fingerprint installed with other names)
+  the shadow then lists names Sōzu does not hold, as the unchanged shadow's retried add would leave
+  them too. **Some states a head leaves have no IR spelling**, and from a baseline that misdescribes
+  one some desired state diffs wrongly whichever IR is picked, so those keep the previous shadow:
+  a layer-4 listener held without its frontend (a frontend removal that landed before its
+  `RemoveListener`, a listener added without its frontend), and a cluster upserted ahead of the
+  removal of its last UDP frontend (the translator derives UDP affinity from a cluster's UDP
+  frontends, so the replay would spell back an affinity Sōzu no longer holds, and a desired state
+  wanting the frontend back would never re-send it). From the kept shadow a retry of the same
+  desired state converges, but one that wants back what the head undid gets nothing for it (the
+  listener stays bound, the frontend missing, the cluster without affinity): a kept shadow
+  guarantees nothing about other desired states. The 2.3 `ClusterNotFound` wedge needs a
+  `RemoveCluster` to have landed under a shadow that still lists the cluster; cluster removals are
+  tiered last, after the listener teardown, so a head that holds one has landed everything else of
+  its batch but later cluster removals, none of the states above remains, and its replay is
+  adopted — unless the head was cut before it or the shadow had already drifted. Re-diffing
+  converges from an adopted shadow, which describes what that simulation holds, and from a kept one
+  towards the batch's own desired state — NOT because the requests are idempotent
   (frontend/listener `Add*` verbs reject duplicates with `StateError::Exists`), but because
   `AddCluster`/`AddBackend` upsert and the agent tolerates teardowns of objects Sōzu says it no
   longer holds (only those: a teardown refused for any other reason fails the batch) and *repairs*
@@ -162,10 +209,13 @@ get wrong:
   `sozu-command-lib` 2.1.0 that fires when `ConfigState::diff` removes the last cert at a listener.
 
 All output is reordered into **dependency-safe tiers** (`canonicalize` / `tier()`): adds go
-clusters → backends → certificates → frontends; removes in reverse. Frontend *removes* are
-tiered **before** frontend *adds*: Sōzu keys a route by `address;hostname;path[;method]`
-(*not* `cluster_id`), so re-pointing a host+path at a different cluster is a `Remove`+`Add` on
-the same route key, and adding first would be rejected as a duplicate (`StateError::Exists`)
+clusters → backends → certificates → frontends; removes in reverse, except that cluster removals
+come **last**, after the layer-4 listener teardown (nothing depends on a cluster going, and on 2.3
+its cascade then only meets what is already removed; see the reconcile-loop bullet for why).
+Frontend *removes* are tiered **before** frontend *adds*: Sōzu keys a route by
+`address;hostname;path[;method]` (*not* `cluster_id`), so re-pointing a host+path at a different
+cluster is a `Remove`+`Add` on the same route key, and adding first would be rejected as a
+duplicate (`StateError::Exists`)
 — there is no atomic frontend replace in 2.1.0. A replacement cert lands before the old is
 removed (no TLS gap). This also makes the HashSet-ordered routing diff deterministic for
 golden snapshots.

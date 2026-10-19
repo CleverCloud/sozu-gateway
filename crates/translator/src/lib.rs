@@ -10,8 +10,9 @@
 //!    removes the last certificate at a listener address (an empty cert bucket
 //!    is left behind and the replay check is not normalised for it).
 //!
-//! Output is canonicalised into dependency-safe tiers (adds: clusters →
-//! backends → certificates → frontends; removes in reverse). Frontend *removes*
+//! Output is canonicalised into dependency-safe tiers (adds: listeners →
+//! clusters → backends → certificates → frontends; removes in reverse, except
+//! that cluster removals come last, after the listener teardown). Frontend *removes*
 //! are ordered before frontend *adds*: Sōzu keys a route by host+path (not by
 //! cluster_id), so re-pointing a route at another cluster is a Remove+Add on the
 //! same key, and adding first would be rejected as a duplicate. A new/replacement
@@ -32,6 +33,9 @@ use sozu_command_lib::proto::command::{
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
 use thiserror::Error;
+
+mod replay;
+pub use replay::{apply_acknowledged, replay_if_exact};
 
 #[derive(Debug, Error)]
 pub enum TranslatorError {
@@ -260,7 +264,7 @@ fn add_certificate_request(c: &ir::Certificate) -> Request {
 fn fingerprint(c: &ir::Certificate) -> Result<String, TranslatorError> {
     let bytes = sozu_command_lib::certificate::calculate_fingerprint(c.certificate.as_bytes())
         .map_err(|e| TranslatorError::Certificate(format!("{e:?}")))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex(&bytes))
 }
 
 /// SNI name set (order-insensitive) for rotation pairing.
@@ -495,7 +499,6 @@ fn tier(req: &Request) -> u8 {
         | Some(RequestType::AddTcpFrontend(_))
         | Some(RequestType::AddUdpFrontend(_)) => 6,
         Some(RequestType::RemoveBackend(_)) => 7,
-        Some(RequestType::RemoveCluster(_)) => 8,
         Some(RequestType::RemoveCertificate(_)) => 9,
         // Listener teardown: deactivate before remove — the order Sōzu itself
         // emits. Explicit consecutive tiers so the order can never silently
@@ -503,6 +506,17 @@ fn tier(req: &Request) -> u8 {
         // (the within-tier sort key is the JSON encoding).
         Some(RequestType::DeactivateListener(_)) => 10,
         Some(RequestType::RemoveListener(_)) => 11,
+        // Cluster removals come last. Nothing else in a batch depends on a
+        // cluster going (its frontends and backends are removed before, and
+        // a listener does not name one), and on 2.3, where the removal takes
+        // the cluster's frontends and backends with it, they are gone by
+        // then. Last, a batch that fails before a cluster's removal lands
+        // still holds the cluster, and one whose cluster removal landed has
+        // finished its layer-4 listener teardown: a failure never leaves a
+        // removed cluster next to a listener the IR cannot describe, which
+        // would keep the stale baseline that sends the cluster's backends
+        // without it, refused on 2.3 (`ClusterNotFound`).
+        Some(RequestType::RemoveCluster(_)) => 12,
         _ => 100,
     }
 }
@@ -700,4 +714,15 @@ pub fn reconcile(previous: &ir::Ir, desired: &ir::Ir) -> Result<Vec<Request>, Tr
     // are adjacent and the duplicate collapses here.
     requests.dedup();
     Ok(requests)
+}
+
+/// An address as Sōzu's wire type carries it: IP and port, without an IPv6
+/// flow label or scope id, so a payload and an IR address compare equal.
+fn plain(address: SocketAddr) -> SocketAddr {
+    SocketAddr::new(address.ip(), address.port())
+}
+
+/// Lower-case hex, the spelling Sōzu and [`fingerprint`] use.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
