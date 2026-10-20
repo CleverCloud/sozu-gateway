@@ -246,10 +246,19 @@ cluster after the cascade, the tiers before it) — and `RemoveCluster` comes af
 Measured on the test cluster against 2.3.2 without it: an Ingress switched to another Service
 failed **every** reconcile (21 failures in ~40 s); with it, none. The re-expanded batches also
 apply cleanly to a 2.2.1 data plane (measured). A replacement cert lands before the old is
-removed (no TLS gap). This also makes the HashSet-ordered routing diff deterministic for
-golden snapshots. In debug builds `ConfigState::diff` replays its own output with an
-order-sensitive check that panics when a cluster gains a TCP frontend sorting before one it
-already holds (2.2.1 and 2.3.2) — keep that shape out of tests.
+removed (no TLS gap), and within the certificate tier every name that moves is given before it is
+taken (`CertRank` + `transfer_order`, not the JSON sort): adds, rotations and replaces that only
+gain names first, replaces that only drop names last, and the replaces that do both in a
+deterministic topological order, recipient before donor, ties by the JSON key — so a chain of
+transfers (`{x}`→`{y}` on one certificate, `{y}`→`{z}` on another) runs recipient first whatever
+the PEM texts. The other way round the name falls back to Sōzu's default certificate in between
+(measured, [docs/probes/](docs/probes/) `sni-ownership-race_*`). Only transfers that form a
+**cycle** (certificates swapping names) cannot all go first: the replaces on a cycle keep the JSON
+order among themselves, so one name on it can still fall back for that moment. This also makes
+the HashSet-ordered routing diff deterministic for golden snapshots. In debug builds
+`ConfigState::diff` replays its own output with an order-sensitive check that panics when a
+cluster gains a TCP frontend sorting before one it already holds (2.2.1 and 2.3.2) — keep that
+shape out of tests.
 
 ### Gateway API (Phase 2)
 
@@ -376,6 +385,25 @@ changes.
   every reconcile.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
+- **An SNI name at a listener belongs to one claimant, settled in the builder.** Sōzu serves a
+  name from whichever of its certificates expires last, so any tenant could take another's
+  hostname with a far-future certificate. The objects declaring the name with a certificate
+  (Ingress `tls[].hosts`, a Gateway listener's `hostname` or inferred names) are arbitrated by the
+  route keys' `OwnerClaim` (oldest `creationTimestamp`, then the joined `namespace/name`), **per
+  name, never per fingerprint** — a newer tenant sharing an older one's leaf borrows no seniority —
+  and copies of the winner's own certificate are no rival. The age is the *object's*: a tenant
+  that edits an older object of its own to add a host wins it, as with route keys, so this closes
+  the takeover only against tenants whose objects are all newer. Losers get one
+  `CertificateNameClaimed` per certificate, listing the names (a tenant sets their number; keep
+  this path linear, see the 100,000-name test) in a message held to 900 bytes, every piece clipped
+  on a character boundary — an Event note over 1 kB is refused, and `events.rs` never retries one.
+  Arbitration settles names only: the material a leaf is served with is chosen afterwards among
+  **every** entry carrying it, name-less ones included (fullest chain, then smallest material), so
+  a holder stripped of its names still lends its chain and losing a name never downgrades another
+  holder's chain. A leaf (listener + fingerprint) left with no name at all is dropped, **never sent
+  with `names: []`**, which Sōzu reads as "infer the SANs". Stripping a name from a
+  loaded certificate is a same-fingerprint `ReplaceCertificate`, which only Sōzu ≥ 2.3.2 applies.
+  Wildcard-vs-exact overlap is not arbitrated.
 - **Tenant input Sōzu would reject is refused in the builder, with the calls Sōzu makes.** A
   `tls.key` is parsed and loaded the way Sōzu loads it (`rustls-pki-types` + the ring provider)
   and paired with the leaf exactly as Sōzu 2.3.2 pairs it (`tls::build_validated_certificate`):

@@ -4,6 +4,60 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## A contested SNI name is served by its oldest claimant's certificate
+
+When objects at one HTTPS listener named the same host with different
+certificates, Sōzu served the certificate that expires last, so a tenant in
+any namespace could take over a hostname's TLS identity with a far-future
+certificate of its own (shown live on 2026-09-21). The name now stays only on
+the certificate(s) of its **oldest claimant** — the claiming object's
+`creationTimestamp`, then `namespace/name`, the rule that already settles a
+`RouteCollision` — whether it was claimed through an Ingress `tls[].hosts`
+entry, a Gateway listener `hostname` or the names a hostname-less listener
+infers. It is dropped from every other certificate (one left with no name is
+not loaded), and each certificate that lost names is reported once as
+`CertificateNameClaimed`, naming the first few: a Warning Event on the Ingress
+or Gateway, and on a Gateway also in that listener's `Programmed` message.
+Copies of one certificate in several namespaces are not a conflict.
+
+**Age is the object's, not the claim's.** A tenant owning an Ingress or a
+Gateway older than the victim's takes a name by adding it to that object,
+whatever either certificate's expiry — as it takes a route key since
+[#92](https://github.com/CleverCloud/sozu-gateway/issues/92). The takeover is
+closed against tenants whose objects are all newer than the victim's; before,
+any tenant could do it with a later expiry.
+
+**What changes:** where two namespaces each brought their own certificate for
+one host, the oldest one is served from the first reconcile after the upgrade,
+whichever expires later. To hand a host over, remove the older claim; the name
+then moves without a gap. That is a single `ReplaceCertificate` only when the
+old holder's certificate leaves and the new holder's arrives with exactly the
+same names (a rotation); otherwise it takes two requests, the new holder's
+`AddCertificate` or `ReplaceCertificate` landing before the old holder's
+`ReplaceCertificate` or `RemoveCertificate`.
+
+**Needs Sōzu 2.3.2 to take effect live.** Taking a name off a certificate that
+stays loaded is a same-fingerprint `ReplaceCertificate`, which Sōzu 2.2.1
+acknowledges and ignores ([#81](https://github.com/CleverCloud/sozu-gateway/issues/81));
+only a freshly started Sōzu would serve the right certificate. Within one batch
+the winner gains the name before the loser drops it, so the name does not fall
+back to the default certificate in between ([measured on 2.3.2](probes/sni-ownership-race_sozu-2.3.2_2026-10-19.txt):
+none of 5,016 handshakes did, against 41 of 3,912 with only that order
+reversed; the loser's request alone serves the default certificate). That
+holds along a chain of transfers too — one certificate gaining a name another
+drops while dropping one a third gains: the requests run recipient before
+donor. The exception is transfers that form a cycle, certificates swapping
+names, each gaining one another on the cycle drops: no order gives every name
+first, so those requests keep a fixed order and one name on the cycle can fall
+back until the request giving it lands.
+
+Not covered: a wildcard and an exact name (`*.example.com` against
+`app.example.com`) are different names, and a hostless catch-all route still
+answers for another object's hostname on the paths that object does not route;
+see [features](features.md). The IR and shadow format are unchanged.
+
+---
+
 ## Certificate chain changes are pushed live
 
 A Secret whose intermediates changed while its leaf stayed the same — a missing

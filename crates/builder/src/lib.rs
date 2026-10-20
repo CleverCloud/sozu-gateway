@@ -255,6 +255,27 @@ pub enum Problem {
         secret: String,
         reason: String,
     },
+    /// Objects created earlier already claim these SNI names at the same
+    /// HTTPS listener with other certificates. Sōzu serves a name from
+    /// whichever of its certificates expires last, so a tenant could otherwise
+    /// take a hostname's TLS identity with a far-future certificate of its
+    /// own. The claimant whose *object* is oldest keeps the name
+    /// (`creationTimestamp`, then `namespace/name`, as for
+    /// [`Problem::RouteCollision`]) — the object's age, not the claim's, so
+    /// editing an older object to add a name wins that name. The names are
+    /// dropped from the certificate loaded from `secret`, which is not loaded
+    /// at all when none is left.
+    ///
+    /// One report per certificate an object asked for, however many names it
+    /// lost: a tenant controls that count, and every report is an Event.
+    /// `listener` names the Gateway listener that asked for the certificate;
+    /// it is `None` on an Ingress.
+    CertificateNameClaimed {
+        secret: String,
+        listener: Option<String>,
+        /// Sorted by name; the rendered message shows the first few.
+        names: Vec<ClaimedName>,
+    },
     NonServiceBackend,
     /// `spec.defaultBackend` is not mapped onto Sōzu routing: mapping it onto
     /// Sōzu's catch-all semantics is unverified, so per the honesty rule it
@@ -418,6 +439,7 @@ impl Problem {
             Problem::TlsEntryWithoutSecret => "TlsEntryWithoutSecret",
             Problem::TlsEntryWithoutHosts { .. } => "TlsEntryWithoutHosts",
             Problem::InvalidCertificate { .. } => "InvalidCertificate",
+            Problem::CertificateNameClaimed { .. } => "CertificateNameClaimed",
             Problem::NonServiceBackend => "NonServiceBackend",
             Problem::DefaultBackendUnsupported => "DefaultBackendUnsupported",
             Problem::ServiceNotFound { .. } => "ServiceNotFound",
@@ -451,10 +473,107 @@ impl Problem {
             Problem::PortNotExposed { listener, .. }
             | Problem::ListenerPortNotOwned { listener, .. }
             | Problem::NamespaceSelectorInvalid { listener, .. } => Some(listener),
-            Problem::InvalidHostname { listener, .. } => listener.as_deref(),
+            Problem::InvalidHostname { listener, .. }
+            | Problem::CertificateNameClaimed { listener, .. } => listener.as_deref(),
             _ => None,
         }
     }
+}
+
+/// One SNI name a certificate lost ([`Problem::CertificateNameClaimed`]), and
+/// the object that keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct ClaimedName {
+    /// As this object spelled it.
+    pub name: String,
+    /// `Ingress` or `Gateway`.
+    pub owner_kind: &'static str,
+    /// `namespace/name`.
+    pub owner: String,
+}
+
+/// The most a [`Problem::CertificateNameClaimed`] message takes, in bytes.
+///
+/// The message is an Event note, which the apiserver refuses past 1 kB
+/// (kube-runtime's `Event::note`), and the controller records a refused
+/// publication as seen, so it is never retried: an over-long message is a
+/// report lost for good. Its pieces are tenant-chosen and long — a name
+/// inferred from a certificate takes up to 4096 bytes, an owner's
+/// `namespace/name` up to 317, a Secret name up to 253 — so the budget is
+/// enforced rather than assumed, with room to spare under the limit.
+const CLAIMED_NAMES_MESSAGE_BUDGET: usize = 900;
+
+/// `s` cut to at most `max` bytes at a character boundary, `…` marking the
+/// cut, so a cut never splits a UTF-8 sequence and is never silent.
+fn clip(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    const MARK: &str = "…";
+    if s.len() <= max {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut end = max.saturating_sub(MARK.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}{MARK}", &s[..end]))
+}
+
+/// The [`Problem::CertificateNameClaimed`] message, within
+/// [`CLAIMED_NAMES_MESSAGE_BUDGET`]: each tenant-chosen piece is clipped so no
+/// one of them crowds out the rest, a few names are listed, only while they
+/// fit, and the others are counted.
+fn claimed_names_message(secret: &str, names: &[ClaimedName]) -> String {
+    /// A Secret name, a claimed name or an owner, each; with the fixed text,
+    /// the header and one listed name always fit the budget.
+    const PIECE: usize = 200;
+    /// Names listed at most, the others counted.
+    const SHOWN: usize = 3;
+    let claimant = |c: &ClaimedName| {
+        format!(
+            "{:?} ({} {})",
+            clip(&c.name, PIECE),
+            c.owner_kind,
+            clip(&c.owner, PIECE)
+        )
+    };
+    let secret = clip(secret, PIECE);
+    let message = match names {
+        [one] => format!(
+            "SNI name {:?} is claimed at this listener by {} {}, created earlier (or first by \
+             namespace/name); the certificate from Secret {secret:?} does not serve it",
+            clip(&one.name, PIECE),
+            one.owner_kind,
+            clip(&one.owner, PIECE)
+        ),
+        _ => {
+            let mut message = format!(
+                "{} SNI names are claimed at this listener by objects created earlier (or first \
+                 by namespace/name); the certificate from Secret {secret:?} does not serve them: ",
+                names.len()
+            );
+            // Room kept for the count, at its longest.
+            let tail = format!(" and {} more", names.len()).len();
+            let mut shown = 0;
+            for claimed in names.iter().take(SHOWN) {
+                let sep = if shown == 0 { "" } else { ", " };
+                let item = claimant(claimed);
+                if shown > 0
+                    && message.len() + sep.len() + item.len() + tail > CLAIMED_NAMES_MESSAGE_BUDGET
+                {
+                    break;
+                }
+                message.push_str(sep);
+                message.push_str(&item);
+                shown += 1;
+            }
+            if names.len() > shown {
+                message.push_str(&format!(" and {} more", names.len() - shown));
+            }
+            message
+        }
+    };
+    // A no-op with the pieces clipped above, unless escaping one for `{:?}`
+    // grew it past its clip: the bound holds whatever the input.
+    clip(&message, CLAIMED_NAMES_MESSAGE_BUDGET).into_owned()
 }
 
 /// Human one-liner carrying the *detail* (which Secret, which Service, which
@@ -472,6 +591,9 @@ impl std::fmt::Display for Problem {
             }
             Problem::InvalidCertificate { secret, reason } => {
                 write!(f, "TLS Secret {secret:?} holds unusable material: {reason}")
+            }
+            Problem::CertificateNameClaimed { secret, names, .. } => {
+                f.write_str(&claimed_names_message(secret, names))
             }
             Problem::NonServiceBackend => write!(f, "only Service backends are supported"),
             Problem::DefaultBackendUnsupported => {
@@ -1425,17 +1547,43 @@ fn same_match(a: &ir::Frontend, b: &ir::Frontend) -> bool {
 /// beat `a/a`, which a tuple comparison reverses.
 type OwnerClaim = (bool, Option<String>, String);
 
+/// The [`OwnerClaim`] of the object `meta` describes.
+fn owner_claim(
+    namespace: &str,
+    name: &str,
+    meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+) -> OwnerClaim {
+    let ts = creation_key(meta);
+    (ts.is_none(), ts, format!("{namespace}/{name}"))
+}
+
 /// `(kind, namespace, name)` — a source object's identity, kind distinguishing
-/// an Ingress from an HTTPRoute so two of different kinds sharing a name are
-/// still separate owners.
+/// an Ingress from an HTTPRoute or a Gateway so two of different kinds sharing
+/// a name are still separate owners. The kind is the last tie-break, after an
+/// identical claim.
 type OwnerIdent = (u8, String, String);
+
+const INGRESS_OWNER: u8 = 0;
+const HTTP_ROUTE_OWNER: u8 = 1;
+const GATEWAY_OWNER: u8 = 2;
+
+/// The Kubernetes kind an [`OwnerIdent`] stands for, as a report names it.
+fn owner_kind(ident: &OwnerIdent) -> &'static str {
+    match ident.0 {
+        INGRESS_OWNER => "Ingress",
+        HTTP_ROUTE_OWNER => "HTTPRoute",
+        _ => "Gateway",
+    }
+}
 
 fn owner_ident(source: &FrontendSource) -> OwnerIdent {
     match source {
-        FrontendSource::Ingress { namespace, name } => (0, namespace.clone(), name.clone()),
+        FrontendSource::Ingress { namespace, name } => {
+            (INGRESS_OWNER, namespace.clone(), name.clone())
+        }
         FrontendSource::HttpRoute {
             namespace, name, ..
-        } => (1, namespace.clone(), name.clone()),
+        } => (HTTP_ROUTE_OWNER, namespace.clone(), name.clone()),
     }
 }
 
@@ -1443,9 +1591,12 @@ fn owner_ident(source: &FrontendSource) -> OwnerIdent {
 /// its own namespace/name) when the caller supplied no map entry — only tests
 /// build frontends with no backing object.
 fn claim_of(source: &FrontendSource, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> OwnerClaim {
-    let ident = owner_ident(source);
+    claim_for(&owner_ident(source), claims)
+}
+
+fn claim_for(ident: &OwnerIdent, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> OwnerClaim {
     claims
-        .get(&ident)
+        .get(ident)
         .cloned()
         .unwrap_or_else(|| (true, None, format!("{}/{}", ident.1, ident.2)))
 }
@@ -1536,6 +1687,187 @@ pub(crate) struct FingerprintedCert {
     pub(crate) cert: ir::Certificate,
 }
 
+/// The object that asked for a certificate: the claimant of its SNI names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CertificateSource {
+    Ingress {
+        namespace: String,
+        name: String,
+    },
+    /// One listener of a Gateway; the Gateway is the claimant, the listener
+    /// is where its status reports a lost name.
+    Gateway {
+        namespace: String,
+        name: String,
+        listener: String,
+    },
+}
+
+impl CertificateSource {
+    fn owner_ident(&self) -> OwnerIdent {
+        match self {
+            CertificateSource::Ingress { namespace, name } => {
+                (INGRESS_OWNER, namespace.clone(), name.clone())
+            }
+            CertificateSource::Gateway {
+                namespace, name, ..
+            } => (GATEWAY_OWNER, namespace.clone(), name.clone()),
+        }
+    }
+
+    fn listener(&self) -> Option<String> {
+        match self {
+            CertificateSource::Ingress { .. } => None,
+            CertificateSource::Gateway { listener, .. } => Some(listener.clone()),
+        }
+    }
+}
+
+/// A loaded certificate, carried with who asked for it until its names are
+/// arbitrated ([`arbitrate_certificate_names`]).
+pub(crate) struct ClaimedCert {
+    pub(crate) cert: FingerprintedCert,
+    /// The Secret it was read from, named in the report of a lost name.
+    pub(crate) secret: String,
+    pub(crate) source: CertificateSource,
+}
+
+/// Give every SNI name at an HTTPS listener to one claimant and drop it from
+/// every other claimant's certificate.
+///
+/// For an SNI several of its certificates carry, Sōzu serves the one that
+/// expires last, the most recently inserted on a tie (`lib/src/tls.rs`, the
+/// resolver sorts the candidates by expiration and takes the last). Left to that,
+/// a tenant in any namespace takes another's hostname by loading a
+/// later-expiring certificate that names it — a substitution proven live on
+/// 2026-09-21. The claimants of a name are the objects that declared it with
+/// a certificate (an Ingress `tls[].hosts` entry, a Gateway listener's
+/// `hostname`, or the names inferred for a listener without one), and the
+/// oldest wins: the [`OwnerClaim`] that settles a contested route key, so
+/// both arbitrations name the same owner.
+///
+/// Oldest means the *object's* `creationTimestamp`, not when it first named
+/// the host: a tenant owning an Ingress or Gateway older than the victim's
+/// takes the name by adding it to that object, as it takes a route key. The
+/// substitution is closed only against tenants whose objects are all newer
+/// than the victim's; by expiry, any tenant could win.
+///
+/// Ownership is per name, never per certificate. Two objects naming one
+/// SNI with the same certificate (same fingerprint) do not conflict, but a
+/// newer object sharing an older one's leaf gains no seniority for names the
+/// older object never claimed. Every certificate the winning object loaded
+/// for the name keeps it (an RSA and an ECDSA certificate, say); every other
+/// claim is reported on its object, one report per certificate that object
+/// asked for.
+///
+/// Only names are settled here. Every entry comes back, an entry stripped of
+/// all its names included, because the material a leaf is served with is
+/// chosen by [`merge_certificates`] among *every* entry carrying that leaf:
+/// an object that lost all its names may still hold the fullest chain for a
+/// leaf an owner serves, and dropping its entry here would serve the owner's
+/// name with a shorter chain. The merge drops a leaf whose entries keep no
+/// name at all, rather than emitting `names: []`, which Sōzu reads as "infer
+/// them from the CN/SAN" and so would claim the lost names again.
+///
+/// Every step is a map lookup per name, never a scan: a tenant lists as many
+/// hosts as its objects hold, and this runs inline in the global reconcile.
+///
+/// Stripping a name from a certificate that stays loaded is a
+/// same-fingerprint `ReplaceCertificate`, which Sōzu applies only since 2.3.2
+/// (0bc160b7, #81); 2.2.1 acknowledged it and kept serving the name.
+///
+/// Names are compared as Sōzu 2.3.2 stores them, ASCII-lowercased at load. A
+/// wildcard and an exact name are different names here, and Sōzu's trie
+/// prefers the exact one, so a `*.example.com` owner does not stop a newer
+/// `app.example.com` claim; that overlap is not arbitrated.
+fn arbitrate_certificate_names(
+    certs: Vec<ClaimedCert>,
+    claims: &BTreeMap<OwnerIdent, OwnerClaim>,
+) -> (Vec<FingerprintedCert>, Vec<(CertificateSource, Problem)>) {
+    type NameKey = (SocketAddr, String);
+    let key = |c: &ClaimedCert, name: &str| (c.cert.cert.listener, name.to_ascii_lowercase());
+    let owners: Vec<OwnerIdent> = certs.iter().map(|c| c.source.owner_ident()).collect();
+    let ranks: Vec<OwnerClaim> = owners.iter().map(|o| claim_for(o, claims)).collect();
+    // The ident breaks a tie between two kinds sharing a claim, so the winner
+    // never follows input order.
+    let rank = |i: usize| (&ranks[i], &owners[i]);
+
+    // The oldest claimant of every (listener, name), kept as the index of
+    // one of its certificates.
+    let mut winners: BTreeMap<NameKey, usize> = BTreeMap::new();
+    for (i, c) in certs.iter().enumerate() {
+        for name in &c.cert.cert.names {
+            let best = winners.entry(key(c, name)).or_insert(i);
+            if rank(i) < rank(*best) {
+                *best = i;
+            }
+        }
+    }
+    // Every certificate the winner loaded for each of its names. Another
+    // object's copy of one of them is the same certificate, not a rival.
+    let mut winning: BTreeSet<(NameKey, &[u8])> = BTreeSet::new();
+    for (i, c) in certs.iter().enumerate() {
+        for name in &c.cert.cert.names {
+            let k = key(c, name);
+            if winners.get(&k).is_some_and(|&w| owners[w] == owners[i]) {
+                winning.insert((k, c.cert.fingerprint.as_slice()));
+            }
+        }
+    }
+
+    // What each object lost, grouped per certificate it asked for: one
+    // Secret listed twice, or loaded for two entries, is still one report.
+    let mut lost: BTreeMap<(&CertificateSource, &str), BTreeSet<ClaimedName>> = BTreeMap::new();
+    let mut kept_names: Vec<Vec<String>> = Vec::with_capacity(certs.len());
+    for c in &certs {
+        let mut names = Vec::with_capacity(c.cert.cert.names.len());
+        let mut lost_here = Vec::new();
+        for name in &c.cert.cert.names {
+            let k = key(c, name);
+            let Some(&winner) = winners.get(&k) else {
+                names.push(name.clone());
+                continue;
+            };
+            if winning.contains(&(k, c.cert.fingerprint.as_slice())) {
+                names.push(name.clone());
+                continue;
+            }
+            lost_here.push(ClaimedName {
+                name: name.clone(),
+                owner_kind: owner_kind(&owners[winner]),
+                owner: ranks[winner].2.clone(),
+            });
+        }
+        if !lost_here.is_empty() {
+            lost.entry((&c.source, c.secret.as_str()))
+                .or_default()
+                .extend(lost_here);
+        }
+        kept_names.push(names);
+    }
+    let lost = lost
+        .into_iter()
+        .map(|((source, secret), names)| {
+            let problem = Problem::CertificateNameClaimed {
+                secret: secret.to_string(),
+                listener: source.listener(),
+                names: names.into_iter().collect(),
+            };
+            (source.clone(), problem)
+        })
+        .collect();
+
+    let kept = certs
+        .into_iter()
+        .zip(kept_names)
+        .map(|(mut c, names)| {
+            c.cert.cert.names = names;
+            c.cert
+        })
+        .collect();
+    (kept, lost)
+}
+
 /// Merge certificates that share Sōzu's identity at a listener — same leaf
 /// `(listener, fingerprint)` — into one entry, unioning their SNI names. The
 /// same certificate routinely backs several routes with different hostnames
@@ -1552,31 +1884,37 @@ pub(crate) struct FingerprintedCert {
 /// intermediate), then the smallest material, so the order the Secrets are
 /// read in never decides what is served (otherwise a changed read order would
 /// replace the certificate). Empty overrides are resolved from CN/SAN by
-/// [`extract_cert`] before reaching this union.
+/// [`extract_cert`] before reaching this union, so an empty name set here is
+/// one [`arbitrate_certificate_names`] stripped. The material is chosen among
+/// every entry for the leaf, those left with no name included, so who keeps
+/// the names never decides the chain a name is served with; then a leaf whose
+/// entries kept no name at all is dropped, never emitted with `names: []`.
 fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
-    let mut merged: Vec<FingerprintedCert> = Vec::new();
-    for c in certs {
-        match merged
-            .iter_mut()
-            .find(|e| e.cert.listener == c.cert.listener && e.fingerprint == c.fingerprint)
-        {
-            Some(existing) => {
-                let mut names = std::mem::take(&mut existing.cert.names);
-                names.extend(c.cert.names.iter().cloned());
-                if served_first(&c.cert, &existing.cert) {
-                    existing.cert = c.cert;
+    let mut merged: BTreeMap<(SocketAddr, Vec<u8>), (ir::Certificate, BTreeSet<String>)> =
+        BTreeMap::new();
+    for FingerprintedCert { fingerprint, cert } in certs {
+        match merged.entry((cert.listener, fingerprint)) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (served, names) = entry.get_mut();
+                names.extend(cert.names.iter().cloned());
+                if served_first(&cert, served) {
+                    *served = cert;
                 }
-                existing.cert.names = names;
             }
-            None => merged.push(c),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let names = cert.names.iter().cloned().collect();
+                entry.insert((cert, names));
+            }
         }
     }
-    let mut merged: Vec<ir::Certificate> = merged.into_iter().map(|c| c.cert).collect();
-    for c in &mut merged {
-        c.names.sort();
-        c.names.dedup();
-    }
     merged
+        .into_values()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(mut cert, names)| {
+            cert.names = names.into_iter().collect();
+            cert
+        })
+        .collect()
 }
 
 /// Whether `candidate`'s material should be served rather than `current`'s
@@ -1601,7 +1939,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     let mut clusters: BTreeMap<String, ir::Cluster> = BTreeMap::new();
     let mut backends: BTreeMap<String, ir::Backend> = BTreeMap::new();
     let mut frontends: Vec<SourcedFrontend> = Vec::new();
-    let mut certificates: Vec<FingerprintedCert> = Vec::new();
+    let mut certificates: Vec<ClaimedCert> = Vec::new();
     let mut results: Vec<IngressResult> = Vec::new();
     let mut referenced: BTreeSet<String> = BTreeSet::new();
 
@@ -1674,10 +2012,20 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     hosts.clone(),
                 ) {
                     Ok(cert) => {
+                        // A host whose name goes to an older claimant's
+                        // certificate stays HTTPS: the name is served, by
+                        // that certificate.
                         for h in &hosts {
                             tls_ready_hosts.insert(h.clone());
                         }
-                        certificates.push(cert);
+                        certificates.push(ClaimedCert {
+                            cert,
+                            secret: secret_name.clone(),
+                            source: CertificateSource::Ingress {
+                                namespace: namespace.clone(),
+                                name: name.clone(),
+                            },
+                        });
                     }
                     Err(reason) => problems.push(Problem::InvalidCertificate {
                         secret: secret_name.clone(),
@@ -1830,24 +2178,28 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
     // different effect is reported on the losing owner's result instead of
     // silently letting the winner steal the traffic.
     //
-    // Every object that produced a frontend gets a claim (oldest
-    // `creationTimestamp`, then `namespace/name`), so arbitration follows who
-    // asked first — Ingress and HTTPRoute alike — not the backend's spelling.
+    // Every object that produced a frontend or a certificate gets a claim
+    // (oldest `creationTimestamp`, then `namespace/name`), so arbitration
+    // follows who asked first — Ingress, HTTPRoute and Gateway alike — not
+    // the backend's spelling or the certificate's expiry.
     let mut owner_claims: BTreeMap<OwnerIdent, OwnerClaim> = BTreeMap::new();
     for ingress in &inputs.ingresses {
         if !is_ours(ingress, cfg) {
             continue;
         }
         let (ns, name) = meta_nn(&ingress.metadata.namespace, &ingress.metadata.name);
-        let ts = creation_key(&ingress.metadata);
-        let nn = format!("{ns}/{name}");
-        owner_claims.insert((0, ns, name), (ts.is_none(), ts, nn));
+        let claim = owner_claim(&ns, &name, &ingress.metadata);
+        owner_claims.insert((INGRESS_OWNER, ns, name), claim);
     }
     for route in &inputs.http_routes {
         let (ns, name) = meta_nn(&route.metadata.namespace, &route.metadata.name);
-        let ts = creation_key(&route.metadata);
-        let nn = format!("{ns}/{name}");
-        owner_claims.insert((1, ns, name), (ts.is_none(), ts, nn));
+        let claim = owner_claim(&ns, &name, &route.metadata);
+        owner_claims.insert((HTTP_ROUTE_OWNER, ns, name), claim);
+    }
+    for gateway in &inputs.gateways {
+        let (ns, name) = meta_nn(&gateway.metadata.namespace, &gateway.metadata.name);
+        let claim = owner_claim(&ns, &name, &gateway.metadata);
+        owner_claims.insert((GATEWAY_OWNER, ns, name), claim);
     }
     let (frontends, collisions) = resolve_frontend_collisions(frontends, &owner_claims);
     for (source, problem) in collisions {
@@ -1901,6 +2253,52 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     }
                 }
             }
+        }
+    }
+
+    // One claimant per SNI name and listener, settled before the merge so a
+    // name is attributed to the object that asked for it, never to whichever
+    // object shares its certificate.
+    let (certificates, lost_names) = arbitrate_certificate_names(certificates, &owner_claims);
+    // Grouped per object, then attached in one pass over the results: a
+    // search of every result per report would grow with their product. The
+    // reports are distinct already (one per certificate an object asked for).
+    let mut ingress_lost: BTreeMap<(String, String), Vec<Problem>> = BTreeMap::new();
+    let mut gateway_lost: BTreeMap<(String, String), Vec<Problem>> = BTreeMap::new();
+    for (source, problem) in lost_names {
+        match source {
+            CertificateSource::Ingress { namespace, name } => {
+                ingress_lost
+                    .entry((namespace, name))
+                    .or_default()
+                    .push(problem);
+            }
+            CertificateSource::Gateway {
+                namespace, name, ..
+            } => gateway_lost
+                .entry((namespace, name))
+                .or_default()
+                .push(problem),
+        }
+    }
+    // An Ingress has no status conditions: the Warning Event is its only
+    // report.
+    for r in results.iter_mut() {
+        if ingress_lost.is_empty() {
+            break;
+        }
+        if let Some(lost) = ingress_lost.remove(&(r.namespace.clone(), r.name.clone())) {
+            r.problems.extend(lost);
+        }
+    }
+    // Listener-scoped through `Problem::listener`, so the listener's own
+    // status cites it.
+    for g in gw.gateways.iter_mut() {
+        if gateway_lost.is_empty() {
+            break;
+        }
+        if let Some(lost) = gateway_lost.remove(&(g.namespace.clone(), g.name.clone())) {
+            g.problems.extend(lost);
         }
     }
 

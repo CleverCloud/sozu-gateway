@@ -175,7 +175,7 @@ fn collect_problems(out: &BuildOutput) -> BTreeMap<Owner, BTreeSet<Rendered>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sozu_gw_builder::IngressResult;
+    use sozu_gw_builder::{ClaimedName, IngressResult};
 
     fn out_with_ingress_problem(service: &str) -> BuildOutput {
         BuildOutput {
@@ -241,6 +241,34 @@ mod tests {
 
         assert!(reference.uid.is_none());
         assert_eq!(reference.name.as_deref(), Some("web"));
+    }
+
+    /// An Ingress has no status conditions, so a certificate name it lost to
+    /// an older object reaches its owner only as this Warning Event.
+    #[test]
+    fn a_claimed_certificate_name_is_an_event_on_the_losing_ingress() {
+        let mut out = out_with_ingress_problem("demo/web");
+        out.results[0].problems = vec![Problem::CertificateNameClaimed {
+            secret: "attacker-tls".into(),
+            listener: None,
+            names: vec![ClaimedName {
+                name: "api.example.com".into(),
+                owner_kind: "Ingress",
+                owner: "victim/web".into(),
+            }],
+        }];
+        let map = collect_problems(&out);
+        let (owner, problems) = map.first_key_value().expect("one owner");
+        assert_eq!((owner.kind, owner.name.as_str()), ("Ingress", "web"));
+        let (reason, note) = problems.first().expect("one problem");
+        assert_eq!(reason, "CertificateNameClaimed");
+        for detail in [
+            "\"api.example.com\"",
+            "Ingress victim/web",
+            "\"attacker-tls\"",
+        ] {
+            assert!(note.contains(detail), "{note}");
+        }
     }
 
     #[test]

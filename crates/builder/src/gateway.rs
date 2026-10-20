@@ -49,8 +49,8 @@ use sozu_gw_ir as ir;
 
 use crate::selector::NamespaceSelector;
 use crate::{
-    add_service_route, admit_path, extract_cert, meta_nn, BuildConfig, ExposedProtocol,
-    FingerprintedCert, FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
+    add_service_route, admit_path, extract_cert, meta_nn, BuildConfig, CertificateSource,
+    ClaimedCert, ExposedProtocol, FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -283,13 +283,15 @@ fn listener_supported_kinds(
 }
 
 /// Build the status of one declared listener (whether or not we can program it).
+#[allow(clippy::too_many_arguments)]
 fn build_listener(
     cfg: &BuildConfig,
     inputs: &Inputs,
     index: &Index,
     gw_ns: &str,
+    gw_name: &str,
     l: &sozu_gw_gateway_api::gateway::GatewayListeners,
-    certificates: &mut Vec<FingerprintedCert>,
+    certificates: &mut Vec<ClaimedCert>,
     problems: &mut Vec<Problem>,
 ) -> ListenerInfo {
     let protocol = ListenerProtocol::parse(&l.protocol);
@@ -429,6 +431,7 @@ fn build_listener(
                     inputs,
                     index,
                     gw_ns,
+                    gw_name,
                     l,
                     info.bind.expect("bind resolved above"),
                     certificates,
@@ -532,7 +535,7 @@ pub(crate) fn build_gateway(
     backends: &mut BTreeMap<String, ir::Backend>,
     referenced: &mut BTreeSet<String>,
     frontends: &mut Vec<SourcedFrontend>,
-    certificates: &mut Vec<FingerprintedCert>,
+    certificates: &mut Vec<ClaimedCert>,
 ) -> GatewayBuildResults {
     // 1. GatewayClasses we own (controllerName matches).
     let mut classes = Vec::new();
@@ -588,6 +591,7 @@ pub(crate) fn build_gateway(
                     inputs,
                     index,
                     &ns,
+                    &name,
                     l,
                     &mut gateway_certificates,
                     &mut problems,
@@ -861,9 +865,10 @@ fn load_listener_certs(
     inputs: &Inputs,
     index: &Index,
     gateway_ns: &str,
+    gateway_name: &str,
     listener: &sozu_gw_gateway_api::gateway::GatewayListeners,
     bind: SocketAddr,
-    certificates: &mut Vec<FingerprintedCert>,
+    certificates: &mut Vec<ClaimedCert>,
     problems: &mut Vec<Problem>,
 ) -> (bool, &'static str) {
     let Some(tls) = &listener.tls else {
@@ -915,9 +920,22 @@ fn load_listener_certs(
             }),
             // Keep the listener's own bind: the same certificate may be
             // exposed at several addresses with different name overrides.
+            // The Gateway claims the names, hostname or inferred alike; a
+            // name an older object claims is settled after every object has
+            // loaded (`arbitrate_certificate_names`), and the listener stays
+            // programmed: its routes are served under that object's
+            // certificate.
             Some(secret) => match extract_cert(secret, bind, names.clone()) {
                 Ok(cert) => {
-                    certificates.push(cert);
+                    certificates.push(ClaimedCert {
+                        cert,
+                        secret: cref.name.clone(),
+                        source: CertificateSource::Gateway {
+                            namespace: gateway_ns.to_string(),
+                            name: gateway_name.to_string(),
+                            listener: listener.name.clone(),
+                        },
+                    });
                     loaded = true;
                 }
                 Err(reason) => problems.push(Problem::InvalidCertificate {
