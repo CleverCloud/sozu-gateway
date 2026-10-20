@@ -1,0 +1,33 @@
+# replace_certificate_fallback_probe against docker clevercloud/sozu:2.3.2 (deploy config, 2 workers), 2026-10-19
+# Two self-signed EC P-256 leaves for app.example.com (A, C). The last line of each run comes from the
+# harness: `openssl s_client -connect <listener> -servername app.example.com`, SHA-256 of the served leaf.
+
+## agent at decea4d (before this change)
+== replace certificate fallback probe ==
+A = 07dbd0305eb45e1b, C = 6707c0f027637be2, both [app.example.com] at 0.0.0.0:8443
+before: []
+add A (AddCertificate): applied
+  main: [07dbd0305eb45e1b [app.example.com]]
+remove A, unrecorded (RemoveCertificate): applied
+  main: []
+rotate A -> C (ReplaceCertificate), raw: FAILURE | could not apply request on the main process state: Did not find Certificate with address or id_bytes=12
+  main: []
+rotate A -> C (ReplaceCertificate), through the agent: FAILED: sozu rejected the request: could not apply request on the main process state: Did not find Certificate with address or id_bytes=12
+  main: []
+rotate A -> C again, the next reconcile: FAILED: sozu rejected the request: could not apply request on the main process state: Did not find Certificate with address or id_bytes=12
+  main: []
+served for app.example.com (openssl s_client -servername app.example.com): 1017a1ad24539ea7 (= Sōzu's built-in default certificate, lib/assets/certificate.pem)
+
+## agent with the replace fallback (this change)
+== replace certificate fallback probe ==
+A = 07dbd0305eb45e1b, C = 6707c0f027637be2, both [app.example.com] at 0.0.0.0:8443
+before: []
+add A (AddCertificate): applied
+  main: [07dbd0305eb45e1b [app.example.com]]
+remove A, unrecorded (RemoveCertificate): applied
+  main: []
+rotate A -> C (ReplaceCertificate), raw: FAILURE | could not apply request on the main process state: Did not find Certificate with address or id_bytes=12
+  main: []
+rotate A -> C (ReplaceCertificate), through the agent: applied
+  main: [6707c0f027637be2 [app.example.com]]
+served for app.example.com (openssl s_client -servername app.example.com): 6707c0f027637be2 (= C)

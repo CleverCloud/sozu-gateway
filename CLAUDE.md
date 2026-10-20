@@ -88,7 +88,11 @@ then a no-op that still counts as a successful reconcile.
   never knew, and Sōzu honours only a removal that names the cluster holding the key (always for
   TCP/UDP, for HTTP/HTTPS since 2.3.0), so the eviction is built from the stored entry, and a
   teardown answered "not found" while the key still routes for another cluster removes that route
-  rather than being tolerated. A failed
+  rather than being tolerated. A `ReplaceCertificate` refused because Sōzu holds no certificate at
+  that listener (since 2.3.0 the main process drops a listener's certificate entry with its last
+  certificate, so a rotation diffed from a shadow that missed the removal is refused "Did not find
+  Certificate" on every pass) is applied as an
+  `AddCertificate` of the replacement; any other refusal of a replace fails the batch. A failed
   reconcile is **retried without waiting for a watch event**: the liveness tick re-runs pending
   work on its next successful probe, the resync rebuilds anyway, and with both disabled the loop
   nudges itself after a short delay — a quiet cluster must never keep a failed apply pending.

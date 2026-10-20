@@ -6,8 +6,9 @@
 //! channel. The requests themselves are NOT all idempotent: convergence
 //! against a drifted Sōzu comes from the upsert semantics of
 //! `AddCluster`/`AddBackend` plus this crate's tolerance for already-gone
-//! teardowns and its repair of duplicate frontend adds, which evicts the
-//! entry Sōzu actually stores under the key and re-adds
+//! teardowns, its repair of duplicate frontend adds, which evicts the
+//! entry Sōzu actually stores under the key and re-adds, and its re-add of a
+//! replacement certificate whose listener Sōzu holds no certificate for
 //! (see [`SozuAgent::apply`]).
 //!
 //! Two layers:
@@ -27,8 +28,9 @@ use std::time::{Duration, Instant};
 
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
-    request::RequestType, response_content::ContentType, FrontendFilters, ListedFrontends, Request,
-    RequestTcpFrontend, Response, ResponseContent, ResponseStatus, RunState, Status,
+    request::RequestType, response_content::ContentType, AddCertificate, FrontendFilters,
+    ListedFrontends, ReplaceCertificate, Request, RequestTcpFrontend, Response, ResponseContent,
+    ResponseStatus, RunState, Status,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -216,6 +218,60 @@ fn is_already_gone(request: &Request, failure_message: &str) -> bool {
         gone
     });
     all_benign && saw_gone
+}
+
+/// Was this `ReplaceCertificate` refused because Sōzu's main process holds no
+/// certificate at all at its listener?
+///
+/// Since Sōzu 2.3.0 (6dd569ee, sozu#1405) removing the last certificate at an
+/// address drops that address from the main process's certificate map
+/// (`ConfigState::remove_certificate`), and a replace naming it is refused
+/// before the old fingerprint is even looked up
+/// (`ConfigState::replace_certificate`: `StateError::NotFound`, "Did not find
+/// Certificate with address or id_bytes=…", which the main process prefixes
+/// with "could not apply request on the main process state: "). 2.2.1 kept the
+/// emptied entry and inserted the replacement. A replace on a listener that
+/// holds *some* certificate, just not the old one, is still accepted on 2.3,
+/// so this refusal means exactly "no certificate here at all". That is the
+/// state a lagging shadow leaves: the tier-9 `RemoveCertificate` of a batch
+/// landed, then the batch failed, its ack was lost or the controller died,
+/// and the next desired state pairs a certificate with the same names at
+/// that listener as a rotation of the one Sōzu already dropped (or renames
+/// that very certificate, also sent as a replace).
+///
+/// Only the main process's own refusal qualifies — its prefix, nothing else
+/// in the message: it refuses before dispatching to any worker, so nothing of
+/// the replace was applied anywhere. No worker answers a replace with this text
+/// in 2.2.1 or 2.3.2 (the worker's resolver never fails on an absent old
+/// fingerprint), and requiring the prefix keeps a single worker's aggregate,
+/// which `worker_segments` also reduces to one segment, out regardless. The
+/// refusal proves the main process holds no certificate there; the workers
+/// follow it unless a removal failed on one of them, which no path on a
+/// surviving worker is known to do. The NotFound Display and the prefix are the
+/// same in 2.2.1 and 2.3.2; the match is case-insensitive like the others here.
+fn is_replace_into_empty_listener(request: &Request, failure_message: &str) -> bool {
+    if !matches!(
+        request.request_type,
+        Some(RequestType::ReplaceCertificate(_))
+    ) {
+        return false;
+    }
+    let message = failure_message.to_ascii_lowercase();
+    message.starts_with("could not apply request on the main process state:")
+        && message.contains("did not find certificate")
+}
+
+/// The `AddCertificate` that lands a replacement on a listener holding no
+/// certificate: the same address, certificate, chain, key, versions, names and
+/// expiry override. With no old certificate there, adding the new one is the
+/// whole of what the replace meant.
+fn addition_for(replace: &ReplaceCertificate) -> Request {
+    RequestType::AddCertificate(AddCertificate {
+        address: replace.address,
+        certificate: replace.new_certificate.clone(),
+        expired_at: replace.new_expired_at,
+    })
+    .into()
 }
 
 /// The `Remove*` built from a frontend add's own payload: the repair for a
@@ -616,7 +672,9 @@ impl SozuAgent {
     /// for another cluster, and a *duplicate add* (see [`is_duplicate_add`]):
     /// a duplicate frontend add is repaired by removing the stored entry and
     /// re-adding (see [`stored_removal`]), a duplicate L4 listener add is
-    /// tolerated.
+    /// tolerated — and a certificate replace refused because Sōzu holds no
+    /// certificate at that listener (see [`is_replace_into_empty_listener`]),
+    /// which is applied as an add of the replacement instead.
     pub fn apply(&mut self, requests: &[Request]) -> Result<(), SozuError> {
         self.apply_unless(requests, || false)
     }
@@ -745,6 +803,14 @@ impl SozuAgent {
                         }
                     }
                 }
+                // A rotation onto a listener Sōzu holds no certificate for: the
+                // old one is already gone (the shadow lags behind a removal that
+                // landed), and since 2.3.0 the replace is refused for it on every
+                // reconcile. Adding the replacement is the same end state. Any
+                // other refusal of a replace stays fatal.
+                Err(SozuError::Failure(msg)) if is_replace_into_empty_listener(request, &msg) => {
+                    self.add_replacement(request, msg, &abandoned, (applied, requests.len()))?;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -792,6 +858,37 @@ impl SozuAgent {
                  whether it still routes)"
             ))),
             Holder::Stored(_) | Holder::Nothing => Ok(false),
+        }
+    }
+
+    /// After a `ReplaceCertificate` Sōzu refused because its listener holds no
+    /// certificate (see [`is_replace_into_empty_listener`]), send the
+    /// replacement as an `AddCertificate` (see [`addition_for`]); the replace
+    /// counts as applied when the add is. A refused add fails the batch with
+    /// both answers, so the shadow stays put and the next reconcile retries.
+    fn add_replacement(
+        &mut self,
+        request: &Request,
+        refusal: String,
+        abandoned: &impl Fn() -> bool,
+        (applied, total): (usize, usize),
+    ) -> Result<(), SozuError> {
+        let Some(RequestType::ReplaceCertificate(replace)) = &request.request_type else {
+            return Err(SozuError::Failure(refusal));
+        };
+        // The refused replace took a round-trip: a caller that gave up
+        // meanwhile must not see a certificate land. The main process refused
+        // it before any worker saw it, so stopping here is clean.
+        if abandoned() {
+            return Err(SozuError::Abandoned { applied, total });
+        }
+        warn!(error = %refusal, "sozu holds no certificate at this listener to replace; adding the replacement instead");
+        match self.apply_one(&addition_for(replace)) {
+            Ok(()) => Ok(()),
+            Err(SozuError::Failure(add_refusal)) => Err(SozuError::Failure(format!(
+                "{refusal} (and adding the replacement certificate instead failed: {add_refusal})"
+            ))),
+            Err(channel_error) => Err(channel_error),
         }
     }
 
@@ -1051,9 +1148,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use sozu_command_lib::proto::command::{
-        AddBackend, Cluster, DeactivateListener, ListenerType, PathRule, PathRuleKind,
-        RemoveBackend, RemoveCertificate, RequestHttpFrontend, RequestTcpFrontend,
-        RequestUdpFrontend, SocketAddress, TcpListenerConfig, WorkerInfo, WorkerInfos,
+        AddBackend, CertificateAndKey, Cluster, DeactivateListener, ListenerType, PathRule,
+        PathRuleKind, RemoveBackend, RemoveCertificate, RequestHttpFrontend, RequestTcpFrontend,
+        RequestUdpFrontend, SocketAddress, TcpListenerConfig, TlsVersion, WorkerInfo, WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -2564,6 +2661,215 @@ mod tests {
         agent.apply(&[remove]).expect("tolerated");
         drop(agent);
         assert_eq!(server.join().expect("fake sozu thread").len(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Sōzu 2.3.2 refusing a replace on a listener that holds no certificate,
+    /// verbatim from `docs/probes/replace-certificate-fallback_sozu-2.3.2_2026-10-19.txt`
+    /// (2.2.1's `StateError::NotFound` Display is the same).
+    const REPLACE_NOT_FOUND: &str = "could not apply request on the main process state: Did not \
+         find Certificate with address or id_bytes=12";
+
+    fn replace_certificate() -> ReplaceCertificate {
+        ReplaceCertificate {
+            address: socket_address(8443),
+            new_certificate: CertificateAndKey {
+                certificate: "new leaf".to_string(),
+                certificate_chain: vec!["intermediate".to_string()],
+                key: "new key".to_string(),
+                versions: vec![TlsVersion::TlsV12 as i32, TlsVersion::TlsV13 as i32],
+                names: vec!["app.example.com".to_string()],
+            },
+            old_fingerprint: "ab".repeat(32),
+            new_expired_at: Some(1_900_000_000),
+        }
+    }
+
+    /// The add a correct fallback sends for [`replace_certificate`], spelled
+    /// out field by field rather than through [`addition_for`].
+    fn its_addition() -> Request {
+        RequestType::AddCertificate(AddCertificate {
+            address: socket_address(8443),
+            certificate: replace_certificate().new_certificate,
+            expired_at: Some(1_900_000_000),
+        })
+        .into()
+    }
+
+    /// Only the main process's own "no certificate at this address" refusal
+    /// of a replace qualifies: not another refusal of a replace, not a worker
+    /// aggregate (the main process accepted that one), not another verb.
+    #[test]
+    fn a_replace_into_an_empty_listener_is_recognised_by_its_refusal_only() {
+        let replace: Request = RequestType::ReplaceCertificate(replace_certificate()).into();
+        assert!(is_replace_into_empty_listener(&replace, REPLACE_NOT_FOUND));
+        assert!(
+            is_replace_into_empty_listener(
+                &replace,
+                "Could Not Apply Request On The Main Process State: DID NOT FIND CERTIFICATE \
+                 with address or id_bytes=12"
+            ),
+            "message matching must be case-insensitive"
+        );
+        assert!(
+            !is_replace_into_empty_listener(
+                &replace,
+                "0: Did not find Certificate with address or id_bytes=12"
+            ),
+            "a single worker's aggregate is one segment too, but not the main process's refusal"
+        );
+        assert!(
+            !is_replace_into_empty_listener(
+                &replace,
+                "could not apply request on the main process state: Could not replace \
+                 certificate: error_bytes=31"
+            ),
+            "a replacement Sōzu could not parse is a real failure"
+        );
+        assert!(
+            !is_replace_into_empty_listener(
+                &replace,
+                "0: Did not find Certificate with address or id_bytes=12, 1: OK"
+            ),
+            "a worker aggregate means the main process accepted the replace"
+        );
+        assert!(
+            !is_replace_into_empty_listener(&its_addition(), REPLACE_NOT_FOUND),
+            "only a replace has an old certificate to miss"
+        );
+        let remove: Request = RequestType::RemoveCertificate(RemoveCertificate {
+            address: socket_address(8443),
+            fingerprint: "ab".repeat(32),
+        })
+        .into();
+        assert!(
+            !is_replace_into_empty_listener(&remove, REPLACE_NOT_FOUND),
+            "a removal stays on the teardown-tolerance path"
+        );
+    }
+
+    /// A replace refused because the listener holds no certificate lands as an
+    /// add of the replacement — every field of it — and the batch goes on.
+    #[test]
+    fn a_replace_into_an_empty_listener_adds_the_replacement_instead() {
+        let path = temp_socket_path("replace-empty");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(REPLACE_NOT_FOUND), // the replace
+                ok_response(),                       // the fallback add
+                ok_response(),                       // the next request
+            ],
+        );
+        let replace: Request = RequestType::ReplaceCertificate(replace_certificate()).into();
+        let next: Request = RequestType::AddHttpsFrontend(http_front("app", "/")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent
+            .apply(&[replace.clone(), next.clone()])
+            .expect("the replacement lands as an add");
+        drop(agent);
+
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(
+            received,
+            vec![replace, its_addition(), next],
+            "the replace, the add of its replacement, then the rest of the batch"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The fallback is one attempt: a refused add fails the batch, carrying
+    /// both answers, and nothing after it is sent.
+    #[test]
+    fn a_refused_fallback_add_fails_the_batch_with_both_answers() {
+        let path = temp_socket_path("replace-add-fails");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(REPLACE_NOT_FOUND),
+                failure_response(
+                    "could not apply request on the main process state: Could not add \
+                     certificate: error_kind=InvalidCertificate",
+                ),
+            ],
+        );
+        let replace: Request = RequestType::ReplaceCertificate(replace_certificate()).into();
+        let next: Request = RequestType::AddHttpsFrontend(http_front("app", "/")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply(&[replace, next]).unwrap_err();
+        assert!(
+            matches!(&err, SozuError::Failure(m)
+                if m.contains("Did not find Certificate") && m.contains("Could not add certificate")),
+            "{err:?}"
+        );
+        drop(agent);
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(received.len(), 2, "the replace and the add, nothing after");
+        assert_eq!(received[1], its_addition());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Any other refusal of a replace stays fatal, with no fallback traffic.
+    #[test]
+    fn a_replace_refused_for_another_reason_sends_no_fallback() {
+        let path = temp_socket_path("replace-other");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![failure_response(
+                "could not apply request on the main process state: Could not replace \
+                 certificate: error_bytes=31",
+            )],
+        );
+        let replace: Request = RequestType::ReplaceCertificate(replace_certificate()).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply(&[replace]).unwrap_err();
+        assert!(
+            matches!(&err, SozuError::Failure(m) if m.contains("Could not replace certificate")),
+            "{err:?}"
+        );
+        drop(agent);
+        assert_eq!(
+            server.join().expect("fake sozu thread").len(),
+            1,
+            "the replace only"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The refused replace is a round-trip: a caller that gives up during it
+    /// must not see the replacement land afterwards.
+    #[test]
+    fn an_apply_abandoned_during_the_refused_replace_adds_nothing() {
+        let path = temp_socket_path("replace-abandon");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![failure_response(REPLACE_NOT_FOUND), ok_response()],
+        );
+        let replace: Request = RequestType::ReplaceCertificate(replace_certificate()).into();
+        let checks = std::cell::Cell::new(0);
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent
+            .apply_unless(&[replace], || {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SozuError::Abandoned {
+                    applied: 0,
+                    total: 1
+                }
+            ),
+            "{err:?}"
+        );
+        drop(agent);
+        assert_eq!(
+            server.join().expect("fake sozu thread").len(),
+            1,
+            "the replace only, no fallback add"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
