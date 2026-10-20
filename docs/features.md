@@ -25,6 +25,7 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | TLS | SNI host selection | ✅ | handled by Sōzu |
 | TLS | Wildcard certificate | ✅ | |
 | TLS | Zero-gap certificate rotation | ✅ | `ReplaceCertificate` |
+| TLS | Intermediate chain changes on an unchanged leaf | ✅ | a same-fingerprint `ReplaceCertificate` carrying the new chain, applied in place by Sōzu 2.3.2; Secrets sharing a leaf with different chains serve the one with the most intermediates, whatever order they are read in |
 | TLS | SNI name changes on an unchanged certificate | ✅ | a same-fingerprint `ReplaceCertificate`, applied in place by Sōzu 2.3.2 — no Pod roll ([#81](https://github.com/CleverCloud/sozu-gateway/issues/81)) |
 | TLS | Client-certificate validation (mTLS; Gateway `spec.tls.frontend`) | ❌ | not wired. Sōzu 2.3 has a client-auth policy per HTTPS listener; the first HTTPS `exposure` entry is shared by every Ingress and Gateway on the instance, while a further, Gateway-only entry is its own listener, so per-port enforcement there is representable later. Today such a Gateway stays `Accepted`/`Programmed` and its HTTPS listener serves **every client, with no client authentication**; only an informational `GatewaySpecUnsupported` (`spec.tls`) is reported |
 | TLS | TLS to backends (`BackendTLSPolicy`, Gateway `spec.tls.backend`) | ❌ | Sōzu has no TLS towards backends ([sozu#1218](https://github.com/sozu-proxy/sozu/issues/1218)); backends are plain pod IP:port |

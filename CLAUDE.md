@@ -217,9 +217,12 @@ get wrong:
 - **Routing graph** (clusters/backends/frontends): reuse Sōzu's own `ConfigState::diff` so the
   semantics match the data plane exactly. Certificates are kept *out* of this path.
 - **Certificates**: diffed by hand, keyed by `(listener, fingerprint)` — Sōzu's own cert identity.
-  This emits `ReplaceCertificate` for zero-gap rotation (and for a name-only change, which 2.3.2
-  applies in place), where 2.3's own certificate diff moves a cert with a non-atomic Remove + Add
-  (a gap), and turns an order-only or same-fingerprint change into Remove(X) + Add(X), which the
+  This emits `ReplaceCertificate` for zero-gap rotation and, on an unchanged leaf, for a change of
+  its names or of its served chain (DER, without copies of the leaf), which 2.3.2 applies in place;
+  of several Secrets sharing a leaf, the builder keeps the fullest chain (then the smallest
+  material), so read order never flips it.
+  Sōzu 2.3's own certificate diff would instead move a cert with a non-atomic Remove + Add
+  (a gap), and turn an order-only or same-fingerprint change into Remove(X) + Add(X), which the
   tiering below (adds before removes) would turn into a lost certificate. (It also kept clear of a
   `debug_assert` in `sozu-command-lib` 2.1.0–2.2.1 that fired when `ConfigState::diff` removed the
   last cert at a listener; 2.3 dropped it.)

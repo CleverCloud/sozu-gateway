@@ -118,6 +118,76 @@ fn ingress_tls() -> Ingress {
     }))
 }
 
+/// Two Secrets carry the same leaf, one with an intermediate and one without,
+/// for two Ingresses. Sōzu serves one chain per certificate: the fuller one,
+/// whatever order the objects are read in — a read order that decided it
+/// would replace the certificate whenever the order changed.
+#[test]
+fn secrets_sharing_a_leaf_serve_the_fuller_chain_whatever_the_read_order() {
+    let ingress = |name: &str, host: &str, secret: &str| -> Ingress {
+        from_json(json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+            "metadata": { "name": name, "namespace": "demo" },
+            "spec": {
+                "ingressClassName": "sozu",
+                "tls": [{ "hosts": [host], "secretName": secret }],
+                "rules": [{
+                    "host": host,
+                    "http": { "paths": [
+                        { "path": "/", "pathType": "Prefix",
+                          "backend": { "service": { "name": "web", "port": { "number": 80 } } } }
+                    ]}
+                }]
+            }
+        }))
+    };
+    let chained = format!("{CERT_A}{CERT_B}");
+    let secrets = vec![
+        tls_secret("demo", "chained", &chained, KEY_A),
+        tls_secret("demo", "bare", CERT_A, KEY_A),
+    ];
+    let ingresses = vec![
+        ingress("one", "app.example.com", "chained"),
+        ingress("two", "www.example.com", "bare"),
+    ];
+    let build_from = |ingresses: Vec<Ingress>, secrets: Vec<Secret>| {
+        build(
+            &BuildConfig::default(),
+            &Inputs {
+                ingresses: arcs(ingresses),
+                services: arcs(vec![web_service()]),
+                endpointslices: arcs(vec![web_slice()]),
+                secrets: arcs(secrets),
+                ..Default::default()
+            },
+        )
+    };
+    let forward = build_from(ingresses.clone(), secrets.clone());
+    let reversed = build_from(
+        ingresses.into_iter().rev().collect(),
+        secrets.into_iter().rev().collect(),
+    );
+
+    assert_eq!(
+        forward.ir.certificates.len(),
+        1,
+        "one leaf, one certificate"
+    );
+    assert_eq!(forward.ir.certificates, reversed.ir.certificates);
+    assert_eq!(
+        forward.ir.certificates[0].chain.len(),
+        1,
+        "the intermediate is served"
+    );
+    assert_eq!(
+        forward.ir.certificates[0].names,
+        ["app.example.com", "www.example.com"]
+    );
+    assert!(sozu_gw_translator::reconcile(&forward.ir, &reversed.ir)
+        .expect("reconcile")
+        .is_empty());
+}
+
 #[test]
 fn happy_path_http_and_tls() {
     let inputs = Inputs {

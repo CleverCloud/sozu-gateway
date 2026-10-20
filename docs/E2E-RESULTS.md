@@ -518,6 +518,68 @@ WARN sozu_gw_agent: sozu already holds this frontend's route key; repairing with
 Traffic was uninterrupted for that bounce. It is *not* evidence that a full
 Sōzu restart is gap-free — see the resync window above.
 
+## Certificate names and chains on Sōzu 2.3.2 (2026-10-19)
+
+[#81](https://github.com/CleverCloud/sozu-gateway/issues/81) acceptance on the test cluster
+(Kubernetes v1.37.0, one gateway Pod, Sōzu 2.3.2 with 2 workers). One EC leaf for
+`a`, `b` and `c.example.com`; the Ingress's `tls.hosts` is expanded, restricted and renamed
+on that same certificate, then `tls.crt` gains an intermediate. Each cell is the number of
+fresh `openssl s_client -servername` handshakes, out of 8, that got our leaf, and the
+length of the chain served on the last one; any other answer is Sōzu's default
+certificate.
+
+Controller with the chain comparison:
+
+```
+== initial (tls hosts: a.example.com)
+   a.example.com: 8/8 chain=1
+   b.example.com: 0/8 chain=1
+   c.example.com: 0/8 chain=1
+== expand (tls hosts: a.example.com b.example.com)
+   a.example.com: 8/8 chain=1
+   b.example.com: 8/8 chain=1
+   c.example.com: 0/8 chain=1
+== restrict (tls hosts: b.example.com)
+   a.example.com: 0/8 chain=1
+   b.example.com: 8/8 chain=1
+   c.example.com: 0/8 chain=1
+== rename (tls hosts: c.example.com)
+   a.example.com: 0/8 chain=1
+   b.example.com: 0/8 chain=1
+   c.example.com: 8/8 chain=1
+== chain: add an intermediate to tls.crt (same leaf)
+   c.example.com: 8/8 chain=2
+== controller warnings/errors since start:
+== sozu errors since start:
+```
+
+The same run with the 2.3.2 bump alone (names already apply in place, the chain does not):
+
+```
+== initial (tls hosts: a.example.com)
+   a.example.com: 8/8 chain=1
+   b.example.com: 0/8 chain=1
+   c.example.com: 0/8 chain=1
+== expand (tls hosts: a.example.com b.example.com)
+   a.example.com: 8/8 chain=1
+   b.example.com: 8/8 chain=1
+   c.example.com: 0/8 chain=1
+== restrict (tls hosts: b.example.com)
+   a.example.com: 0/8 chain=1
+   b.example.com: 8/8 chain=1
+   c.example.com: 0/8 chain=1
+== rename (tls hosts: c.example.com)
+   a.example.com: 0/8 chain=1
+   b.example.com: 0/8 chain=1
+   c.example.com: 8/8 chain=1
+== chain: add an intermediate to tls.crt (same leaf)
+   c.example.com: 8/8 chain=1
+== controller warnings/errors since start:
+== sozu errors since start:
+```
+
+---
+
 ## Known limitations
 
 - Installing the Gateway API CRDs under a running controller takes effect on the next resync tick

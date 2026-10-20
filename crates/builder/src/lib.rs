@@ -1545,9 +1545,14 @@ pub(crate) struct FingerprintedCert {
 /// reconcile, forever flipping between the conflicting name sets. Keying on
 /// the fingerprint (not the PEM text) matters: two Secrets holding the same
 /// DER re-encoded with different line wrapping (cert-manager vs hand-made)
-/// are still one certificate to Sōzu. The first occurrence fixes the entry's
-/// position and PEM bytes (the DER is identical anyway). Empty overrides are
-/// resolved from CN/SAN by [`extract_cert`] before reaching this union.
+/// are still one certificate to Sōzu. The leaf is the same DER, but the
+/// Secrets may disagree on the rest — one carries the intermediates, another
+/// not — and Sōzu serves one chain per certificate: the entry with the most
+/// chain links wins (an incomplete chain breaks clients that lack the
+/// intermediate), then the smallest material, so the order the Secrets are
+/// read in never decides what is served (otherwise a changed read order would
+/// replace the certificate). Empty overrides are resolved from CN/SAN by
+/// [`extract_cert`] before reaching this union.
 fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
     let mut merged: Vec<FingerprintedCert> = Vec::new();
     for c in certs {
@@ -1555,7 +1560,14 @@ fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
             .iter_mut()
             .find(|e| e.cert.listener == c.cert.listener && e.fingerprint == c.fingerprint)
         {
-            Some(existing) => existing.cert.names.extend(c.cert.names),
+            Some(existing) => {
+                let mut names = std::mem::take(&mut existing.cert.names);
+                names.extend(c.cert.names.iter().cloned());
+                if served_first(&c.cert, &existing.cert) {
+                    existing.cert = c.cert;
+                }
+                existing.cert.names = names;
+            }
             None => merged.push(c),
         }
     }
@@ -1565,6 +1577,21 @@ fn merge_certificates(certs: Vec<FingerprintedCert>) -> Vec<ir::Certificate> {
         c.names.dedup();
     }
     merged
+}
+
+/// Whether `candidate`'s material should be served rather than `current`'s
+/// when both carry the same leaf: more chain links first, then the smallest
+/// chain, key and PEM, a total order independent of input order.
+fn served_first(candidate: &ir::Certificate, current: &ir::Certificate) -> bool {
+    let rank = |c: &ir::Certificate| {
+        (
+            std::cmp::Reverse(c.chain.len()),
+            c.chain.clone(),
+            c.key.clone(),
+            c.certificate.clone(),
+        )
+    };
+    rank(candidate) < rank(current)
 }
 
 /// Compile all our-class Ingresses (+ resolved deps) into the IR.
