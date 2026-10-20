@@ -108,7 +108,9 @@ fn is_teardown(request: &Request) -> bool {
 /// frontend is refused with its own wording since Sōzu 2.3.0 ("UDP frontend
 /// address … is already claimed by another frontend"), which is the same
 /// stale-state duplicate and takes the same repair. `ActivateListener` is
-/// *not* here: re-activation is idempotent in Sōzu (it only fails `NotFound`).
+/// *not* here: re-activation answers `Ok` (it only fails `NotFound`), and is
+/// harmless since Sōzu 2.3.0 (7109e20a) — on 2.2.1, re-activating an active UDP
+/// listener cut the replies of its established flows (measured).
 fn is_duplicate_add(request: &Request, failure_message: &str) -> bool {
     let message = failure_message.to_lowercase();
     match &request.request_type {
@@ -173,10 +175,13 @@ fn worker_segments(message: &str) -> Vec<&str> {
 /// genuinely did not happen? Only the former may be skipped: skipping the
 /// latter would advance the shadow over an object Sōzu still serves.
 ///
-/// The message families come from Sōzu 2.2.1 itself. The main process answers
-/// `Did not find …` / `did not bring any change` for any teardown verb before
-/// dispatching. A worker whose state diverged from the main process answers
-/// `found no listener` for any object addressed through a listener that is
+/// The message families come from Sōzu itself (2.2.1, and 2.3.2 where it
+/// changed the wording). The main process answers `Did not find …` / `did not
+/// bring any change` for any teardown verb before dispatching; a 2.3 worker
+/// refusing a frontend removal its own state cannot match says `Could not
+/// execute order on config state: Did not find …`. A worker whose state
+/// diverged from the main process answers `found no listener` (`… with
+/// address X` on 2.2, `… at X` on 2.3) for any object addressed through a listener that is
 /// gone (a certificate, a frontend, the listener itself — the main process
 /// keeps accepting a valid-fingerprint certificate removal, so this one must
 /// not fail the batch or it fails it forever), and per kind: listeners `the
@@ -337,6 +342,7 @@ fn owner_query(request: &Request) -> Option<Request> {
                 https: false,
                 tcp: false,
                 domain: Some(front.hostname.clone()),
+                cluster_id: None,
             }
         }
         Some(RequestType::AddHttpsFrontend(front) | RequestType::RemoveHttpsFrontend(front)) => {
@@ -345,6 +351,7 @@ fn owner_query(request: &Request) -> Option<Request> {
                 https: true,
                 tcp: false,
                 domain: Some(front.hostname.clone()),
+                cluster_id: None,
             }
         }
         Some(
@@ -357,6 +364,7 @@ fn owner_query(request: &Request) -> Option<Request> {
             https: false,
             tcp: true,
             domain: None,
+            cluster_id: None,
         },
         _ => return None,
     };
@@ -1066,9 +1074,11 @@ impl SozuAgent {
     /// bounce of a worker changes this set, but a container restart can reuse
     /// the same PIDs in its new namespace. Use [`Self::generation`] to detect
     /// both cases, even when Sōzu already holds some state again. `Stopped`
-    /// workers are excluded: they no
-    /// longer serve, and Sōzu prunes them from the list on its own schedule,
-    /// which would otherwise read as a second spurious generation change.
+    /// workers are excluded: they no longer serve, and Sōzu never prunes them
+    /// from the list outside a main-process upgrade (read in 2.3.2), so a
+    /// killed or re-forked worker would otherwise stay in the set for the main
+    /// process's life — the killed one possibly as an unreaped zombie for a
+    /// while (measured). A soft-stopping worker reads `Running` until it exits.
     pub fn worker_pids(&mut self) -> Result<BTreeSet<i32>, SozuError> {
         let request: Request = RequestType::Status(Status {}).into();
         let response = self.send_with_retry(&request)?;
@@ -1452,6 +1462,7 @@ mod tests {
             address: socket_address(5353),
             proxy: ListenerType::Tcp as i32,
             to_scm: false,
+            interface: None,
         })
         .into();
         assert!(is_already_gone(
@@ -1462,6 +1473,13 @@ mod tests {
             &deactivate,
             "0: found no listener with address 0.0.0.0:5353, 1: found no listener with address 0.0.0.0:5353"
         ));
+        assert!(
+            is_already_gone(
+                &deactivate,
+                "0: found no listener at 0.0.0.0:5353, 1: found no listener at 0.0.0.0:5353"
+            ),
+            "Sōzu 2.3 spelling"
+        );
         assert!(
             !is_already_gone(
                 &deactivate,
@@ -1476,6 +1494,14 @@ mod tests {
             &remove_front,
             "could not remove frontend: Could not remove route, route_bytes=42"
         ));
+        assert!(
+            is_already_gone(
+                &remove_front,
+                "0: Could not execute order on config state: Did not find HttpFrontend with \
+                 address or id_bytes=36, 1: OK"
+            ),
+            "a Sōzu 2.3 worker whose own state lost the route"
+        );
         assert!(
             !is_already_gone(
                 &remove_front,
@@ -2151,6 +2177,7 @@ mod tests {
             address: socket_address(7777),
             proxy: ListenerType::Tcp as i32,
             to_scm: false,
+            interface: None,
         })
         .into();
         assert!(
@@ -2284,6 +2311,7 @@ mod tests {
                 https: false,
                 tcp: false,
                 domain: Some("lb.example.com".to_string()),
+                cluster_id: None,
             })
             .into(),
             RequestType::RemoveHttpFrontend(stored).into(),
@@ -2930,6 +2958,7 @@ mod tests {
                     https: false,
                     tcp: false,
                     domain: Some("lb.example.com".to_string()),
+                    cluster_id: None,
                 })
                 .into()
             )
@@ -2943,6 +2972,7 @@ mod tests {
                     https: false,
                     tcp: true,
                     domain: None,
+                    cluster_id: None,
                 })
                 .into()
             )

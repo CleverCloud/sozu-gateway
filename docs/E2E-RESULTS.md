@@ -145,7 +145,10 @@ different claims. Both are now measured.
 The [2026-09-10 TCP probe check](probes/tcp-half-close_2026-09-10.md) reproduced
 an empty reply after a client half-close on both Sōzu 2.2.0 and 2.2.1. Keeping
 the probe's write side open restored TCP echo; its five-second inactivity
-timeout and the UDP probe are preserved.
+timeout and the UDP probe are preserved. (Annotation, 2026-10-19: the same
+empty reply was reproduced locally on 2.3.2, 3 of 3 runs
+([record](probes/tcp-half-close_sozu-2.3.2_2026-10-19.txt)), so the workaround
+stays; upstream sozu#1840.)
 
 ## 5c. Rewrite and redirect targets — a measurement, not a feature
 
@@ -175,7 +178,30 @@ two conditions any wiring must meet first (refuse or escape `$`; decide what to 
 dropped query string, which is a spec deviation rather than a detail). `ReplacePrefixMatch`
 stays a genuine limit, and now with a measured reason.
 
+**Addendum, 2026-10-19 — re-measured on Sōzu 2.2.1 and 2.3.2.** The same probe, extended and
+with an echo backend that records every `Host` line, gave identical answers on
+`clevercloud/sozu:2.2.1` and `:2.3.2`
+([2.2.1](probes/rewrite-redirect_sozu-2.2.1_2026-10-19.txt),
+[2.3.2](probes/rewrite-redirect_sozu-2.3.2_2026-10-19.txt)), except the legacy
+`^/foo(/|\?|$)` row, which 2.3's anchored router answers `404`. The new cases qualify the
+table above:
+
+| Question | Answer on 2.2.1 and 2.3.2 |
+| -------- | ------------------------- |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful: stays unwired |
+| `ReplacePrefixMatch` via `$PATH[n]` | On today's capture-less prefix regex, `$PATH[1]` gets the frontend **rejected** (the `/` above came from the older regex). With a capturing spelling of the same rule, `/foo` → `/xyz`, `/foo/bar?q=1` → `/xyz/bar?q=1`: feasible for a non-root prefix |
+| Query string across a path rewrite | Dropped by a literal `rewrite_path`; kept when the rule captures it and the template appends that group |
+| `RequestRedirect` path target and the query | **Dropped** (`Location: …/new` for `/original?q=1&x=2`), which the shipped `path.replaceFullPath` redirect inherits; a redirect without a path target keeps it |
+| `$$` in a rewrite value | Rejected like `$`: there is no escape |
+
 ## 5d. Data-plane shutdown — a measurement, not a feature
+
+> Measured on Sōzu 2.2.x. Two of its facts no longer hold from 2.3.0: SIGTERM
+> soft-stops Sōzu (upstream 57c92699), and a soft `sozu shutdown` waits for the
+> drain and ignores `--timeout`, whose `0` now means no timeout. The `preStop`
+> delay keeps its purpose; see [UPGRADING.md](UPGRADING.md#sōzu-232). Measured
+> later (2026-10-19), on 2.2.1 and 2.3.2 alike: HTTP/2 streams are force-closed
+> 5 s into the soft stop, so the "HTTP/2 streams" drained below holds only that long.
 
 Sōzu registers no signal handler, and a signal with no handler is discarded when
 it reaches PID 1 of a container. Deleting a gateway Pod therefore did nothing

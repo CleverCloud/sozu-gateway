@@ -377,6 +377,8 @@ pub enum Problem {
     /// `rule.timeouts` has no Sōzu equivalent; the rule still routes,
     /// without the timeout, and the gap is reported.
     TimeoutsUnsupported,
+    /// An HTTPRoute match with a header or query condition. Only that match is
+    /// skipped; the rule's other matches still program.
     HeaderOrQueryMatchUnsupported,
     /// A listener's `allowedRoutes.namespaces.selector` cannot be evaluated —
     /// an operator this build does not know, a malformed expression, or
@@ -577,9 +579,11 @@ impl std::fmt::Display for Problem {
             Problem::TimeoutsUnsupported => {
                 write!(f, "rule.timeouts has no Sōzu equivalent; the rule routes without it")
             }
-            Problem::HeaderOrQueryMatchUnsupported => {
-                write!(f, "header/query matches are not supported by Sōzu; the rule was skipped")
-            }
+            Problem::HeaderOrQueryMatchUnsupported => write!(
+                f,
+                "header matches are not wired yet (Sōzu 2.3.2 has header predicates) and query \
+                 matches are not supported by Sōzu; only the match carrying one was skipped"
+            ),
             Problem::NamespaceSelectorInvalid { listener, reason } => write!(
                 f,
                 "listener {listener:?} has an allowedRoutes.namespaces.selector this controller \
@@ -715,20 +719,28 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
 /// the `regex` crate refuses a compiled program above its 10 MiB size limit —
 /// reached by a literal path of a few hundred kilobytes, which Kubernetes
 /// accepts on an Ingress (no length bound on `path`). The rule reaches Sōzu
-/// verbatim and Sōzu compiles it with `regex::bytes::Regex::new` — default
-/// flags, no `RegexBuilder` limits — when the frontend is added, failing the
-/// whole request on error and, since translation is all-or-nothing, every
-/// reconcile of the shared instance. This is the same call against the same
-/// `regex` version (pinned, see `tests/sozu_lock_pins.rs`), so what compiles
-/// here compiles there; the compiled regex itself is discarded. Paths enter the IR only through
-/// here, which is why the check lives here and not in the translator.
+/// verbatim and Sōzu 2.3.2 compiles it with `regex::bytes::Regex::new` —
+/// default flags, no `RegexBuilder` limits — twice, bare and anchored (below),
+/// in the main process before the frontend is dispatched, failing the whole
+/// request on error and, since translation is all-or-nothing, every reconcile
+/// of the shared instance. These are the same calls against the same `regex`
+/// version (pinned, see `tests/sozu_lock_pins.rs`), so what compiles here
+/// compiles there; the compiled regexes are discarded. Paths enter the IR only
+/// through here, which is why the check lives here and not in the translator.
 pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> {
     let pattern = match path.sozu_rule() {
         // The root `/` is a plain prefix rule: nothing to compile.
         ir::SozuPathRule::Prefix(_) => return Ok(path),
         ir::SozuPathRule::Regex(pattern) => pattern,
     };
-    match regex::bytes::Regex::new(&pattern) {
+    // Sōzu 2.3.2 compiles a `Regex` rule twice (`PathRule::anchored_regex`):
+    // as written, then wrapped in `\A(?:…)\z`, and refuses the frontend if
+    // either fails. The wrapper alone can fail: an `(?x)` comment swallows
+    // the closing group, the wrapper's two extra nesting levels (a group and
+    // a concatenation) push a pattern nested 248 or 249 deep past the
+    // parser's limit of 250, and the size limit trips a few bytes earlier.
+    let anchored = format!("\\A(?:{pattern})\\z");
+    match regex::bytes::Regex::new(&pattern).and_then(|_| regex::bytes::Regex::new(&anchored)) {
         Ok(_) => Ok(path),
         Err(e) => Err(Problem::InvalidPathRegex {
             path: display_path(path_value(&path)),
@@ -751,7 +763,7 @@ const MAX_HOSTNAME_LENGTH: usize = 4096;
 /// Admit a frontend hostname into the IR only if Sōzu's router can parse it.
 ///
 /// Every hostname but the bare `*` catch-all goes into the route table's tree,
-/// where Sōzu 2.2.1 parses it twice when the frontend is added: as a
+/// where Sōzu 2.3.2 (like 2.2.1) parses it twice when the frontend is added: as a
 /// `DomainRule` (`*` is any host, a `/` makes a regex domain, a `*` is only
 /// accepted in front) and through `idna::domain_to_ascii`, whose ASCII form is
 /// inserted into a trie that refuses an empty leading label. Any of these
@@ -871,11 +883,13 @@ pub fn slice_service_key(slice: &EndpointSlice) -> Option<String> {
 /// certificate also used by a listener with an explicit hostname — and keep
 /// the **normalised** spelling Sōzu's validator returns, which lowercases.
 /// rustls lowercases the SNI before the resolver sees it, while Sōzu 2.2.1
-/// stores a certificate's names verbatim, so a SAN written `MiXeD.Example.COM`
-/// is reachable by no handshake at all and every one for it falls back to the
-/// default certificate (fixed upstream after 2.2.1, at the same construction
-/// point, by the same fold). Explicit names never need this: an Ingress
-/// `tls.hosts` entry and a Gateway listener `hostname` are lowercase by
+/// stored a certificate's names verbatim, so a SAN written `MiXeD.Example.COM`
+/// was reachable by no handshake at all and every one for it fell back to the
+/// default certificate. Sōzu 2.3.0 lowercases names at load by the same fold
+/// (704b60d), but only in the worker's resolver: the main process keeps the
+/// `AddCertificate` names as sent, so lowercasing here also keeps that record
+/// in the spelling the resolver uses. Explicit names never need this: an
+/// Ingress `tls.hosts` entry and a Gateway listener `hostname` are lowercase by
 /// apiserver validation.
 fn validate_inferred_certificate_names(names: &[String]) -> Result<Vec<String>, String> {
     if names.is_empty() {
@@ -915,8 +929,9 @@ fn validate_inferred_certificate_names(names: &[String]) -> Result<Vec<String>, 
 /// corrupt key would make Sōzu reject the `AddCertificate` at apply time —
 /// certificates tier before frontends, so that blocks every frontend add.
 /// The key is therefore parsed and loaded exactly as Sōzu loads it, and then
-/// checked against the leaf, which Sōzu does not do: a key that belongs to
-/// another certificate loads fine and fails every handshake.
+/// paired with the leaf exactly as Sōzu 2.3.2 pairs it before committing the
+/// certificate (2.2.x did not check the pair at all: a key that belonged to
+/// another certificate loaded fine and failed every handshake).
 pub(crate) fn extract_cert(
     secret: &Secret,
     listener: SocketAddr,
@@ -981,58 +996,25 @@ pub(crate) fn extract_cert(
         .key_provider
         .load_private_key(key_der)
         .map_err(|e| format!("invalid private key in tls.key: {e}"))?;
-    // Sōzu stops at `CertifiedKey::new(chain, key)` and never checks that the
-    // key belongs to the leaf, so a mismatched pair loads and then fails every
-    // handshake for its names. Check the pairing the way a handshake does:
-    // sign a fixed message with the loaded key and verify it against the
-    // leaf's public key. This is cryptographic, so it is indifferent to how
-    // the two sides *spell* the same key — the leaf's SubjectPublicKeyInfo
-    // and the one ring derives from the private key can differ in encoding
-    // (absent vs `NULL` RSA parameters, and other DER variations) while being
-    // one key, which a byte comparison of the two DER encodings misreads as a
-    // mismatch and refuses a certificate Sōzu serves fine. It also stays as
-    // permissive as Sōzu about the leaf itself: the public key comes from the
-    // `x509` parsed above with Sōzu's own parser, not from webpki, which
-    // rejects an X509v1 leaf Sōzu would load and would leave such a mismatch
-    // unchecked. The verifier takes the `subjectPublicKey` bits and pairs
-    // them with the algorithm the chosen scheme implies.
-    let provider = rustls::crypto::ring::default_provider();
-    let schemes = provider
-        .signature_verification_algorithms
-        .supported_schemes();
-    let signer = signing_key
-        .choose_scheme(&schemes)
-        .ok_or_else(|| "tls.key offers no signature scheme this build can verify".to_string())?;
-    const PAIRING_MESSAGE: &[u8] = b"sozu-gateway: tls.key must match tls.crt";
-    let signature = signer
-        .sign(PAIRING_MESSAGE)
-        .map_err(|e| format!("tls.key cannot sign: {e}"))?;
-    let key_bits: &[u8] = &x509.public_key().subject_public_key.data;
-    // One encoding the verifier cannot take: an EC public point in compressed
-    // form (`02`/`03` prefix, RFC 5480 §2.2). ring's ECDSA verification
-    // accepts only the uncompressed `04` form, while Sōzu loads such a leaf
-    // without any pairing check and serves it to clients that decompress. The
-    // check here must never be stricter than the data plane, so that one
-    // encoding is admitted unpaired — a mismatch on a compressed-point
-    // certificate is the one case this proof does not cover.
-    const ID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
-    let compressed_ec_point = x509.public_key().algorithm.algorithm.to_id_string()
-        == ID_EC_PUBLIC_KEY
-        && matches!(key_bits.first(), Some(0x02) | Some(0x03));
-    let verifiers = provider
-        .signature_verification_algorithms
-        .mapping
-        .iter()
-        .find(|(scheme, _)| *scheme == signer.scheme())
-        .map(|(_, verifiers)| *verifiers)
-        .unwrap_or(&[]);
-    let paired = compressed_ec_point
-        || verifiers.iter().any(|v| {
-            v.verify_signature(key_bits, PAIRING_MESSAGE, &signature)
-                .is_ok()
-        });
-    if !paired {
-        return Err("tls.key does not match tls.crt".to_string());
+    // Sōzu 2.3.2 refuses the pair before committing it
+    // (`tls::build_validated_certificate`) with `CertifiedKey::keys_match`:
+    // webpki parses the leaf, and the SubjectPublicKeyInfo the provider
+    // derives from the key must equal the leaf's byte for byte. Only
+    // `InconsistentKeys::Unknown` (a provider that cannot expose the public
+    // key; ring always can) is let through. Same call on the same rustls,
+    // webpki and ring (pinned, see `tests/sozu_lock_pins.rs`).
+    let certified = rustls::sign::CertifiedKey::new(
+        vec![rustls::pki_types::CertificateDer::from(
+            leaf_pem.contents.clone(),
+        )],
+        signing_key,
+    );
+    match certified.keys_match() {
+        Ok(()) | Err(rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown)) => {}
+        Err(rustls::Error::InconsistentKeys(_)) => {
+            return Err("tls.key does not match tls.crt".to_string())
+        }
+        Err(e) => return Err(format!("tls.crt cannot be paired with tls.key: {e}")),
     }
 
     Ok(FingerprintedCert {

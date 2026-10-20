@@ -14,17 +14,23 @@
 //!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
 //!    one Service `backendRef` or a redirect-only rule (no backend);
 //!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
-//!    RequestRedirect (scheme + status);
+//!    RequestRedirect (scheme, status, hostname/path/port targets);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
 //! Not yet: header/query matches, weighted multi-backend split (incl. a
 //! single weight-0 drain), rule timeouts, per-backendRef filters, TLS
-//! Passthrough, RequestMirror, redirect host/path/port, and URLRewrite.
-//! Header/query match and weighted split are Sōzu hard limits; the last two are
-//! merely unwired — both were measured working on Sōzu 2.2.0 (PROTOCOL.md §13),
-//! with two conditions any wiring owes first: a literal `$` in a rewrite value
-//! makes Sōzu reject the frontend outright (and translation is all-or-nothing),
-//! and a path rewrite drops the query string that `ReplaceFullPath` keeps.
+//! Passthrough, RequestMirror, redirect `ReplacePrefixMatch`, and URLRewrite.
+//! Query match and weighted split are Sōzu limits (weights are honoured, since
+//! 2.3.2 by every policy, but a backend is selected per connection, not per
+//! request, and there is no native 500); header match is not wired yet,
+//! though Sōzu 2.3.2 carries header predicates. URLRewrite's path is merely
+//! unwired — measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and
+//! 2.3.2 (PROTOCOL.md §13) — with two conditions any wiring owes first: a
+//! literal `$` in a rewrite value makes Sōzu reject the frontend outright (and
+//! translation is all-or-nothing), and a literal path rewrite drops the query
+//! string that `ReplaceFullPath` keeps (a capturing path rule keeps it,
+//! measured). Its `hostname` is blocked upstream: `rewrite_host` sends an
+//! HTTP/1 backend two `Host` lines.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -553,9 +559,14 @@ pub(crate) fn build_gateway(
         let mut problems = Vec::new();
         // Gateway API v1.6.1 added these to the Gateway spec. Neither is
         // honoured, and both are reported rather than dropped: `tls` carries
-        // client-certificate validation (a security control Sōzu's proto has no
-        // field for at all), and `allowedListeners` decides which namespaces may
-        // contribute listeners — a permission, not a preference.
+        // client-certificate validation (a security control Sōzu 2.3 offers
+        // only per HTTPS listener; the first HTTPS exposure entry is shared by
+        // every Gateway and Ingress on the instance, a further Gateway-only
+        // entry is its own listener and could carry it, not wired yet). Such a
+        // Gateway is still served, with no client authentication: this is
+        // fail-open until it is wired or refused. `allowedListeners` decides
+        // which namespaces may contribute listeners — a permission, not a
+        // preference.
         if gw.spec.tls.is_some() {
             problems.push(Problem::GatewaySpecUnsupported { field: "spec.tls" });
         }
@@ -1363,10 +1374,14 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                     };
 
                     // `ReplacePrefixMatch` needs the matched prefix's
-                    // *remainder*, and there is nowhere to get it: `$PATH[n]`
-                    // indexes the path rule's regex captures, and the regex a
-                    // Kubernetes prefix compiles to has exactly one group — the
-                    // element boundary — so `$PATH[1]` yields `/`.
+                    // *remainder*: `$PATH[n]` indexes the path rule's regex
+                    // captures, and the regex a Kubernetes prefix compiles to
+                    // today has none, so a template naming `$PATH[1]` gets the
+                    // frontend rejected (measured on 2.2.1 and 2.3.2). A
+                    // capturing spelling of the non-root prefix regex would
+                    // express it (measured, PROTOCOL.md §13); not wired yet.
+                    // A literal `path` drops the request's query string from
+                    // `Location` — measured, a known gap of this redirect.
                     let path = match r.path.as_ref() {
                         None => None,
                         Some(p) => match p.r#type {
@@ -1460,18 +1475,24 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
                 // Not wired — but no longer for the reason this used to give.
-                // Measured on Sōzu 2.2.0 (PROTOCOL.md §13): `rewrite_path` alone
-                // rewrites the forwarded path toward the *same* backend, and
-                // `rewrite_host` changes only the forwarded Host — the proxy
-                // still dials the cluster's configured address. The `408` this
-                // comment claimed was taken against 2.1.0 and does not reproduce.
+                // Measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and
+                // 2.3.2 (PROTOCOL.md §13): `rewrite_path` alone rewrites the
+                // forwarded path toward the *same* backend, and `rewrite_host`
+                // changes only the forwarded Host — the proxy still dials the
+                // cluster's configured address, but an HTTP/1 backend gets the
+                // Host line twice, which a strict backend refuses, so
+                // `hostname` stays blocked upstream. The `408` this comment
+                // claimed was taken against 2.1.0 and does not reproduce.
                 //
-                // Two things must be settled before wiring it, both measured:
-                // a literal `$` makes Sōzu reject the frontend (translation is
-                // all-or-nothing, so one such route fails every reconcile), and
-                // a path rewrite drops the query string `ReplaceFullPath` keeps.
-                // `ReplacePrefixMatch` stays impossible: the compiled prefix
-                // regex's only capture group is the element boundary.
+                // Two things must be settled before wiring the path, both
+                // measured: a literal `$` makes Sōzu reject the frontend
+                // (translation is all-or-nothing, so one such route fails every
+                // reconcile), and a literal path rewrite drops the query string
+                // `ReplaceFullPath` keeps. A capturing spelling of the path rule
+                // keeps the query and also expresses `ReplacePrefixMatch` for a
+                // non-root prefix; today's rule has no group, so `$PATH[1]` on it
+                // gets the frontend rejected. Until then the rule is served
+                // without the rewrite, and reported.
                 problems.push(Problem::FilterUnsupported {
                     kind: "URLRewrite".to_string(),
                 });

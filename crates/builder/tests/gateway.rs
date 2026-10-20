@@ -390,8 +390,10 @@ fn http_route_filters_map_to_ir() {
         .header_mods
         .iter()
         .any(|m| matches!(m.on, ir::HeaderTarget::Response) && m.key == "X-Served-By"));
-    // URLRewrite is reported unsupported (Sōzu's rewrite_host targets the backend
-    // authority, incompatible with Gateway semantics) rather than mapped.
+    // URLRewrite is reported unsupported rather than mapped, and the rule is
+    // served without it: a literal path rewrite drops the query string, and
+    // rewrite_host sends the backend two Host lines (measured on Sōzu 2.2.1 and
+    // 2.3.2, PROTOCOL.md §13).
     assert!(f.rewrite.is_none());
     assert!(out.routes[0].parents[0]
         .problems
@@ -474,10 +476,11 @@ fn build_with_redirect(request_redirect: serde_json::Value) -> sozu_gw_builder::
 #[test]
 fn hostname_path_and_port_redirect_targets_are_programmed() {
     // These three were refused wholesale, on the belief that Sōzu could express
-    // only a redirect's *scheme*. Measured on 2.2.0 (PROTOCOL.md §13), it builds
-    // the whole `Location` from `rewrite_host`/`rewrite_path`/`rewrite_port`
-    // under every policy — so refusing them was leaving a working feature on
-    // the floor, not protecting anyone.
+    // only a redirect's *scheme*. Measured on 2.2.0 and re-measured unchanged
+    // on 2.2.1 and 2.3.2 (PROTOCOL.md §13), it builds the whole `Location` from
+    // `rewrite_host`/`rewrite_path`/`rewrite_port` under every policy — so
+    // refusing them was leaving a working feature on the floor, not protecting
+    // anyone. (A literal path target drops the request's query, measured too.)
     for target in [
         json!({ "hostname": "new.example.com", "statusCode": 301 }),
         json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2" } }),

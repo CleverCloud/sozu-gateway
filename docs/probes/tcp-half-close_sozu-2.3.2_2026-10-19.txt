@@ -1,0 +1,84 @@
+TCP half-close against docker clevercloud/sozu:2.3.2 (sozu 2.3.2), 2026-10-19, run locally:
+`docker run --rm --network host --user 1000:1000`, the socket directory bind-mounted from the
+host, 2 workers. The TCP listener, cluster, backend and frontend were added with Sozu's own CLI
+inside the container (the commands are echoed below). The backend is a Python echo server on
+127.0.0.1:38690. The client sends one line, then either shuts down its write side (`halfclose`,
+what `printf | socat -` does at stdin EOF) or keeps it open (`keepopen`, what `socat -,ignoreeof`
+does), and prints what it receives within 3 s. The last two lines are the controls against the
+backend directly. The container and the echo server were removed after the run.
+
+Compare tcp-half-close_2026-09-10.md (Sozu 2.2.0 and 2.2.1, in-cluster, socat).
+
+Config:
+
+command_socket = "/run/sozu/sozu.sock"
+command_buffer_size = 163_840
+max_command_buffer_size = 1_638_400
+log_level = "info"
+log_target = "stdout"
+worker_count = 2
+worker_automatic_restart = true
+handle_process_affinity = false
+buffer_size = 16_393
+max_connections = 500
+max_buffers = 1000
+pid_file_path = "/run/sozu/sozu.pid"
+activate_listeners = true
+
+Client (hc-client.py):
+
+import socket, sys, time
+port = int(sys.argv[1]); mode = sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port)); s.settimeout(3)
+s.sendall(b"hello-tcp\n")
+if mode == "halfclose":
+    s.shutdown(socket.SHUT_WR)  # client sends, then shuts its write side (stdin EOF in `socat -`)
+out = b""
+start = time.monotonic()
+try:
+    while True:
+        d = s.recv(4096)
+        if not d: break
+        out += d
+        if mode != "halfclose" and out.endswith(b"\n"): break
+except socket.timeout:
+    pass
+print(f"{mode}: received {out!r} after {time.monotonic() - start:.3f} s")
+
+Echo backend (hc-echo.py):
+
+import socket, sys, threading
+port = int(sys.argv[1])
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port)); srv.listen(64)
+def h(c):
+    try:
+        while True:
+            d = c.recv(4096)
+            if not d: break
+            c.sendall(d)
+    finally: c.close()
+while True:
+    c, _ = srv.accept(); threading.Thread(target=h, args=(c,), daemon=True).start()
+
+Output:
+
+[run] image=clevercloud/sozu:2.3.2 (sozu 2.3.2 ()), 2 workers
+$ sozu listener tcp add --address 127.0.0.1:38680
+  No content
+$ sozu listener tcp activate --address 127.0.0.1:38680
+  No content
+$ sozu cluster add --id hc --load-balancing-policy round_robin
+  No content
+$ sozu backend add --id hc --backend-id hc-0 --address 127.0.0.1:38690
+  No content
+$ sozu frontend tcp add --id hc --address 127.0.0.1:38680
+  No content
+[proxy 127.0.0.1:38680 run 1] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:38680 run 1] keepopen: received b'hello-tcp\n' after 0.000 s
+[proxy 127.0.0.1:38680 run 2] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:38680 run 2] keepopen: received b'hello-tcp\n' after 0.000 s
+[proxy 127.0.0.1:38680 run 3] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:38680 run 3] keepopen: received b'hello-tcp\n' after 0.000 s
+[backend 127.0.0.1:38690 direct] halfclose: received b'hello-tcp\n' after 0.000 s
+[backend 127.0.0.1:38690 direct] keepopen: received b'hello-tcp\n' after 0.000 s

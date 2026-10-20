@@ -1,5 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
+assertion_line: 1010
 expression: "tr::ir_to_requests(&model)"
 ---
 [
@@ -21,7 +22,14 @@ expression: "tr::ir_to_requests(&model)"
         "max_connections_per_ip": 100,
         "retry_after": 30,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   }

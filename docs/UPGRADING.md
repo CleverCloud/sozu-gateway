@@ -4,6 +4,238 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu 2.3.2
+
+The controller now links `sozu-command-lib` 2.3.2 and the chart defaults to
+`clevercloud/sozu:2.3.2` (was 2.2.1). **The controller and the Sōzu image move
+together.** The builder now refuses tenant input the way the 2.3.2 main process
+does (below), and the translator spells out what a 2.3 cluster removal does
+implicitly. An older controller in front of a 2.3 data plane admits
+certificates and path regexes that 2.3.2 refuses (measured), and translation is
+all-or-nothing, so one such object fails every reconcile of the shared instance.
+Pinning `image.sozu.tag` below 2.3.0 under this controller is unsupported too:
+route moves and teardowns were measured to converge on that pairing, nothing
+else was tested, and everything below describes 2.3.
+
+Changing the image rolls the gateway Pods; keep at least two replicas. If your
+values pin `image.sozu.tag`, or you upgrade with `--reuse-values`, set
+`--set image.sozu.tag=2.3.2`. The IR and the persisted shadow format are
+unchanged.
+
+### What you must check
+
+**Certificates 2.3.2 refuses.** Sōzu now pairs a certificate with its key
+through rustls before loading it, in the main process and in every worker, and
+the controller runs the same check: a leaf that rustls-webpki cannot parse as an
+end-entity certificate, or whose SubjectPublicKeyInfo is not byte-for-byte the
+one derived from `tls.key`, is refused. That is the rule, not a list; measured
+refused by 2.3.2 and served by 2.2.1, for instance: an X509v1 leaf, an EC leaf
+carrying a compressed point, an RSA key whose algorithm parameters are absent
+instead of `NULL`, an outer signatureAlgorithm that differs from the signed
+one, an unknown critical extension, and a leaf over 64 KiB of DER. Such
+a Secret is reported (`InvalidCertificate`; a Gateway listener goes
+`ResolvedRefs: False`) and programs nothing: the hosts it covered **lose their
+HTTPS frontend**, and an Ingress host its automatic HTTP→HTTPS redirect, while
+plain HTTP keeps routing. An HTTPRoute `RequestRedirect` on the HTTP listener is
+built without looking at certificates, so it keeps redirecting to a host that no
+longer has an HTTPS frontend (read from the code, not measured).
+Re-issue those certificates, and check
+`kubectl get events -A --field-selector reason=InvalidCertificate` after the
+upgrade.
+
+**User path regexes are anchored.** Sōzu 2.3.0 compiles every `Regex` path rule
+as `\A(?:…)\z` and matches it against the whole request target, query string
+included (upstream 47eb07c). The rules the controller generates for `Prefix` and
+`Exact` were already full-span and route as before. An `ImplementationSpecific`
+path or HTTPRoute `RegularExpression` written as a substring or a suffix changes
+meaning — measured on 2.3.2: `/api/v[0-9]+` no longer matches `/api/v1/x` or
+`/api/v1?q=1`, `\.js$` matches nothing, `/q` no longer matches `/q?x=1`. Rewrite
+them full-span as the [path-rule entry](#path-rules-are-written-for-sōzu-23s-anchored-router-as-well-as-221)
+below shows. A pattern that compiles bare but not once wrapped — an `(?x)`
+comment that swallows the closing group, nesting within two levels of the
+parser's limit (248 or 249 nested groups) — was accepted by 2.2.1 and is
+refused by 2.3.2; the controller now reports it
+(`InvalidPathRegex`) and skips that match instead of failing every reconcile.
+
+**Host matching moves traffic.** Two router changes from 2.3.0, measured on both
+versions with frontends laid out as the controller emits them:
+
+- The `Host` header is matched case-insensitively. On 2.2.1,
+  `Host: FOO.EXAMPLE.COM` matched no host route: it went to the hostname-less
+  catch-all (an Ingress rule without `host`, a hostname-less HTTPRoute) when one
+  existed, and was answered `404` when none did. It now reaches
+  `foo.example.com`'s routes. A `Host` with a trailing dot still matches no
+  host, on either version.
+- An exact host whose rules miss the request's path or method now falls through
+  to a covering one-label `*.` wildcard host before the catch-all. With
+  `foo.example.com` serving `/api` and `*.example.com` serving `/bar`,
+  `GET foo.example.com/bar` went on 2.2.1 to the catch-all when there was one
+  and got a `404` when there was none; on 2.3.2 it reaches the wildcard's
+  Service. A method miss falls through the same way.
+
+A catch-all backend therefore loses its uppercase-`Host` and exact-host-miss
+traffic. This is fall-through, not isolation: routes of different Gateway
+listeners sharing one Sōzu listener still answer each other's misses (see
+[features.md](features.md)). It also widens a known Gateway API deviation
+([#78](https://github.com/CleverCloud/sozu-gateway/issues/78)): an HTTPRoute
+rule dropped for an invalid `backendRef` on an exact host, which the spec
+answers `500`, now falls through to a covering `*.` route and gets a `200` from
+another Service, where 2.2.1 went to the catch-all or answered `404` (inferred
+from the measured fall-through).
+
+**HTTP connect timeouts fail over, and exhaustion is `503`.** On the HTTP and
+HTTPS listeners, a backend that does not accept within `sozu.timeouts.connect`
+(2 s) is now a failed connect like a refused one (upstream e959838e): the
+backend enters back-off and the request moves to a backend it has not tried,
+within `max_connection_attempts` (default 5; 2.2.1 retried only refusals, 3
+times). Measured locally (the chart's Sōzu config, one worker) with one live
+and one black-holed backend: 2.2.1
+answered half the requests `504` after ~2 s each; 2.3.2 answered all of them
+`200`, only the first to touch the dead backend paying ~2 s. When every attempt
+fails the answer is `503`, no longer `504` — a `504` remains possible when an
+HTTP/1 request's front timeout fires mid-failover, while on an HTTP/2
+connection the bound is attempts × connect timeout (10 s here).
+
+- An alert that reads `504` as "backend unreachable" has to watch `503` instead
+  (`sozu_http_503_errors`, `sozu_backend_connect_retries_exhausted`; both
+  per-cluster, so `metrics.perCluster` or the access logs).
+- A back-off window reopens: each time it expires the dead backend is tried
+  again, and every request load-balanced to it meanwhile pays the connect
+  timeout before failing over — repeated latency bursts, not a single hit.
+- A Service with one ready backend gets runs of immediate `503`s while that
+  backend is in back-off, even if it recovered in between; 2.2.1 simply dialled
+  again. Measured on 2.3.2 with every backend black-holed: the first request
+  took 10 s (5 × 2 s), the second 6.2 s, later ones failed in ~0.3 ms.
+- A sticky client is re-pinned after a single connect timeout of its backend
+  (two lost SYNs, a briefly full accept queue), not only when the backend is
+  gone.
+- **TCPRoute is unchanged.** A connect timeout still closes the session, with
+  no failover and no back-off, and the backend is never marked down (measured
+  identical on both versions).
+
+**Idempotent requests can run twice.** A request written onto a pooled
+keep-alive backend connection that the backend closed before sending a byte got
+a `502` on 2.2.1. Sōzu 2.3 re-sends it on another backend connection when its
+method is idempotent (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, `TRACE` —
+never `POST` or `PATCH`), up to four more times (`max_connection_attempts`, 5),
+to the same backend or another: selection runs again and nothing excludes the
+stale one. Measured with a single backend: `GET` and `PUT` got `200` on 2.3.2
+where 2.2.1 answered `502`; `POST` still got `502`. A `PUT` or `DELETE` the
+first backend processed before dropping the connection runs twice. It happens
+whenever a backend closes a pooled keep-alive before Sōzu reuses it — a backend
+idle timeout shorter than Sōzu's reuse, or a rolling update (inferred; no
+rollout was measured).
+
+**SIGTERM now stops Sōzu.** 2.2.x ignored SIGTERM, which is why the chart's
+`preStop` hook runs `sozu shutdown`. 2.3.0 soft-stops on SIGTERM (upstream
+57c92699), and a second SIGTERM while the workers are still stopping hard-stops
+them. Measured with `docker stop`: ~15.8 s ending in SIGKILL on 2.2.1, ~0.16 s
+and a clean exit on 2.3.2, an in-flight HTTP/1 request still answered. With the
+default chart little changes: the hook still waits `sozu.drain.delaySeconds` so
+the Pod leaves the endpoints before the listeners close, then soft-stops; a 2.3
+`sozu shutdown` waits for the drain itself and ignores `-t` (still passed,
+inert), so the grace period is the only bound, and if it runs out the kubelet's
+SIGTERM hard-stops the workers (measured locally; expect a `FailedPreStopHook`
+Event, as the 2.2.1 timeout gave). **`sozu.drain.enabled: false` changes
+meaning:** deleting a
+Pod is now fast and in-flight HTTP/1 requests drain, but the listeners close at
+once, so new connections are refused while the endpoint removal propagates —
+that delay is what the hook still buys.
+
+**The per-IP cap never reaches a UDPRoute.** Sōzu 2.3.0 applies a cluster's
+`max_connections_per_ip` to UDP as a cap on concurrent flows per source address
+(upstream 99e6aee2), silently dropping new flows over it, and counts each client
+source port as a flow, so clients behind a NAT — or behind the node SNAT of
+`externalTrafficPolicy: Cluster` — would lose new flows. The controller
+therefore never sends the cap on a UDP cluster: `sozu.io/max-connections-per-ip`
+keeps capping HTTP requests and TCPRoute sessions and does nothing on a
+UDPRoute, as on 2.2.1. The edge case: the cap is per cluster, one per Service
+port, so a Service port that a UDPRoute also uses loses the cap for its TCPRoute,
+HTTPRoute and Ingress traffic too (read from the code, not measured).
+
+### What changes on its own
+
+- **`power-of-two` spreads load.** Under equal load, 2.2.1 sent every request to
+  the last two backends it scanned and none to the rest; measured locally
+  (docker, one worker, four backends, 400 sequential requests): 0/0/208/192 on
+  2.2.1, 106/100/107/87 on 2.3.2 (upstream a4f09532). Such Services rebalance
+  across all their Pods on upgrade.
+- **Weights.** Every policy now honours a backend's weight, and a weight of `0`
+  counts as `1` (`random` reads the raw value). The controller sets none, so
+  selection is unchanged.
+- **Certificate name changes apply in place** ([#81](https://github.com/CleverCloud/sozu-gateway/issues/81),
+  fixed upstream in 0bc160b7): a same-fingerprint `ReplaceCertificate` whose
+  names changed now updates every worker's SNI table (measured). The translator
+  already sends it, so name changes on an unchanged certificate no longer need
+  a Pod roll.
+- **Repeated UDP listener activation keeps live flows.** On 2.2.1, re-sending
+  `ActivateListener` for an active UDP listener answered `OK` and silently cut
+  every established flow (measured); the controller re-sends it when it retries
+  a failed batch that had added a UDP listener, or reconciles from an unreadable
+  shadow against a running Sōzu. 2.3.2 keeps the flows (measured).
+- **HTTP/1 smuggling hardening.** A request with neither `Content-Length` nor
+  `Transfer-Encoding` no longer swallows the request pipelined behind it (on
+  2.2.1 that request reached the first one's backend unrouted and unedited,
+  measured); a signed `Content-Length` (`+5`) is answered `400` from a client
+  and `502` from a backend; forbidden and spoofed trailer fields (`Host`,
+  `Content-Length`, `Authorization`, `X-Forwarded-For`, …) are elided, and more
+  than 128 trailer fields is a `400`. A response sent while the request body is
+  still arriving now closes the client connection.
+- **HTTP/2.** PINGs no longer extend the front timeout: a client sending only
+  PINGs is closed at `front` (2.2.1 kept it open, measured), and a request
+  still waiting for its first response byte when `front` expires gets `504`
+  even if the client PINGs — keep `sozu.timeouts.front` ≥ `back` (the defaults,
+  60 and 30, are). Flood thresholds are 20× higher, an answer Sōzu generates
+  (`404`, `429`, `503`) ends only its stream instead of the connection, and a
+  client `GOAWAY` no longer cuts in-flight responses.
+- **Forwarding headers.** 2.3 adds a forwarded-header mode whose default,
+  `both`, keeps 2.2.1's headers, but a client
+  `Forwarded` line that is not well-formed RFC 7239 is now removed instead of
+  extended, and HTTP/2 request trailers drop `X-Forwarded-Proto`, `-Port` and
+  `-Host`. A backend that parses `Forwarded` sees the difference.
+- **Smaller ones.** The `Sozu-Id` header and a generated `X-Request-Id` now
+  change on every request of a keep-alive connection (measured; they were per
+  connection). An HTTPRoute `method` match is case-sensitive on the wire: `get`
+  no longer matches `GET` (measured, `404`). A non-persistent HTTP/1.0 backend
+  now closes the client connection after each response. During a soft stop, an
+  HTTP/1.1 response still in flight carries `Connection: close`.
+- **Memory outside the buffer pool grows** (read from the source, not
+  measured): idempotent-request replay captures take up to 512 × 16 400 bytes
+  per worker, about 8.4 MB carried and up to about 16.8 MB allocated — at the
+  chart's `max_buffers` of 20000 that ceiling, not the pool, is what binds; and
+  the default HTTP/2 connection window is now 16 MiB (was 1 MiB), so a stalled
+  HTTP/2 upload can hold about 6.25 MiB of kernel receive buffer at 100 streams,
+  against about 1 MiB before (bounded by `net.ipv4.tcp_rmem`). Leave headroom
+  above the pool budget.
+- **Metrics.** The default scrape exports the same 49 families as on 2.2.1
+  (measured on both, [2.3.2 run](probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt)).
+  Separately, `sozu_socket_read_infinite_loop_error`, which appeared only once it
+  had fired, no longer exists — an alert on it now reads "no data". New proxy counters appear
+  once they first fire (TCP and TLS read/write resets,
+  `sozu_h2_flood_stream_refused`, the trailer counters,
+  `sozu_http_close_request_incomplete`, `sozu_backend_retry_captures_*`).
+  `metrics.perCluster` adds `sozu_backend_header_time` (and `_histogram`) and
+  `sozu_backend_retry_stale_upstream`. The per-cluster worker wedge described
+  [below](#metrics-exports-proxy-wide-sōzu-series-only) is **still present on
+  2.3.2** ([measured](probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt), the
+  message about 12% larger), so `perCluster` stays off by default.
+- **The image** runs on Alpine 3.24 instead of Alpine edge; the entrypoint, the
+  paths and the shell the `preStop` hook uses are unchanged (checked), and
+  `/tmp` still needs its volume.
+- **Stale watches.** `--watch-timeout-secs` stays required. The 14.7–19.7% loss
+  quoted [below](#watch-blindness-is-bounded-by-default) was measured on Sōzu
+  2.2.1, where every failure was a `504` against a withdrawn backend. On 2.3.2
+  the same blindness is expected to show as failover latency bursts and `503`s
+  instead; that is not measured.
+
+### Downgrading
+
+Move both images back together. The image change rolls the Pods, which
+restarts Sōzu, as [the downgrade procedure](#downgrading-the-controller)
+requires; the shadow format is unchanged.
+
+---
+
 ## `sozu.io/sticky-sessions` pins clients, with an opaque cookie
 
 The annotation never pinned anyone. Sōzu writes the backend's `sticky_id` into
@@ -19,13 +251,15 @@ the other backends' ids alone, barring a truncated-HMAC collision (odds around
 n²/2⁶⁵ per Service port), where the uniqueness rule can move one backend's id.
 
 The first reconcile after the upgrade re-sends every backend of a sticky
-Service once. Sōzu 2.2.1 applies it in place, in the main process and in each
-worker, keeping connections and retry state, so the change needs no Sōzu
-restart of its own; a chart upgrade that ships it rolls the gateway Pods
-anyway. The cookie follows more slowly: Sōzu issues it when it selects a
-backend, and a request on a connection whose backend connection is still open
-reuses that backend without selecting again, so such a client can keep, or be
-re-sent, its old cookie until that connection closes. The next request that
+Service once. Sōzu applies it in place (measured on 2.2.1 and 2.3.2), in the
+main process and in each worker, keeping connections and retry state, so the
+change needs no Sōzu restart of its own; a chart upgrade that ships it rolls the
+gateway Pods anyway. The cookie follows more slowly: Sōzu issues it when it
+selects a backend, and a request on a connection whose backend connection is
+still open reuses that backend without selecting again, so such a client can
+keep its old cookie until that connection closes (on Sōzu 2.2.x an HTTP/1
+keep-alive client could also be re-sent it, a later response on the connection
+repeating the earlier `Set-Cookie`; fixed in 2.3). The next request that
 does select a backend load-balances an old cookie, which no longer matches
 anything, and sets the new one. The id changes when the Service is deleted and
 recreated, which re-pins its clients the same way. Two sticky Services on
@@ -72,6 +306,9 @@ It defaults to `0`, unlimited — Sōzu's own default — so nothing changes unl
 you set it. An HTTP request over the cap is answered `429`, which Sōzu counts
 per Service port: the default `/metrics` (proxy-wide series only) does not show
 these rejections; the access logs do, and so does `metrics.perCluster: true`.
+Neither the default nor the annotation reaches a UDPRoute: since the move to
+Sōzu 2.3.2 the controller sends no cap on a UDP cluster, which 2.3 would apply
+as a silent per-source flow cap (see [Sōzu 2.3.2](#sōzu-232)).
 
 ---
 
@@ -82,8 +319,16 @@ per-backend metrics, in one message per worker. On Sōzu 2.2.1 a worker whose
 message exceeds `max_command_buffer_size` (1 638 400 bytes in the chart)
 requeues it forever: it stops serving traffic and commands and spins a core,
 while `/readyz`, the container probes and `reconcile_failures_total` all stay
-green, until the Pod is restarted. The message grows with every routed
-Service port that has received traffic. On a laptop, with the chart's
+green, until the Pod is restarted. It also logs an error on every requeue —
+1.6 million lines in about 20 s on 2.2.1; on 2.3.2 tens of thousands within a
+minute, counted in a log capped at 20 MB — which the chart's
+`log_target = "stdout"` writes to the node's container logs. This is not new in
+2.3, and Sōzu 2.3.2 still does all of this
+([measured](probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt)), and its
+message is about 12% larger: 63 984 bytes at 80 clusters against 56 889 on 2.2.1,
+same probe and buffers. The message grows
+with every routed Service port that has received traffic. On a laptop, on
+2.2.1, with the chart's
 buffers, two workers and traffic on every cluster, the full query still
 answered at 2 000 clusters and wedged both workers at 2 500 and at 3 000
 ([runs 3–5](probes/metrics-no-clusters_sozu-2.2.1_2026-09-23.txt)), which
@@ -177,11 +422,13 @@ Certificate names are not affected: Sōzu loads them without IDNA processing.
 
 ---
 
-## Path rules are written for Sōzu's next router as well as 2.2.1
+## Path rules are written for Sōzu 2.3's anchored router as well as 2.2.1
 
-Sōzu 2.2.1 matches a `Regex` path rule unanchored; its unreleased successor
-wraps every such rule in `\A(?:…)\z` (upstream 47eb07c, marked BREAKING), so a
-rule must span the whole request target, query string included. The rules a
+Sōzu 2.2.1 matches a `Regex` path rule unanchored; 2.3.0 and later wrap every
+such rule in `\A(?:…)\z` (upstream 47eb07c, marked BREAKING), so a rule must
+span the whole request target, query string included. (Written when that was
+still unreleased; the anchoring is in effect since the
+[move to 2.3.2](#sōzu-232).) The rules a
 `Prefix` and an `Exact` path compile to were written for the first behaviour
 only — `^/foo(/|\?|$)` stops at the boundary — and would have matched neither
 `/foo/bar` nor `/v1?x=1` on the new router: a data-plane bump would have turned
@@ -204,13 +451,13 @@ gone, leaving the old rule serving. A fresh Sōzu starts clean.
 
 **User regexes are handed to Sōzu verbatim and change meaning with it.** An
 `ImplementationSpecific` path or an HTTPRoute `RegularExpression` match written
-for 2.2.1 as `/api` (substring) or `\.js$` (suffix) will stop matching on the
-next release. Write full-span patterns now — `^/api(?:[/?](?-u:.*))?$`,
-`^(?-u:.*)\.js(?:\?(?-u:.*))?$` — and they behave identically before and
-after; `(?-u:.*)` rather than `.*` so a remainder that is not valid UTF-8
-reads the same both ways too. An Ingress path must start with `/`; a regex
-still anchors its start behind a slash matched zero times, `/{0}^/api…`,
-which the apiserver accepts. See [features.md](features.md).
+for 2.2.1 as `/api` (substring) or `\.js$` (suffix) stops matching on 2.3.
+Full-span patterns — `^/api(?:[/?](?-u:.*))?$`,
+`^(?-u:.*)\.js(?:\?(?-u:.*))?$` — behave identically on both; `(?-u:.*)` rather
+than `.*` so a remainder that is not valid UTF-8 reads the same both ways too.
+An Ingress path must start with `/`; a regex still anchors its start behind a
+slash matched zero times, `/{0}^/api…`, which the apiserver accepts. See
+[features.md](features.md).
 
 One consequence of the new spelling: a user regex that spelled the *previous*
 internal form of an `Exact` or `Prefix` rule (`^/foo(?:\?|$)`, `^/foo(/|\?|$)`)
@@ -222,10 +469,12 @@ order rather than the collision policy. Rewrite it as the plain `Exact` or
 Inferred certificate names (a Gateway listener without `hostname`) are now
 stored **lowercase**, as rustls presents the SNI: a SAN spelled
 `MiXeD.Example.COM` was previously programmed verbatim and selected by no
-handshake on 2.2.1 (upstream fixed the same way after 2.2.1). The name set of
-such a certificate changes, so its `ReplaceCertificate` is emitted on the
-first reconcile after the upgrade — a same-fingerprint replace, which 2.2.1's
-worker ignores, so the mapping takes effect on the Pod roll above.
+handshake on 2.2.1 (Sōzu 2.3.0 lowercases names at load the same way, 704b60d;
+the controller keeps doing it so the main process's record is lowercase too).
+The name set of such a certificate changes, so its `ReplaceCertificate` is
+emitted on the first reconcile after the upgrade — a same-fingerprint replace,
+which 2.2.1's worker ignores, so on 2.2.1 the mapping takes effect on the Pod
+roll above; 2.3.2 applies it in place.
 
 ---
 
@@ -246,8 +495,11 @@ gets, since it always compiled to a regex.
 
 **Roll the gateway Pods after upgrading.** The diff renders both sides through
 the new mapping, so an unchanged `Exact` route produces no migration request,
-and the `Equals` rules already loaded in the workers cannot be removed by any
-request anyway; only a fresh Sōzu starts clean. An `ImplementationSpecific`
+and the `Equals` rules already loaded in 2.2.x workers cannot be removed by any
+request anyway; only a fresh Sōzu starts clean. (This is 2.2.x history: Sōzu
+2.3.0 can remove an `Equals` rule, 795b95d, but still compares it against the
+query-bearing target, so `Exact` stays a regex, and the move to 2.3.2 restarts
+Sōzu regardless.) An `ImplementationSpecific`
 regex that spells the same anchored pattern as an `Exact` or `Prefix` path on
 the same host is now reported as a `RouteCollision` instead of being silently
 dropped by the translator. The winner is decided exactly as for any route-key
@@ -274,8 +526,9 @@ the rule's other matches, the route's other rules and every other object still
 program, and the route stays `Accepted`.
 
 Two inputs that used to load now stop: a `tls.key` that is a valid key but does
-not belong to `tls.crt` (Sōzu never checked the pair, and every handshake for
-those names failed), and an HTTPRoute rule with an uncompilable regex match,
+not belong to `tls.crt` (Sōzu 2.2.x never checked the pair, and every handshake
+for those names failed; 2.3.2 refuses it, see [Sōzu 2.3.2](#sōzu-232)), and an
+HTTPRoute rule with an uncompilable regex match,
 which is skipped whole — its other matches included — rather than half-applied.
 Check `kubectl get events` and route status after upgrading for either reason.
 ## The watch bound is the controller's default, not only the chart's
@@ -286,8 +539,8 @@ Until now the binary defaulted to `0` and the chart rendered the env var only
 for a truthy value, so any release whose values predate the key — every
 `helm upgrade --reuse-values` from such a release, which was the documented
 upgrade command — silently ran unbounded, with the
-[measured 14.7–19.7% loss](#watch-blindness-is-bounded-by-default) that the
-setting exists to prevent. An install that never set the key now gets the
+[14.7–19.7% loss measured on Sōzu 2.2.1](#watch-blindness-is-bounded-by-default)
+that the setting exists to prevent. An install that never set the key now gets the
 bound on its next image roll, with no values change.
 
 **`0` still opts out.** It keeps kube-rs's own default of 290 s, in both the
@@ -443,16 +696,18 @@ HTTPS listeners sharing a certificate now retain the DNS names inferred by a
 listener without `hostname`, alongside the explicit names of other listeners.
 Invalid or empty inferred names reject only the listener requesting inference.
 
-Roll the gateway Pods when adopting this change so Sōzu loads the corrected
-name set. Restarting only the controller cannot repair the names of an already
-loaded certificate: Sōzu 2.2.1 acknowledges replacement of the same fingerprint
-without updating its SNI names.
+On Sōzu 2.2.1, roll the gateway Pods when adopting this change so Sōzu loads
+the corrected name set. Restarting only the controller cannot repair the names
+of an already loaded certificate there: 2.2.1 acknowledges replacement of the
+same fingerprint without updating its SNI names. The same held for adding or
+removing a hostname-less listener, or changing explicit listener hostnames,
+while retaining the same certificate.
 
-This limitation also applies when adding or removing a hostname-less listener,
-or changing explicit listener hostnames, while retaining the same certificate.
-Roll the gateway Pods after such changes until the native Sōzu update tracked
-in [#81](https://github.com/CleverCloud/sozu-gateway/issues/81) is available.
-Rotation to a certificate with a different fingerprint remains supported.
+Sōzu 2.3.2 applies such a same-fingerprint `ReplaceCertificate` in place
+([#81](https://github.com/CleverCloud/sozu-gateway/issues/81), fixed upstream
+in 0bc160b7), and the controller already sends it, so since the
+[move to 2.3.2](#sōzu-232) none of these changes needs a Pod roll. Rotation to a
+certificate with a different fingerprint was never affected.
 
 ---
 
@@ -575,12 +830,14 @@ Pod out; the budget and the drain keep that gap-free.
 The data-plane container gets a `preStop` hook and
 `terminationGracePeriodSeconds: 40` (was Kubernetes' default 30).
 
-Sōzu registers no signal handler, and a signal with no handler is discarded when
-it reaches PID 1 of a container — so SIGTERM did nothing and every Pod deletion
-sat out the full grace period before being SIGKILLed, losing the response to
-whatever was in flight. Measured on a three-node cluster: **31–32s to delete a
-gateway Pod before, 6–7s after**, the difference being the 5s delay plus about a
-second of draining.
+Sōzu 2.2.x registers no signal handler, and a signal with no handler is
+discarded when it reaches PID 1 of a container — so SIGTERM did nothing and
+every Pod deletion sat out the full grace period before being SIGKILLed, losing
+the response to whatever was in flight. Measured on a three-node cluster, on
+2.2.x: **31–32s to delete a gateway Pod before, 6–7s after**, the difference
+being the 5s delay plus about a second of draining. Sōzu 2.3.0 soft-stops on
+SIGTERM; the hook is still what delays the stop until the Pod has left the
+endpoints, see [Sōzu 2.3.2](#sōzu-232).
 
 **The first upgrade is not drained.** The outgoing Pod is the old spec, so it
 still waits out its own grace period; only Pods created from this chart onwards
@@ -599,12 +856,18 @@ now the listener closes at 5s and connections arriving after that are refused.
 If you depend on an external LB, raise `sozu.drain.delaySeconds` to at least its
 depool time.
 
-**What is drained** is HTTP/1 exchanges in progress and HTTP/2 streams. TCPRoute
-and UDPRoute sessions, WebSockets, TLS handshakes in progress and idle
-keep-alives are cut once the delay elapses.
+**What is drained** is HTTP/1 exchanges in progress, for the whole budget.
+HTTP/2 streams are force-closed 5 s into the soft stop (Sōzu's default
+`h2_graceful_shutdown_deadline_seconds`, which the chart does not set; measured
+on 2.2.1 and 2.3.2). TCPRoute and UDPRoute sessions, WebSockets, TLS handshakes
+in progress and idle keep-alives are cut once the delay elapses.
 
 Set `sozu.drain.enabled: false` to opt out entirely; the grace period then
-returns to Kubernetes' default too.
+returns to Kubernetes' default too. On 2.3 the kubelet's SIGTERM then
+soft-stops Sōzu at once, without the delay: the listeners close at SIGTERM, so
+connections arriving while the endpoint removal propagates are refused, and
+in-flight HTTP/1 exchanges still drain.
+
 ## Prometheus metrics are served by default
 
 `metrics.enabled` now defaults to `true`. A `helm upgrade` with unchanged values
@@ -640,10 +903,12 @@ Two known limits, neither of which the chart can fix on its own:
 
 **What it is good for.** The controller's own signals — the
 last-successful-reconcile timestamp above all — plus Sōzu's request counters and
-status codes. Note what it is *not* good for: `cluster.available_backends`
-against `cluster.total_backends` only moves when Sōzu's passive circuit breaker
-trips, and that is armed by a *refused* connection. A backend that has gone
-silent is still counted available, so those two series do not detect it.
+status codes. Note what it was *not* good for on Sōzu 2.2.x:
+`cluster.available_backends` against `cluster.total_backends` only moves when
+Sōzu's passive circuit breaker trips, and 2.2.x arms it only on a *refused*
+connection, so a backend that has gone silent is still counted available. From
+2.3.0 an HTTP connect timeout counts as a failure too, and repeated timeouts
+mark a silent backend down; a silent backend behind a TCPRoute still never is.
 ## The backend connect timeout drops to 2 seconds
 
 The chart used to set no timeouts, so Sōzu's own applied — including **3 seconds
@@ -654,15 +919,24 @@ upgrade with `--reuse-values`, which replays the previous release's values in
 place of the new chart's and so never sees a key the chart has since added
 (`sozu.timeouts.connect` included); use `--reset-then-reuse-values`, as
 [above](#sōzu-is-drained-on-shutdown-and-the-grace-period-grows-to-40s).
-**A backend that legitimately takes longer than 2 seconds to accept a
-connection — a cold runtime, a saturated accept queue — starts being answered
-`504` where it previously waited.**
+**On Sōzu 2.2.x, a backend that legitimately takes longer than 2 seconds to
+accept a connection — a cold runtime, a saturated accept queue — starts being
+answered `504` where it previously waited.**
 
 The change is there so that a backend which has gone *silent* fails inside the
-proxy, where it is answered, logged as `backend_timeout` and counted in
-`http.status.504`, instead of consuming the caller's entire budget and being
-recorded on the client as an unexplained hang. It buys attribution, not
-recovery: a connect that times out gets no retry and no failover.
+proxy, where it is answered and logged, instead of consuming the caller's
+entire budget and being recorded on the client as an unexplained hang. On 2.2.x
+it buys attribution, not recovery: a connect that times out is logged as
+`backend_timeout`, counted in `http.status.504`, and gets no retry and no
+failover.
+
+From Sōzu 2.3.0 it buys recovery too, on the HTTP and HTTPS listeners: a
+connect that times out is a failed connect, the backend enters back-off, and
+the request moves to a backend it has not tried; `503` answers a request whose
+every attempt failed. The 2 seconds are now what each attempt waits before
+failing over, what each back-off re-trial of a dead backend costs, and what
+re-pins a sticky client — see [Sōzu 2.3.2](#sōzu-232). The reason for 2 rather
+than 1 is unchanged: Linux retransmits a lost SYN at 1 s.
 
 If it cuts off a backend that was merely slow, raise it:
 
@@ -674,7 +948,8 @@ sozu:
 
 This reaches the HTTP and HTTPS listeners only. Layer-4 listeners are created by
 the controller over the command socket and keep their own fixed budgets, so a
-TCPRoute or UDPRoute is unaffected either way.
+TCPRoute or UDPRoute is unaffected either way — and on 2.3.2 too, a TCPRoute
+connect that times out still closes the session with no failover.
 
 ---
 
@@ -743,11 +1018,14 @@ close the connections its watches ride on: nothing errors, no event arrives, and
 the reflectors stop advancing while every reconcile keeps *succeeding* against a
 frozen cache. Sōzu then serves routes for backends that moved minutes ago, with
 `reconcile_failures_total` at `0` and `/readyz` green. Measured across two
-upgrades of a managed cluster, **17.1% and 14.7% of fresh HTTP requests through
-the gateway failed** for the duration of node replacement — every one an HTTP
-`504` from Sōzu against a withdrawn backend, while bare TCP, DNS and the
-application's own Service stayed clean. With this setting the same two upgrades
-measured `0.000%`.
+upgrades of a managed cluster, with Sōzu 2.2.1, **17.1% and 14.7% of fresh HTTP
+requests through the gateway failed** for the duration of node replacement —
+every one an HTTP `504` from Sōzu against a withdrawn backend, while bare TCP,
+DNS and the application's own Service stayed clean. With this setting the same
+two upgrades measured `0.000%`. Sōzu 2.3 fails a timed-out connect over to
+another backend, so the same blindness is expected to show there as failover
+latency bursts and `503`s rather than these `504`s; that is not measured, and
+the setting stays required either way.
 
 **What it costs.** One watch reconnect per watch per minute. The watcher resumes
 from the stored `resourceVersion` rather than re-listing, so a quiet cluster pays

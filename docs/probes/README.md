@@ -42,3 +42,21 @@ out of band are left alone.
 | `partial_apply_probe` | Whether the controller's baseline converges after a batch Sōzu applied only in part, for four sequences: a batch removing a cluster fails on a later request, then the cluster is wanted back with a new backend; a batch re-pointing a route to another live cluster fails the same way, then the route is deleted; a batch switching a UDP route's cluster to another algorithm while dropping the route fails right after the cluster's upsert, then the route is wanted back (`udp`) or the first state is (`udp-revert`). Each runs the controller's loop four times, the shadow after the failure kept unchanged, replayed with the acknowledged removals alone, replayed with every acknowledged request, and replayed only when that describes the routing state exactly, and reads each step back from the main process's frontend list (and the UDP cluster from the main process and each worker). Runs against a local `sozu start` with `SOZU_SOCK`/`PROBE_HTTP`/`PROBE_HTTPS` pointed at it, `PROBE_UDP_PORT` the first of eight free UDP ports |
 | `replace_certificate_fallback_probe` | Whether a certificate rotation lands on a listener Sōzu holds no certificate for — the state a shadow lagging behind a landed `RemoveCertificate` leaves — sent raw and through the agent, read back from the main process's certificate list (the served leaf is checked with `openssl s_client`). Runs against a local `sozu start` with `SOZU_SOCK`/`PROBE_HTTPS`/`PROBE_CERT_*`/`PROBE_KEY_*` pointed at it |
 | `rewrite_redirect_probe` | What `rewrite_host` / `rewrite_path` / `rewrite_port` actually do, on the forwarding path and under each redirect policy, plus whether a `Header` `set` replaces or appends — see [PROTOCOL.md §13](../../PROTOCOL.md) |
+
+The probes also run against a local `docker run --rm --network host --user 1000:1000
+clevercloud/sozu:<version>` with the socket directory bind-mounted from the host (keep the
+socket path under 108 bytes, through a symlink if need be); each record's header says how it was
+run.
+
+## Records
+
+| Question | Sōzu | Record |
+| -------- | ---- | ------ |
+| `metrics_probe` | 2.2.1 | [metrics-no-clusters_sozu-2.2.1_2026-09-23.txt](metrics-no-clusters_sozu-2.2.1_2026-09-23.txt) |
+| `metrics_probe` (runs 1–2 of the 2.2.1 record, docker) | 2.3.2 | [metrics-no-clusters_sozu-2.3.2_2026-10-19.txt](metrics-no-clusters_sozu-2.3.2_2026-10-19.txt) |
+| `owner_eviction_probe` | 2.2.1, 2.3.2 | [owner-eviction_sozu-2.2.1_2026-10-19.txt](owner-eviction_sozu-2.2.1_2026-10-19.txt), [owner-eviction_sozu-2.3.2_2026-10-19.txt](owner-eviction_sozu-2.3.2_2026-10-19.txt) |
+| `rewrite_redirect_probe` | 2.2.0 | [rewrite-redirect_sozu-2.2.0_2026-08-04.txt](rewrite-redirect_sozu-2.2.0_2026-08-04.txt), [rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt](rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt), [redirect-host-targets_sozu-2.2.0_2026-08-11.txt](redirect-host-targets_sozu-2.2.0_2026-08-11.txt) |
+| `rewrite_redirect_probe` (extended: every `Host` line, capturing rules, `$$`, `Host` edits, CR/LF) | 2.2.1, 2.3.2 | [rewrite-redirect_sozu-2.2.1_2026-10-19.txt](rewrite-redirect_sozu-2.2.1_2026-10-19.txt), [rewrite-redirect_sozu-2.3.2_2026-10-19.txt](rewrite-redirect_sozu-2.3.2_2026-10-19.txt) |
+| TCP half-close (no example; the method is in each record) | 2.2.0, 2.2.1 | [tcp-half-close_2026-09-10.md](tcp-half-close_2026-09-10.md) |
+| TCP half-close (local docker, Python client) | 2.3.2 | [tcp-half-close_sozu-2.3.2_2026-10-19.txt](tcp-half-close_sozu-2.3.2_2026-10-19.txt) |
+| Container restart detection | 2.2.1 | [restart-generation_2026-09-10.md](restart-generation_2026-09-10.md) |

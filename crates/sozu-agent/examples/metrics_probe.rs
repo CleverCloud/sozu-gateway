@@ -3,8 +3,9 @@
 //!
 //! The controller's `/metrics` sends one `QueryMetrics` per scrape. Without
 //! `no_clusters`, every worker answers with all of its cluster and backend
-//! metrics in a single message; Sōzu 2.2.1's worker requeues a message larger
-//! than `max_command_buffer_size` forever, so that worker stops serving. This
+//! metrics in a single message; Sōzu's worker (2.2.1, and still 2.3.2)
+//! requeues a message larger than `max_command_buffer_size` forever, so that
+//! worker stops serving. This
 //! probe records, against a live Sōzu:
 //!
 //!  1. which metric names a `no_clusters` query returns (proxy + main only?);

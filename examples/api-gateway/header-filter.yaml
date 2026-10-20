@@ -2,7 +2,7 @@
 #
 #   RequestHeaderModifier  -> edits headers the backend receives
 #   ResponseHeaderModifier -> edits headers the client receives
-# Note: Sōzu has no header "append", so a Gateway `add` is applied as a set.
+# A Gateway `set` replaces, `add` appends and `remove` deletes.
 #
 # Verify (whoami echoes the request it got):
 #   curl -s   -H 'Host: headers.example.com' http://<lb-ip>/ | grep X-Env       # X-Env: prod

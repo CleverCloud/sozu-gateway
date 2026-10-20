@@ -1,6 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
-
+assertion_line: 878
 expression: reqs
 ---
 [
@@ -22,7 +22,14 @@ expression: reqs
         "max_connections_per_ip": null,
         "retry_after": null,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   },
@@ -41,7 +48,8 @@ expression: reqs
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -73,7 +81,8 @@ expression: reqs
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -105,7 +114,8 @@ expression: reqs
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },

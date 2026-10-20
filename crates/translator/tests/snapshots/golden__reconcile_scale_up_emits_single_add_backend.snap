@@ -1,5 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
+assertion_line: 550
 expression: reqs
 ---
 [
@@ -18,7 +19,8 @@ expression: reqs
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   }

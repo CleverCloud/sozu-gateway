@@ -20,18 +20,29 @@ const KEY_A: &str = include_str!("fixtures/key_a.pem");
 // parses but belongs to another certificate.
 const CERT_B: &str = include_str!("fixtures/cert_b.pem");
 const KEY_B: &str = include_str!("fixtures/key_b.pem");
-/// An X509**v1** self-signed certificate (no extensions) and, separately, a key
-/// that does not match it. webpki refuses to parse a v1 leaf, so a pairing
-/// check routed through it would tolerate this mismatch; x509-parser (what Sōzu
-/// uses) parses it, so the pairing check must still catch it.
+/// An X509**v1** self-signed certificate (no extensions), its key and,
+/// separately, a key that does not match it. webpki refuses to parse a v1
+/// leaf, and Sōzu 2.3.2 pairs through webpki, so it refuses both pairs.
 const CERT_V1: &str = include_str!("fixtures/cert_v1.pem");
 const KEY_V1_MATCH: &str = include_str!("fixtures/key_v1_match.pem");
 const KEY_V1_OTHER: &str = include_str!("fixtures/key_v1_other.pem");
 /// `cert_a`'s key again, but the certificate carries the public point in
 /// **compressed** form (`03` prefix; `openssl ec -conv_form compressed`).
-/// ring's ECDSA verifier takes only the uncompressed `04` form, so this leaf
-/// cannot be paired the way a handshake pairs it — and Sōzu loads it anyway.
+/// ring derives only the uncompressed `04` form from the key, so Sōzu 2.3.2's
+/// byte comparison of the two SubjectPublicKeyInfos refuses this leaf.
 const CERT_A_COMPRESSED: &str = include_str!("fixtures/cert_a_compressed.pem");
+/// Three leaves Sōzu 2.3.2 refuses with their own key, each for another reason
+/// `CertifiedKey::keys_match` gives: `cert_b` re-encoded with RSA parameters
+/// absent instead of `NULL` (the SubjectPublicKeyInfo ring derives from the key
+/// differs byte-wise), `cert_b` with the outer signatureAlgorithm no longer
+/// equal to the signed one (webpki: `SignatureAlgorithmMismatch`), and a
+/// `cert_a`-keyed leaf carrying an unknown critical extension (webpki refuses
+/// to parse it). Sōzu 2.2.1 served all three.
+const CERT_B_RSA_SPKI_WITHOUT_NULL: &str =
+    include_str!("fixtures/cert_b_rsa_spki_without_null.pem");
+const CERT_B_SIGALG_MISMATCH: &str = include_str!("fixtures/cert_b_sigalg_mismatch.pem");
+const CERT_A_UNKNOWN_CRITICAL_EXTENSION: &str =
+    include_str!("fixtures/cert_a_unknown_critical_extension.pem");
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
     serde_json::from_value(v).expect("valid k8s object json")
@@ -439,6 +450,54 @@ fn a_regex_path_sozu_cannot_compile_is_skipped_and_reported() {
         }
         other => panic!("expected InvalidPathRegex, got {other:?}"),
     }
+}
+
+#[test]
+fn a_regex_path_that_compiles_only_unanchored_is_refused() {
+    // Sōzu 2.3.2 compiles the rule as written and again wrapped in
+    // `\A(?:…)\z`; an `(?x)` comment then swallows the wrapper's closing
+    // group, so Sōzu refuses a pattern that compiles on its own (measured).
+    let inputs = Inputs {
+        ingresses: arcs(vec![regex_paths_ingress("/a(?x)#comment", "^/api/v[0-9]+")]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert!(
+        matches!(
+            &out.results[0].problems[..],
+            [Problem::InvalidPathRegex { path, .. }] if path == "/a(?x)#comment"
+        ),
+        "{:?}",
+        out.results[0].problems
+    );
+}
+
+#[test]
+fn a_regex_path_nested_one_level_short_of_the_limit_is_refused() {
+    // The `\A(?:…)\z` wrapper adds one group, so a pattern nested right at
+    // regex-syntax's limit compiles on its own and fails once wrapped.
+    let deep = format!("/{}a{}", "(".repeat(249), ")".repeat(249));
+    let inputs = Inputs {
+        ingresses: arcs(vec![regex_paths_ingress(&deep, "^/api/v[0-9]+")]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert!(
+        matches!(
+            &out.results[0].problems[..],
+            [Problem::InvalidPathRegex { .. }]
+        ),
+        "{:?}",
+        out.results[0].problems
+    );
 }
 
 #[test]
@@ -1000,52 +1059,54 @@ fn key_belonging_to_another_certificate_is_rejected() {
 }
 
 #[test]
-fn a_mismatched_key_is_caught_even_on_an_x509v1_leaf_webpki_would_reject() {
-    // The pairing check must not depend on webpki: it rejects a v1 leaf
-    // before looking at the key, and Sōzu (x509-parser) loads and serves such
-    // a certificate, so a mismatch here has to be caught against the public
-    // key Sōzu's own parser yields — not swallowed as "could not compare".
-    assert_eq!(
-        assert_invalid_certificate(CERT_V1, KEY_V1_OTHER),
-        "tls.key does not match tls.crt"
-    );
+fn an_x509v1_leaf_is_refused_whatever_the_key() {
+    // Sōzu 2.3.2 pairs with `CertifiedKey::keys_match`, which parses the leaf
+    // with webpki first; webpki refuses a v1 certificate, so Sōzu refuses the
+    // `AddCertificate` (measured) even when the key matches.
+    for key in [KEY_V1_MATCH, KEY_V1_OTHER] {
+        assert_eq!(
+            assert_invalid_certificate(CERT_V1, key),
+            "tls.crt cannot be paired with tls.key: invalid peer certificate: \
+             Other(OtherError(UnsupportedCertVersion))"
+        );
+    }
 }
 
 #[test]
-fn a_matching_x509v1_pair_still_loads() {
-    // ...and the same permissive parsing must accept a v1 certificate whose
-    // key does match, exactly as Sōzu would.
-    let inputs = Inputs {
-        ingresses: arcs(vec![ingress_tls()]),
-        services: arcs(vec![web_service()]),
-        endpointslices: arcs(vec![web_slice()]),
-        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_V1, KEY_V1_MATCH)]),
-        ..Default::default()
-    };
-    let out = build(&BuildConfig::default(), &inputs);
-    assert_eq!(out.ir.certificates.len(), 1, "a valid v1 pair must load");
-    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+fn a_leaf_sozu_cannot_pair_with_its_own_key_is_refused() {
+    for (crt, key, reason) in [
+        (
+            CERT_B_RSA_SPKI_WITHOUT_NULL,
+            KEY_B,
+            "tls.key does not match tls.crt",
+        ),
+        (
+            CERT_B_SIGALG_MISMATCH,
+            KEY_B,
+            "tls.crt cannot be paired with tls.key: invalid peer certificate: \
+             Other(OtherError(SignatureAlgorithmMismatch))",
+        ),
+        (
+            CERT_A_UNKNOWN_CRITICAL_EXTENSION,
+            KEY_A,
+            "tls.crt cannot be paired with tls.key: invalid peer certificate: \
+             Other(OtherError(UnsupportedCriticalExtension))",
+        ),
+    ] {
+        assert_eq!(assert_invalid_certificate(crt, key), reason);
+    }
 }
 
 #[test]
-fn a_compressed_ec_point_certificate_loads_as_it_does_in_sozu() {
-    // The pairing check signs with the key and verifies against the leaf's
-    // public key through ring, which only takes an uncompressed (`04`) EC
-    // point. A leaf carrying a compressed point is valid, Sōzu loads it, and
-    // TLS clients decompress it — so refusing it here would be stricter than
-    // the data plane. It is admitted unpaired: the matching key loads, and so
-    // does a foreign one, which is exactly what Sōzu does with that pair.
+fn a_compressed_ec_point_certificate_is_refused() {
+    // ring derives the uncompressed (`04`) SubjectPublicKeyInfo from the key
+    // and `keys_match` compares it with the leaf's byte for byte, so Sōzu
+    // 2.3.2 refuses a compressed-point leaf even with its own key (measured).
     for key in [KEY_A, KEY_B] {
-        let inputs = Inputs {
-            ingresses: arcs(vec![ingress_tls()]),
-            services: arcs(vec![web_service()]),
-            endpointslices: arcs(vec![web_slice()]),
-            secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A_COMPRESSED, key)]),
-            ..Default::default()
-        };
-        let out = build(&BuildConfig::default(), &inputs);
-        assert_eq!(out.ir.certificates.len(), 1, "compressed point must load");
-        assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+        assert_eq!(
+            assert_invalid_certificate(CERT_A_COMPRESSED, key),
+            "tls.key does not match tls.crt"
+        );
     }
 }
 

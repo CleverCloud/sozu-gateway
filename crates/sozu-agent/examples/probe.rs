@@ -164,6 +164,7 @@ fn main() -> Result<()> {
         sticky_id: None,
         load_balancing_parameters: None,
         backup: None,
+        unix_path: None,
     };
     apply(
         &mut channel,

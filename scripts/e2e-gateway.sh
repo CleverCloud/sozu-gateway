@@ -3,8 +3,9 @@
 # (header modifier, request redirect). Applies the shipped examples under
 # examples/api-gateway/, so it also validates those manifests.
 #
-# URLRewrite is intentionally not exercised: it is reported as unsupported
-# (Sōzu's rewrite_host rewrites the backend authority, not the forwarded Host).
+# URLRewrite is intentionally not exercised: it is reported as unsupported and
+# not wired (a literal path rewrite drops the query string, and rewrite_host
+# sends the backend two Host lines; see PROTOCOL.md §13).
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 

@@ -36,7 +36,7 @@ image:
     pullPolicy: IfNotPresent
   sozu:
     repository: clevercloud/sozu
-    tag: "2.2.1"
+    tag: "2.3.2"
     pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -93,12 +93,15 @@ controller:
   # timed is the failed reconnect that follows it. Size alerts on the measured
   # figures, not on timeout+5.
   #
-  # Measured across two upgrades of a managed cluster (1.34->1.35, 1.35->1.36):
-  # with the default, 17.1% and 14.7% of fresh HTTP requests through the gateway
-  # failed during node replacement, all HTTP 504 from Sozu against backends that
-  # had already moved. At 60 both runs measured 0.000%, in every window, with no
-  # watch errors. The cost is one watch reconnect per watch per minute, resumed
-  # from the stored resourceVersion — not a re-LIST.
+  # Measured across two upgrades of a managed cluster (1.34->1.35, 1.35->1.36),
+  # on Sozu 2.2.1: with the default, 17.1% and 14.7% of fresh HTTP requests
+  # through the gateway failed during node replacement, all HTTP 504 from Sozu
+  # against backends that had already moved. At 60 both runs measured 0.000%,
+  # in every window, with no watch errors. Sozu 2.3 fails a timed-out connect
+  # over to another backend, so there the same blindness is expected to show as
+  # latency bursts and 503s instead (not measured); the bound is needed either
+  # way. The cost is one watch reconnect per watch per minute, resumed from the
+  # stored resourceVersion — not a re-LIST.
   watchTimeoutSecs: 60
   # Read timeout on the kube client's connections. kube enables HTTP/1 only, so
   # this bounds each watch's own connection. It also bounds the blindness, but
@@ -123,12 +126,14 @@ metrics:
   # cluster_id: per-Service request counts, status codes of routed requests,
   # backend response times). Off by default because it can take the gateway
   # down: each Sōzu worker then answers a scrape with every cluster's metrics in
-  # one message, and on Sōzu 2.2.1 a message larger than max_command_buffer_size
-  # (1 638 400 bytes here) wedges that worker for good — no traffic, no
-  # commands, probes still green. The size grows with the Services that have
-  # received traffic: a local run with these buffers wedged somewhere between
-  # 2 000 and 2 500, an order of magnitude rather than a limit to plan against.
-  # See docs/UPGRADING.md before turning it on.
+  # one message, and a message larger than max_command_buffer_size (1 638 400
+  # bytes here) wedges that worker for good — no traffic, no commands, probes
+  # still green. Measured on Sōzu 2.2.1 and still so on 2.3.2, whose message
+  # is about 12% larger (docs/probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt).
+  # The size grows with the Services that have
+  # received traffic: a local run on 2.2.1 with these buffers wedged somewhere
+  # between 2 000 and 2 500, an order of magnitude rather than a limit to plan
+  # against. See docs/UPGRADING.md before turning it on.
   perCluster: false
   serviceMonitor:
     enabled: false        # requires the Prometheus Operator (monitoring.coreos.com)
@@ -209,24 +214,28 @@ exposure:
 # Sōzu data-plane sidecar.
 sozu:
   workerCount: 2
-  # Stopping the proxy on purpose, because it will not stop itself. Sōzu
-  # registers no signal handler, and a signal with no handler is discarded when
-  # it reaches PID 1 of a container — so on an ordinary Pod deletion the proxy
-  # keeps running until the grace period expires and the kubelet SIGKILLs it,
-  # losing the response to every request still in flight. `sozu shutdown` over
-  # the command socket is the real graceful stop, and a preStop hook is the only
-  # place left to call it from.
+  # Stopping the proxy on purpose, after the Pod has left the Service. Since
+  # Sōzu 2.3.0 the kubelet's SIGTERM soft-stops it on its own, but at once: the
+  # listeners close while kube-proxy, the CNI or an external load balancer
+  # still send it new connections, which are then refused. The preStop hook
+  # waits `delaySeconds` first, then runs `sozu shutdown` over the command
+  # socket, the same soft stop. (Sōzu 2.2.x registered no signal handler, so
+  # there SIGTERM did nothing and the hook was the only graceful stop at all.)
   #
-  # What it actually drains: HTTP/1 exchanges in progress, and HTTP/2 streams.
-  # TCPRoute and UDPRoute sessions, WebSockets, TLS handshakes still in progress
+  # What it actually drains: HTTP/1 exchanges in progress, for the whole budget.
+  # HTTP/2 streams are force-closed 5 s into the soft stop (Sōzu's default
+  # h2_graceful_shutdown_deadline_seconds, not set here; measured on 2.2.1 and
+  # 2.3.2). TCPRoute and UDPRoute sessions, WebSockets, TLS handshakes still in progress
   # and idle keep-alives are cut at the first tick after the delay — for those
   # tenants `gracePeriodSeconds` buys nothing, and only `delaySeconds` moves when
   # the cut happens.
   drain:
     # Set false when replacing the Sōzu image with one that has no shell: the
-    # hook would then fail on every deletion and the Pod would wait out the grace
-    # period regardless, which is worse than not having it. With the hook off the
-    # grace period is left at Kubernetes' own default.
+    # hook would then fail on every deletion. With the hook off the grace period
+    # is left at Kubernetes' own default, and on Sōzu 2.3 a Pod deletion is fast:
+    # SIGTERM soft-stops at once, in-flight HTTP/1 requests still drain, but the
+    # listeners close before the endpoint removal has propagated, so new
+    # connections are refused meanwhile — the delay below is what is lost.
     enabled: true
     # Wait before stopping, so the Pod is out of the Service's endpoints before
     # the proxy stops accepting. Endpoint withdrawal races preStop; without this
@@ -240,8 +249,9 @@ sozu:
     # depend on one.
     delaySeconds: 5
     # Ceiling for the whole sequence: the delay above, then draining whatever is
-    # still in flight. Must stay above `delaySeconds` — the kubelet SIGKILLs when
-    # it expires, which is the outcome this exists to avoid.
+    # still in flight. Must stay above `delaySeconds`. When it expires the kubelet
+    # sends SIGTERM, which on Sōzu 2.3 hard-stops workers still draining, and
+    # SIGKILL follows — the outcome this exists to avoid.
     #
     # It does not bound a long-lived exchange. A streaming response re-arms
     # Sōzu's back timeout on every byte, and a slow upload can hold until its
@@ -268,13 +278,21 @@ sozu:
   # reach maxBuffers x 16 KiB per worker — ~315 MiB at 20000, ~630 MiB for the
   # Pod's two default workers — at that many concurrent connections. That is
   # not the process ceiling: TLS sessions and other per-connection state live
-  # outside the pool, so leave headroom on top. Size `resources.sozu` against
+  # outside the pool, as do Sōzu 2.3's idempotent-request replay captures (at
+  # most 512 x 16 400 bytes, ~8.4 MB carried and up to ~16.8 MB allocated per
+  # worker; at 20000 buffers that cap is what binds) and the kernel receive
+  # buffer a stalled HTTP/2 upload holds under the 16 MiB connection window
+  # (~6.25 MiB at 100 streams, ~1 MiB on 2.2.1) — read from the source, not
+  # measured — so leave headroom on top. Size `resources.sozu` against
   # your real peak. Empty or removed renders 20000, never Sōzu's 1000.
   maxBuffers: 20000
   # Default cap on simultaneous connections from one source IP to one backend
   # Service port (Sōzu counts per (Service port, client IP), per worker); a
   # Service overrides it with the `sozu.io/max-connections-per-ip` annotation. Over the
-  # cap an HTTP request is answered 429 and a TCPRoute session is closed. 0 is
+  # cap an HTTP request is answered 429 and a TCPRoute session is closed. Neither
+  # this nor the annotation applies to a UDPRoute: Sōzu 2.3 would turn a UDP
+  # cluster's cap into a silent per-source flow cap counting every client port
+  # as a flow, so the controller sends none there. 0 is
   # unlimited and Sōzu's own default. The IP is the client's only while the
   # Service preserves it (`externalTrafficPolicy: Local`, below); under
   # `Cluster` clients arrive as node IPs and share one budget.
@@ -328,24 +346,29 @@ sozu:
   # its own fixed budgets. Turning `connect` here changes nothing for a database
   # behind a TCPRoute.
   timeouts:
-    # How long Sōzu waits for a backend to accept a connection. Sōzu's own
-    # default is 3s, which is longer than most callers will wait: a backend that
-    # has gone silent burns the caller's whole budget and the failure is
-    # recorded on the client as a hang, with nothing proxy-side to attribute it
-    # to — no 504, no `backend_timeout` in the access log, no `http.status.504`.
+    # How long Sōzu waits for a backend to accept a connection, on the HTTP and
+    # HTTPS listeners. Since Sōzu 2.3.0 a connect that times out is a failed
+    # connect: the backend enters back-off and the request moves to a backend it
+    # has not tried, up to 5 attempts; once all fail the answer is 503. So this
+    # value is what each attempt waits before failing over, what every request
+    # landing on a dead backend pays each time its back-off window reopens, and
+    # what re-pins a sticky client; a Service with one ready backend gets
+    # immediate 503s while that backend is in back-off. HTTP/1 failover stops at
+    # the front timeout (a 504 then); on HTTP/2 the bound is attempts x connect,
+    # 10s here. (On Sōzu 2.2.x a timeout was a 504, with no failover and no
+    # back-off.)
     #
-    # 2s rather than 1s, deliberately. Linux sends its first SYN retransmit at
-    # 1s, so a 1s budget cannot absorb even a single lost SYN — routine enough
-    # during pod churn, while conntrack and the CNI's maps catch up. And the
-    # cost of being wrong is not a slow success: a connect that times out is
-    # answered 504 with no retry and no failover, and it does not even mark the
-    # backend down, because that path never records a connection failure. 2s
-    # still lands inside a typical caller's patience while leaving room for one
-    # retransmit.
+    # 2s rather than Sōzu's own 3s, so a silent backend is failed over (or
+    # answered) inside a caller's patience, and rather than 1s, deliberately:
+    # Linux sends its first SYN retransmit at 1s, so a 1s budget cannot absorb
+    # even a single lost SYN — routine during pod churn, while conntrack and the
+    # CNI's maps catch up — and on 2.3 every such timeout also backs the backend
+    # off and re-pins its sticky clients.
     #
-    # None of this is failover. Sōzu retries another backend only when a
-    # connection is actively refused. Raise this if a legitimately slow-to-accept
-    # backend — a cold runtime, a saturated accept queue — starts being cut off.
+    # Layer-4 is unchanged on 2.3 (see above): a TCPRoute connect that times out
+    # still closes the session, with no failover and no back-off. Raise this if a
+    # legitimately slow-to-accept backend — a cold runtime, a saturated accept
+    # queue — keeps being failed over.
     connect: 2
     # Inactivity on the client-facing socket (Sōzu default 60).
     front: null
@@ -377,7 +400,10 @@ resources:
   # Sōzu's memory grows with concurrent connections. Its buffer pool alone can
   # reach sozu.maxBuffers x 16 KiB per worker (~315 MiB each at the default
   # 20000), held once reached; TLS sessions and other connection state come on
-  # top. A memory limit below workerCount x that pool budget, plus runtime
+  # top, and so do Sōzu 2.3's replay captures (up to ~16.8 MB allocated per
+  # worker) and HTTP/2 receive windows (~6.25 MiB of kernel buffer per stalled
+  # upload at 100 streams; both read from the source). A memory limit below
+  # workerCount x that pool budget, plus runtime
   # headroom, turns a connection surge into an OOM kill instead of refused
   # connections.
   sozu:

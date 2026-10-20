@@ -81,6 +81,7 @@ fn listing(sock: &str, suffix: &str) -> Result<String> {
             https: false,
             tcp: false,
             domain: None,
+            cluster_id: None,
         }),
     )?;
     let Some(ResponseContent {

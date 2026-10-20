@@ -1,0 +1,107 @@
+metrics_probe against docker clevercloud/sozu:2.3.2 (sozu 2.3.2), 2026-10-19: `docker run --rm
+--network host --user 1000:1000`, the socket directory bind-mounted from the host, 2 workers,
+default metrics detail, one HTTP listener; the probe's own backend on loopback. The probe is the
+in-repo crates/sozu-agent/examples/metrics_probe.rs at 45b04b2, built --release against
+sozu-command-lib 2.3.2. Same runs as metrics-no-clusters_sozu-2.2.1_2026-09-23.txt Runs 1 and 2;
+its Runs 3-5 (2000-3000 clusters at the chart's buffers) were not repeated. Each container was
+removed after its run. The `[run]` lines are the harness's: `docker top` before the probe and 5 s
+after it exited, then the container's log, capped at 20 MB by the json-file driver and read while
+a wedged worker was still writing to it (so the two counts were taken at different moments).
+
+Config, with the buffers each run names:
+
+command_socket = "/run/sozu/sozu.sock"
+command_buffer_size = <per run>
+max_command_buffer_size = <per run>
+log_level = "info"
+log_target = "stdout"
+worker_count = 2
+worker_automatic_restart = true
+handle_process_affinity = false
+buffer_size = 16_393
+max_connections = 500
+max_buffers = 1000
+pid_file_path = "/run/sozu/sozu.pid"
+activate_listeners = true
+
+[[listeners]]
+protocol = "http"
+address = "127.0.0.1:38580"
+
+Run 1: the chart's buffers (command_buffer_size 163_840, max_command_buffer_size 1_638_400),
+PROBE_CLUSTERS=20 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1
+
+[run] image=clevercloud/sozu:2.3.2 (sozu 2.3.2 ()) command_buffer_size=163840 max_command_buffer_size=1638400 PROBE_CLUSTERS=20 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1
+[run] processes before the probe:
+[run]   PID                 %CPU                ELAPSED             COMMAND
+[run]   775685              3.0                 00:01               /usr/local/bin/sozu start -c /etc/sozu/config.toml
+[run]   775697              0.0                 00:01               /proc/self/fd/12 worker --id 0 --fd 9 --scm 11 --configuration-state-fd 7 --command-buffer-size 163840 --max-command-buffer-size 1638400
+[run]   775699              0.0                 00:01               /proc/self/fd/14 worker --id 1 --fd 11 --scm 13 --configuration-state-fd 7 --command-buffer-size 163840 --max-command-buffer-size 1638400
+[setup] programmed 20 clusters + 1 with a refusing backend
+[traffic] before queries: 120/120 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 230.683µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3310
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 3.134204ms
+[full] clusters=21 backends=0 workers=0 json_bytes=42833
+[full]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (25): {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_header_time", "sozu_backend_header_time_histogram", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {"sozu_access_logs_count", "sozu_backend_connection_time", "sozu_backend_connection_time_histogram", "sozu_backend_connections_error", "sozu_backend_header_time", "sozu_backend_header_time_histogram", "sozu_backend_response_time", "sozu_backend_response_time_histogram", "sozu_bytes_in", "sozu_bytes_out", "sozu_cluster_available_backends", "sozu_cluster_total_backends", "sozu_connections_per_backend", "sozu_frontend_matching_time", "sozu_frontend_matching_time_histogram", "sozu_http_503_errors", "sozu_http_status_200", "sozu_http_status_2xx", "sozu_http_status_503", "sozu_http_status_5xx", "sozu_request_time", "sozu_request_time_histogram", "sozu_requests", "sozu_service_time", "sozu_service_time_histogram"}
+[traffic] after full query: 10/10 x 200
+[run] probe exit 0
+[run] processes 5 s after the probe:
+[run]   PID                 %CPU                ELAPSED             COMMAND
+[run]   775685              0.6                 00:06               /usr/local/bin/sozu start -c /etc/sozu/config.toml
+[run]   775697              0.1                 00:06               /proc/self/fd/12 worker --id 0 --fd 9 --scm 11 --configuration-state-fd 7 --command-buffer-size 163840 --max-command-buffer-size 1638400
+[run]   775699              0.1                 00:06               /proc/self/fd/14 worker --id 1 --fd 11 --scm 13 --configuration-state-fd 7 --command-buffer-size 163840 --max-command-buffer-size 1638400
+[run] container log lines (log capped at 20 MB): 258
+[run] lines matching 'on the channel': 0
+[run] first such lines:
+
+Run 2: buffers lowered to scale the wedge down (command_buffer_size 16_384,
+max_command_buffer_size 40_960), PROBE_CLUSTERS=80 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1.
+The container was removed right after the last [run] line.
+
+[run] image=clevercloud/sozu:2.3.2 (sozu 2.3.2 ()) command_buffer_size=16384 max_command_buffer_size=40960 PROBE_CLUSTERS=80 PROBE_REQUESTS=6 PROBE_FULL_QUERY=1
+[run] processes before the probe:
+[run]   PID                 %CPU                ELAPSED             COMMAND
+[run]   778249              2.3                 00:01               /usr/local/bin/sozu start -c /etc/sozu/config.toml
+[run]   778263              0.0                 00:01               /proc/self/fd/12 worker --id 0 --fd 9 --scm 11 --configuration-state-fd 7 --command-buffer-size 16384 --max-command-buffer-size 40960
+[run]   778264              0.0                 00:01               /proc/self/fd/14 worker --id 1 --fd 11 --scm 13 --configuration-state-fd 7 --command-buffer-size 16384 --max-command-buffer-size 40960
+[setup] programmed 80 clusters + 1 with a refusing backend
+[traffic] before queries: 480/480 x 200
+[traffic] unknown host -> Some("404"), refusing backend -> Some("503")
+[no_clusters] answered in 344.344µs
+[no_clusters] clusters=0 backends=0 workers=0 json_bytes=3309
+[no_clusters]   proxy (44): {"sozu_accept_queue_connections", "sozu_accept_queue_wait_time", "sozu_accept_queue_wait_time_histogram", "sozu_access_logs_count", "sozu_back_bytes_in", "sozu_back_bytes_out", "sozu_backend_connections", "sozu_backend_pool_miss", "sozu_backend_pool_size", "sozu_buffer_capacity", "sozu_buffer_in_use", "sozu_buffer_usage_percent", "sozu_bytes_in", "sozu_bytes_out", "sozu_client_connect_per_source_bucket_167", "sozu_client_connections", "sozu_client_connections_max", "sozu_client_connections_percent", "sozu_epoll_time", "sozu_epoll_time_histogram", "sozu_event_loop_time", "sozu_event_loop_time_histogram", "sozu_h2_signal_writable_rearmed_default_answer", "sozu_http_404_errors", "sozu_http_active_requests", "sozu_http_e2e_http11", "sozu_http_failed_backend_matching", "sozu_http_requests", "sozu_http_status_404", "sozu_http_status_4xx", "sozu_http_x_request_id_generated", "sozu_listener_accepted_http", "sozu_listener_accepted_total", "sozu_process_uptime_seconds", "sozu_protocol_http", "sozu_request_time", "sozu_request_time_histogram", "sozu_server_live", "sozu_service_time", "sozu_service_time_histogram", "sozu_slab_accept_threshold_percent", "sozu_slab_capacity", "sozu_slab_entries", "sozu_slab_usage_percent"}
+[no_clusters]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[no_clusters]   cluster (0): {}
+[no_clusters]   backend (0): {}
+[traffic] after no_clusters query: 10/10 x 200
+[full] answered in 10.009642127s
+[full] clusters=0 backends=0 workers=0 json_bytes=296
+[full]   proxy (0): {}
+[full]   main (5): {"sozu_config_cluster_added", "sozu_config_http_frontend_added", "sozu_configuration_backends", "sozu_configuration_clusters", "sozu_configuration_frontends"}
+[full]   cluster (0): {}
+[full]   backend (0): {}
+[full] names cluster-labelled or proxy-level only in full: {}
+[traffic] after full query: 0/10 x 200
+[run] probe exit 0
+[run] processes 5 s after the probe:
+[run]   PID                 %CPU                ELAPSED             COMMAND
+[run]   778249              0.0                 01:08               /usr/local/bin/sozu start -c /etc/sozu/config.toml
+[run]   778263              91.1                01:07               /proc/self/fd/12 worker --id 0 --fd 9 --scm 11 --configuration-state-fd 7 --command-buffer-size 16384 --max-command-buffer-size 40960
+[run]   778264              91.0                01:07               /proc/self/fd/14 worker --id 1 --fd 11 --scm 13 --configuration-state-fd 7 --command-buffer-size 16384 --max-command-buffer-size 40960
+[run] container log lines (log capped at 20 MB): 42799
+[run] lines matching 'on the channel': 46855
+[run] first such lines:
+[log]   2026-10-19T20:22:18.684839Z 1792441338684839628 8 ERROR WRK-00	Could not write message 0-247-0-0 on the channel: message (63984 bytes) too large for back buffer capacity (16384 bytes, max 40960 bytes)
+[log]   2026-10-19T20:22:18.685023Z 1792441338685023147 8 ERROR WRK-00	Could not write message 0-247-0-0 on the channel: message (63984 bytes) too large for back buffer capacity (16384 bytes, max 40960 bytes)
+[log]   2026-10-19T20:22:18.685205Z 1792441338685205803 8 ERROR WRK-00	Could not write message 0-247-0-0 on the channel: message (63984 bytes) too large for back buffer capacity (16384 bytes, max 40960 bytes)

@@ -5,7 +5,9 @@
 #
 # It also exercises the conflict path: a second TCPRoute claiming the same port
 # must lose, say so on its own status, and — the part that matters — leave every
-# other route serving.
+# other route serving. Last, each route is re-pointed at another Service, whose
+# old cluster leaves in the same reconcile: the new one must answer, and no
+# reconcile may fail.
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 
@@ -20,9 +22,9 @@ UDP_PORT=9001
 # mapping onto Sōzu's in-pod bind — which a port-forward to the pod bypasses.
 l4_probe() {
   local proto="$1" port="$2" payload="$3" target input=-
-  # Sōzu 2.2.0/2.2.1 closes TCP sessions on a client half-close. Keep the
-  # write side open after printf finishes so the echo can return; -T5 still
-  # bounds the probe if no reply arrives.
+  # Sōzu (2.2.0 through 2.3.2, upstream sozu#1840) closes TCP sessions on a
+  # client half-close. Keep the write side open after printf finishes so the
+  # echo can return; -T5 still bounds the probe if no reply arrives.
   if [ "$proto" = tcp ]; then input=-,ignoreeof; fi
   target="socat -T5 $input $( [ "$proto" = udp ] && echo UDP-SENDTO || echo TCP ):${RELEASE}.${NS}:${port}"
   printf '%s\n' "$payload" | kubectl -n "$DEMO_NS" run "probe-${proto}-$RANDOM" \
@@ -131,5 +133,101 @@ assert_eq "$attached" "2" "both routes count as attached"
 # reconcile down with it, so unrelated traffic keeps flowing.
 assert_eq "$(l4_probe tcp "$TCP_PORT" still-serving)" "still-serving" \
   "traffic survives a conflicting route"
+
+echo "==> re-pointing each route at another Service retires the old cluster cleanly"
+# e2e.sh's Ingress switch, at layer 4. Since Sōzu 2.3.0 a RemoveCluster also
+# drops the cluster's frontends, and the diff leaves their removal out: without
+# the translator spelling it out again, the moved frontend is added while the
+# old cluster still holds the address, and every reconcile fails with the old
+# Service still serving (measured on Sōzu 2.3.2, TCP and UDP alike). The
+# replacement backends prefix each echoed line with `b`, so a reply says which
+# Service sent it.
+kubectl apply -f - >/dev/null <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tcp-b
+  namespace: $DEMO_NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: echo-tcp-b }
+  template:
+    metadata:
+      labels: { app: echo-tcp-b }
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["TCP-LISTEN:${TCP_PORT},fork,reuseaddr", "SYSTEM:while read l; do echo b \$l; done"]
+          ports:
+            - name: tcp
+              containerPort: ${TCP_PORT}
+          readinessProbe:
+            tcpSocket:
+              port: tcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-tcp-b
+  namespace: $DEMO_NS
+spec:
+  selector: { app: echo-tcp-b }
+  ports:
+    - name: tcp
+      port: ${TCP_PORT}
+      targetPort: tcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-udp-b
+  namespace: $DEMO_NS
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: echo-udp-b }
+  template:
+    metadata:
+      labels: { app: echo-udp-b }
+    spec:
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.0
+          args: ["UDP-RECVFROM:${UDP_PORT},fork", "SYSTEM:while read l; do echo b \$l; done"]
+          ports:
+            - name: udp
+              containerPort: ${UDP_PORT}
+              protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-udp-b
+  namespace: $DEMO_NS
+spec:
+  selector: { app: echo-udp-b }
+  ports:
+    - name: udp
+      port: ${UDP_PORT}
+      protocol: UDP
+      targetPort: udp
+EOF
+kubectl rollout status deploy/echo-tcp-b -n "$DEMO_NS" --timeout 120s
+kubectl rollout status deploy/echo-udp-b -n "$DEMO_NS" --timeout 120s
+# The intruder resolves echo-udp too, which would keep that Service's cluster
+# in the desired state through the swap: release it first.
+kubectl -n "$DEMO_NS" delete tcproute/echo-tcp-intruder >/dev/null
+for route in tcproute/echo-tcp udproute/echo-udp; do
+  kubectl -n "$DEMO_NS" patch "$route" --type=json --field-manager=e2e-swap \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/rules/0/backendRefs/0/name\",\"value\":\"${route#*/}-b\"}]" \
+    >/dev/null
+done
+# The first patch's time bounds both.
+swapped_at="$(changed_at "$DEMO_NS" tcproute/echo-tcp e2e-swap)"
+wait_for "b swap-tcp" "TCPRoute answers from echo-tcp-b" l4_probe tcp "$TCP_PORT" swap-tcp
+wait_for "b swap-udp" "UDPRoute answers from echo-udp-b" l4_probe udp "$UDP_PORT" swap-udp
+assert_no_failed_reconcile_since "$swapped_at" "no reconcile failed since the swap"
 
 echo "==> gateway l4 e2e DONE"

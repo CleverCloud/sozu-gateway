@@ -1,6 +1,6 @@
 ---
 source: crates/translator/tests/golden.rs
-
+assertion_line: 150
 expression: "tr::ir_to_requests(&sample_ir())"
 ---
 [
@@ -22,7 +22,14 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "max_connections_per_ip": null,
         "retry_after": null,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   },
@@ -44,7 +51,14 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "max_connections_per_ip": null,
         "retry_after": null,
         "health_check": null,
-        "udp": null
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
       }
     }
   },
@@ -65,7 +79,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "load_balancing_parameters": {
           "weight": 5
         },
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -84,7 +99,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -103,7 +119,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         },
         "sticky_id": null,
         "load_balancing_parameters": null,
-        "backup": null
+        "backup": null,
+        "unix_path": null
       }
     }
   },
@@ -159,7 +176,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -191,7 +209,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   },
@@ -223,7 +242,8 @@ expression: "tr::ir_to_requests(&sample_ir())"
         "rewrite_path": null,
         "rewrite_port": null,
         "headers": [],
-        "hsts": null
+        "hsts": null,
+        "header_predicates": []
       }
     }
   }

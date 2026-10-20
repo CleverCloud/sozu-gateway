@@ -235,3 +235,35 @@ wait_for() {
     sleep 1
   done
 }
+
+# When the apiserver recorded field manager $3's last change to object $2 in
+# namespace $1: RFC 3339, rounded down to the second, so a `kubectl logs
+# --since-time` read from it can only start early, never late. The cluster's
+# clock, not this machine's, which may run ahead of the nodes' and hide the
+# very lines the caller looks for.
+changed_at() {
+  kubectl -n "$1" get "$2" --show-managed-fields \
+    -o jsonpath="{.metadata.managedFields[?(@.manager==\"$3\")].time}"
+}
+
+# Assert the controller logged no failed reconcile since $1 (see `changed_at`),
+# or fail the script with the failures it did log. Traffic reaching the new
+# backend does not prove it on its own: a batch can fail after the request
+# that moved the route, which then serves while every reconcile keeps failing.
+assert_no_failed_reconcile_since() {
+  local log failures
+  if ! log="$(kubectl logs -n "$NS" deploy/"$RELEASE" -c controller --since-time="$1" 2>&1)"; then
+    echo "  FAIL $2: could not read the controller log since '$1':"
+    sed 's/^/       /' <<<"$log"
+    exit 1
+  fi
+  # A here-string, not a pipe: under pipefail an early-exiting `grep -q` can
+  # fail the writer and read as "no match".
+  failures="$(grep 'reconcile failed' <<<"$log" || true)"
+  if [ -n "$failures" ]; then
+    echo "  FAIL $2: the controller logged a failed reconcile since $1:"
+    sed 's/^/       /' <<<"$failures"
+    exit 1
+  fi
+  echo "  OK   $2 (since $1)"
+}

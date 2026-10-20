@@ -145,10 +145,11 @@ struct Args {
     /// each Sōzu worker then answers a scrape with every cluster's and
     /// backend's metrics in one message, and a message larger than Sōzu's
     /// `max_command_buffer_size` (the chart sets 1 638 400 bytes) wedges that
-    /// worker for good on Sōzu 2.2.1 — no traffic, no commands, green probes.
-    /// It grows with the clusters that have seen traffic: a local run with
-    /// the chart's buffers wedged between 2 000 and 2 500, an order of
-    /// magnitude rather than a limit. See docs/UPGRADING.md.
+    /// worker for good — no traffic, no commands, green probes (measured on
+    /// Sōzu 2.2.1, and still so on 2.3.2). It grows with the clusters that
+    /// have seen traffic: a local run on 2.2.1 with the chart's buffers wedged
+    /// between 2 000 and 2 500, an order of magnitude rather than a limit,
+    /// and 2.3.2's message is about 12% larger. See docs/UPGRADING.md.
     #[arg(long, env = "SOZU_GW_METRICS_PER_CLUSTER")]
     metrics_per_cluster: bool,
     /// File on the shared volume where the last-applied state is persisted, so a
