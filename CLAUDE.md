@@ -272,12 +272,53 @@ fails closed and is reported. Gateway listeners map to the static listeners by p
 declare the **advertised** ports (default `80`/`443`, `--gateway-http(s)-port` — the Service's
 client-facing ports, wired by the chart; a mismatch is rejected with `PortUnavailable`); cross-ns
 refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi-backend split,
-query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated — and
-so are header matches. 2.3.2 has header predicates, but a frontend whose predicates hold
-outranks every unpredicated frontend on the same host, whatever its path or method (measured),
-so a direct mapping misroutes; wiring them needs its own design. The one backend kept as it was
-is a `kubernetes.io/wss` port: reported, but still programmed (see Conventions), because skipping
-it would hand its requests to another rule.
+query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated. The
+one backend kept as it was is a `kubernetes.io/wss` port: reported, but still programmed (see
+Conventions), because skipping it would hand its requests to another rule.
+
+**Header matches (Sōzu ≥ 2.3).** HTTPRoute `matches[].headers` become frontend header predicates
+(`ir::Frontend::header_matches`, kept in Sōzu's canonical order because `HttpFrontend` equality
+is order-sensitive), sent on verbs 66-69 through `RequestType::add_http_frontend` & co — never a
+hand-picked verb: a pre-2.3 worker given the historical one installs the route unguarded. Sōzu
+ranks every frontend whose predicates hold above every frontend without any, whatever the path or
+method, so the builder's `lift_header_matches` copies each plain route that outranks a header
+match under Gateway API precedence (Exact path, longer prefix, method; never a regex path) above
+it, taking the header match's method where the plain route names none (`lifted_copy`: a copy must
+never match a request its header match cannot), at most 64 *added* copies per hostname
+(`HeaderMatchPrecedenceLimit` beyond). That budget bounds the route table, **not the work**: the
+admission is pairwise and replans after each skip, cubic in the header matches of one hostname,
+and header matches that need no copy never touch it. What bounds it is
+`MAX_HEADER_MATCHES_PER_HOSTNAME` (64, `HeaderMatchLimit` beyond, oldest route first so input
+order never decides), per-(listener, hostname) planning, and an admission that re-checks only
+what the last skip changed (debug builds cross-check it against a full scan on small tiers).
+Past the cap one tenant makes one report per skipped match, so reports reach their Ingress or
+route through a `(namespace, name)` index: a scan per report was quadratic in the routes again.
+Don't raise the cap or merge the groups without re-running the adversarial tests. Inside the
+predicated class Sōzu's selection partly follows the order it holds frontends in — and that order
+differs between a fresh batch, an incremental add and a re-forked worker's key-order replay (#80,
+no ordering workaround). So **every pair** of predicated frontends (header matches and copies, a
+copy ranking as the plain route it copies) that one request can meet, to different backends or
+filters, must be ordered the Gateway API's way by `unsettled`'s two order-free outcomes (a regex
+naming the method over any rule that is not one; a regex that cannot match `/` over the root
+prefix),
+or the lower header match is skipped (`HeaderMatchOutranksRoute` / `HeaderMatchOverlap`) — on a
+hostname-less route (first-match list) every such pair is unsettled. This refuses deterministic
+wrongs too: an Exact path beside a prefix with a method. Two copies are weighed against each
+other like any pair: they follow the plain routes' rules but in an insertion order of their own
+(a header-matched root above plain Exact `/foo` and prefix `/foo` is skipped), so header matches
+never leave more to Sōzu's order than the same plain routes already do (#80). "Can meet" is
+conservative (`can_meet`: only disjoint paths, different methods or incompatible values on one
+header keep two apart), so don't loosen it without a measurement. A copy is dropped for a
+frontend holding its Sōzu key only when that frontend is its very match (`same_match`); a regex
+path can spell any key, and then the header match is skipped (`HeaderMatchCopyKeyTaken`). The
+tests replay every order through a model of Sōzu's selection, including a randomized property
+test over overlapping plain routes too. Headers
+Sōzu sets before it routes (`SozuRequestHeaders`, measured) and whatever
+`validate_header_predicate` refuses are reported, not programmed; the two config-dependent ones
+reach the controller as flags the chart renders from the same values as Sōzu's config. The
+agent's settlements and evictions, and the failed-batch replay with its simulation
+(`translator::replay_if_exact`), treat verbs 66-69 as their plain siblings, under a key that
+carries the predicates. See [PROTOCOL.md §14](PROTOCOL.md).
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
 `RequestRedirect` (scheme, status, and hostname/path/port targets since 52cf36e) compile into
@@ -330,8 +371,9 @@ reproduction in [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md) §6, reports in
 the `Selector` implementation, when the suite **aborted in setup** because
 `NamespacesMustBeReady` demands every base Gateway be `Programmed: True` and one of them uses
 `from: Selector`; those rows are conditioned and must never be quoted bare. The profile **cannot
-fully pass** on Sōzu (no per-request weighted splits, no query matching, no HTTP 500; header
-matching is unwired), so don't chase
+fully pass** on Sōzu (no per-request weighted splits, no query matching, no HTTP 500,
+header matches Sōzu can only order by insertion are refused — HTTPRouteHeaderMatching loses three
+of its matches), so don't chase
 the "Conformant" badge — and don't read the recorded failures as regressions.
 `GatewayClass.status.supportedFeatures` is published **empty** on purpose: an entry goes in only
 when a recorded run shows its tests passing. [docs/features.md](docs/features.md) is the
@@ -400,10 +442,11 @@ changes.
   (795b95d) but `Equals` still misses `/p?x`, so `Exact` stays a regex. The compilation
   lives in `ir::PathMatch::sozu_rule` and both the builder's collision key and the translator use
   it, so two spellings of one Sōzu rule are one route everywhere. That collision key is
-  `ir::Frontend::sozu_route_key`, Sōzu's own unescaped `address;hostname;rule[;method]` string
+  `ir::Frontend::sozu_route_key`, Sōzu's own unescaped `address;hostname;rule[;method]` string,
+  plus one `;H{kind}:{name:?}={value:?}` per header predicate since 2.3
   (pinned to `RequestHttpFrontend::to_string()` by a translator test), never a tuple: a regex
-  `/x;GET` and `/x` + `GET` differ as tuples but are one key, and one unarbitrated clash fails
-  every reconcile.
+  `/x;GET` and `/x` + `GET` differ as tuples but are one key — so are a regex spelling a
+  predicate suffix and the predicated route — and one unarbitrated clash fails every reconcile.
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **An SNI name at a listener belongs to one claimant, settled in the builder.** Sōzu serves a
@@ -506,10 +549,11 @@ The library and data-plane image are aligned at 2.3.2 and move together (an `ima
 below 2.3.0 is documented unsupported, not refused). The ICU data, rustls 0.23.46 and
 rustls-pki-types 1.15.1 are held at Sōzu 2.3.2's versions by the lock (see the tenant-input
 bullet). The library redacts certificate and key material from `Debug`. The proto adds fields we
-leave unset (listener `interface`, `AddBackend.unix_path`, frontend `header_predicates`, `Cluster`
-fields 17–23) and verbs 60–75 we never send; `tier()` places the predicate, `silent_close` and
-unix-backend verbs defensively. If the versions diverge again, verify that the wire format still
-agrees before upgrading either side.
+leave unset (listener `interface`, `AddBackend.unix_path`, `Cluster` fields 17–23) and verbs
+60–75 we never send, but for frontend `header_predicates` and their verbs 66–69 (HTTPRoute header
+matches, above); `tier()` places the predicate verbs with the plain ones, and the `silent_close`
+and unix-backend verbs defensively. If the versions diverge again, verify that the wire format
+still agrees before upgrading either side.
 
 What 2.3.x changed that this codebase depends on (upstream commits, first released in 2.3.0
 unless marked): `RemoveCluster` cascades (c2cad338) — re-expanded by the translator, see the diff

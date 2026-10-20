@@ -36,11 +36,11 @@ use std::net::SocketAddr;
 use sozu_command_lib::certificate::{parse_pem, split_certificate_chain};
 use sozu_command_lib::proto::command::{
     request::RequestType, ActivateListener, AddBackend, AddCertificate, CertificateAndKey, Cluster,
-    Header, HeaderPosition, HealthCheckConfig, HealthCheckMode, ListenerType,
-    LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind, RedirectPolicy,
-    RedirectScheme, RemoveCertificate, ReplaceCertificate, Request, RequestHttpFrontend,
-    RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig, UdpAffinityKey,
-    UdpClusterConfig, UdpListenerConfig,
+    Header, HeaderMatchKind, HeaderPosition, HeaderPredicate, HealthCheckConfig, HealthCheckMode,
+    ListenerType, LoadBalancingAlgorithms, LoadBalancingParams, PathRule, PathRuleKind,
+    RedirectPolicy, RedirectScheme, RemoveCertificate, ReplaceCertificate, Request,
+    RequestHttpFrontend, RequestTcpFrontend, RequestUdpFrontend, RulePosition, TcpListenerConfig,
+    UdpAffinityKey, UdpClusterConfig, UdpListenerConfig,
 };
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
@@ -220,17 +220,47 @@ fn frontend_payload(f: &ir::Frontend) -> RequestHttpFrontend {
         path: path_rule(&f.path),
         method: f.method.clone(),
         position,
+        header_predicates: header_predicates(&f.header_matches),
         ..Default::default()
     };
     apply_filters(&mut payload, &f.filters);
     payload
 }
 
+/// A frontend's header matches as Sōzu's predicates, in the canonical order
+/// Sōzu files them under. `HttpFrontend` equality is order-sensitive and
+/// `ConfigState::diff` compares it, so the order is fixed here whatever order
+/// the IR holds them in: a reordering is never a change.
+fn header_predicates(matches: &[ir::HeaderMatch]) -> Vec<HeaderPredicate> {
+    ir::HeaderMatch::canonical(matches.iter().cloned())
+        .into_iter()
+        .map(|m| {
+            let (kind, value) = match m.kind {
+                ir::HeaderMatchKind::Exact(value) => (HeaderMatchKind::Exact, value),
+                ir::HeaderMatchKind::Regex(value) => (HeaderMatchKind::Regex, value),
+            };
+            HeaderPredicate {
+                name: m.name,
+                kind: kind as i32,
+                value: Some(value),
+            }
+        })
+        .collect()
+}
+
+/// The add for a frontend, on the verb Sōzu's own helper picks: a frontend
+/// with header predicates goes out as `Add*FrontendWithHeaderPredicates`
+/// (verbs 66/68), which a worker predating them cannot decode, so it fails
+/// the request instead of installing the route without its guard
+/// (`command.proto` on those verbs; a 2.2.1 data plane never answers one,
+/// `docs/probes/header-matches_sozu-2.2.1_2026-10-19.txt`). `ConfigState::diff`,
+/// which is what `reconcile` applies, builds its requests the same way; this
+/// keeps `ir_to_requests` and its snapshots on the verbs actually sent.
 fn frontend_request(tls: bool, payload: RequestHttpFrontend) -> Request {
     if tls {
-        RequestType::AddHttpsFrontend(payload).into()
+        RequestType::add_https_frontend(payload).into()
     } else {
-        RequestType::AddHttpFrontend(payload).into()
+        RequestType::add_http_frontend(payload).into()
     }
 }
 
@@ -283,7 +313,8 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
 
 /// Frontends deduplicated by the key Sōzu stores them under
 /// ([`ir::Frontend::sozu_route_key`]): the frontend map (HTTP or HTTPS) and the
-/// `;`-joined string of listener, hostname, *compiled* path rule and method.
+/// `;`-joined string of listener, hostname, *compiled* path rule, method and
+/// header predicates.
 /// Sōzu rejects an add on an occupied key, so a duplicate produced by
 /// overlapping objects must not become a hard reconcile failure. Comparing the
 /// compiled rule makes `Exact("/foo")` and a user regex that spells the same

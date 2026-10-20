@@ -7,7 +7,9 @@
 use std::net::SocketAddr;
 
 use sozu_command_lib::proto::command::request::RequestType;
-use sozu_command_lib::proto::command::{LoadBalancingParams, PathRuleKind, Request};
+use sozu_command_lib::proto::command::{
+    LoadBalancingParams, PathRuleKind, Request, RequestHttpFrontend,
+};
 use sozu_command_lib::state::ConfigState;
 use sozu_gw_ir as ir;
 use sozu_gw_translator as tr;
@@ -96,6 +98,33 @@ fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir:
         tls,
         listener: addr(if tls { "0.0.0.0:443" } else { "0.0.0.0:80" }),
         filters: ir::FrontendFilters::default(),
+        header_matches: vec![],
+    }
+}
+
+fn exact_header(name: &str, value: &str) -> ir::HeaderMatch {
+    ir::HeaderMatch {
+        name: name.to_string(),
+        kind: ir::HeaderMatchKind::Exact(value.to_string()),
+    }
+}
+
+fn regex_header(name: &str, value: &str) -> ir::HeaderMatch {
+    ir::HeaderMatch {
+        name: name.to_string(),
+        kind: ir::HeaderMatchKind::Regex(value.to_string()),
+    }
+}
+
+/// The payload of an HTTP(S) frontend add, on any of its verbs, and whether
+/// it targets the HTTPS map.
+fn added_frontend(r: &Request) -> Option<(bool, &RequestHttpFrontend)> {
+    match &r.request_type {
+        Some(RequestType::AddHttpFrontend(p))
+        | Some(RequestType::AddHttpFrontendWithHeaderPredicates(p)) => Some((false, p)),
+        Some(RequestType::AddHttpsFrontend(p))
+        | Some(RequestType::AddHttpsFrontendWithHeaderPredicates(p)) => Some((true, p)),
+        _ => None,
     }
 }
 
@@ -427,6 +456,26 @@ fn route_key_matrix() -> Vec<ir::Frontend> {
     let mut catch_all = frontend("*", ir::PathMatch::Prefix("/".into()), "c", false);
     catch_all.cluster_id = None;
     out.push(catch_all);
+    // Header predicates: Sōzu appends them `Debug`-quoted, lowercased and
+    // sorted, so the IR's spelling must survive a quote, a backslash, a tab, a
+    // `;`, a non-ASCII value and an out-of-order, mixed-case list.
+    let predicate_sets = [
+        vec![exact_header("X-Canary", "always")],
+        vec![
+            regex_header("version", "t(wo|hree)"),
+            exact_header("Color", "a\"b\\c\td;e"),
+            exact_header("color", "é"),
+        ],
+        vec![exact_header("x-q", "a;H1:\"y\"=\"z")],
+    ];
+    for path in &paths {
+        for (i, predicates) in predicate_sets.iter().enumerate() {
+            let mut f = frontend("h.example.com", path.clone(), "c", i % 2 == 1);
+            f.method = (i == 2).then(|| "POST".to_string());
+            f.header_matches = predicates.clone();
+            out.push(f);
+        }
+    }
     out
 }
 
@@ -445,11 +494,7 @@ fn the_ir_route_key_is_the_key_sozu_stores_the_frontend_under() {
         let expected = f.sozu_route_key();
         let (https, payload) = reqs
             .iter()
-            .find_map(|r| match &r.request_type {
-                Some(RequestType::AddHttpFrontend(p)) => Some((false, p)),
-                Some(RequestType::AddHttpsFrontend(p)) => Some((true, p)),
-                _ => None,
-            })
+            .find_map(added_frontend)
             .expect("one frontend add");
         assert_eq!(https, expected.https, "frontend map for {f:?}");
         assert_eq!(payload.to_string(), expected.key, "Display key for {f:?}");
@@ -524,6 +569,220 @@ fn a_regex_whose_semicolon_spells_a_method_is_one_route_key() {
         "first claimant of the shared key wins, the distinct key stays: {dump}",
         dump = dump(&reqs)
     );
+}
+
+#[test]
+fn a_regex_whose_semicolon_spells_a_predicate_is_one_route_key() {
+    // Sōzu quotes a predicate's name and value but not the path before it, so
+    // a regex path can spell a predicate suffix and take the key of a real
+    // predicated frontend (measured on 2.3.2: the second add is `Exists`).
+    // Like the method case, the first is kept and the translation never fails.
+    let spelled = frontend(
+        "h.example.com",
+        ir::PathMatch::Regex("/x;H0:\"x-canary\"=\"always\"".into()),
+        "a",
+        false,
+    );
+    let mut predicated = frontend(
+        "h.example.com",
+        ir::PathMatch::Regex("/x".into()),
+        "b",
+        false,
+    );
+    predicated.header_matches = vec![exact_header("X-Canary", "always")];
+    assert_eq!(spelled.sozu_route_key(), predicated.sozu_route_key());
+    let model = ir::Ir {
+        clusters: vec![
+            cluster("a", ir::LbAlgorithm::RoundRobin, false),
+            cluster("b", ir::LbAlgorithm::RoundRobin, false),
+        ],
+        frontends: vec![spelled, predicated],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
+    let adds: Vec<_> = reqs
+        .iter()
+        .filter_map(added_frontend)
+        .map(|(_, p)| (p.cluster_id.clone(), p.to_string()))
+        .collect();
+    assert_eq!(
+        adds,
+        vec![(
+            Some("a".to_string()),
+            "0.0.0.0:80;h.example.com;R/x;H0:\"x-canary\"=\"always\"".to_string()
+        )],
+        "{dump}",
+        dump = dump(&reqs)
+    );
+}
+
+/// A base route and a canary that differs only by a header match, on HTTP and
+/// HTTPS: four frontends on four keys.
+fn canary_ir(canary_cluster: &str) -> ir::Ir {
+    let mut frontends = Vec::new();
+    for tls in [false, true] {
+        frontends.push(frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            "base",
+            tls,
+        ));
+        let mut canary = frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            canary_cluster,
+            tls,
+        );
+        canary.header_matches = vec![
+            regex_header("X-Env", "pre(prod|view)"),
+            exact_header("X-Canary", "always"),
+        ];
+        frontends.push(canary);
+    }
+    ir::Ir {
+        clusters: vec![
+            cluster("base", ir::LbAlgorithm::RoundRobin, false),
+            cluster(canary_cluster, ir::LbAlgorithm::RoundRobin, false),
+        ],
+        frontends,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ir_to_requests_with_header_matches() {
+    // A predicated frontend travels on the verb a pre-2.3 worker cannot decode
+    // (66/68), so a mixed-version fleet fails the request rather than install
+    // the route unguarded; the base route keeps the historical verbs.
+    let reqs = tr::ir_to_requests(&canary_ir("canary"));
+    let verbs: Vec<_> = reqs
+        .iter()
+        .filter(|r| added_frontend(r).is_some())
+        .map(|r| match &r.request_type {
+            Some(RequestType::AddHttpFrontend(_)) => "AddHttpFrontend",
+            Some(RequestType::AddHttpsFrontend(_)) => "AddHttpsFrontend",
+            Some(RequestType::AddHttpFrontendWithHeaderPredicates(_)) => {
+                "AddHttpFrontendWithHeaderPredicates"
+            }
+            Some(RequestType::AddHttpsFrontendWithHeaderPredicates(_)) => {
+                "AddHttpsFrontendWithHeaderPredicates"
+            }
+            _ => unreachable!("filtered on frontend adds"),
+        })
+        .collect();
+    // In `canonicalize`'s order, which sorts a tier on the JSON encoding.
+    assert_eq!(
+        verbs,
+        vec![
+            "AddHttpsFrontend",
+            "AddHttpsFrontendWithHeaderPredicates",
+            "AddHttpFrontend",
+            "AddHttpFrontendWithHeaderPredicates",
+        ],
+        "{dump}",
+        dump = dump(&reqs)
+    );
+    // Canonical order on the wire: the name lowercased, Exact before Regex.
+    let (_, canary) = reqs
+        .iter()
+        .filter_map(added_frontend)
+        .find(|(https, p)| !https && !p.header_predicates.is_empty())
+        .expect("a predicated add");
+    assert_eq!(
+        canary.to_string(),
+        "0.0.0.0:80;app.example.com;P/;H0:\"x-canary\"=\"always\";H1:\"x-env\"=\"pre(prod|view)\""
+    );
+    // The diff from empty sends the same requests: nothing in the snapshot is
+    // a verb `reconcile` would not use.
+    assert_eq!(
+        tr::reconcile(&ir::Ir::default(), &canary_ir("canary")).expect("reconcile"),
+        reqs
+    );
+    insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn a_header_matched_route_is_removed_on_the_predicate_verb() {
+    // An older worker given the historical removal would evict the base route
+    // sharing the rest of the key; the predicate verb is refused instead.
+    let reqs = tr::reconcile(&canary_ir("canary"), &ir::Ir::default()).expect("reconcile");
+    let removals: Vec<_> = reqs
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::RemoveHttpFrontend(p)) => Some(("http", p.header_predicates.len())),
+            Some(RequestType::RemoveHttpsFrontend(p)) => Some(("https", p.header_predicates.len())),
+            Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(p)) => {
+                Some(("http+predicates", p.header_predicates.len()))
+            }
+            Some(RequestType::RemoveHttpsFrontendWithHeaderPredicates(p)) => {
+                Some(("https+predicates", p.header_predicates.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        removals,
+        vec![
+            ("https", 0),
+            ("https+predicates", 2),
+            ("http", 0),
+            ("http+predicates", 2)
+        ],
+        "{dump}",
+        dump = dump(&reqs)
+    );
+}
+
+#[test]
+fn reconcile_retarget_header_matched_route_removes_before_adds() {
+    // The predicates are part of the key, the cluster is not: re-pointing the
+    // canary is a Remove + Add on one key, so the removal has to tier first
+    // exactly as for a plain route — the predicate verbs share its tiers.
+    let reqs = tr::reconcile(&canary_ir("canary"), &canary_ir("canary-v2")).expect("reconcile");
+    let position = |want: fn(&RequestType) -> bool| {
+        reqs.iter()
+            .position(|r| r.request_type.as_ref().is_some_and(want))
+            .expect("request present")
+    };
+    let remove = position(
+        |r| matches!(r, RequestType::RemoveHttpFrontendWithHeaderPredicates(p) if p.cluster_id.as_deref() == Some("canary")),
+    );
+    let add = position(
+        |r| matches!(r, RequestType::AddHttpFrontendWithHeaderPredicates(p) if p.cluster_id.as_deref() == Some("canary-v2")),
+    );
+    assert!(
+        remove < add,
+        "remove at {remove}, add at {add}: {dump}",
+        dump = dump(&reqs)
+    );
+    let removed_key = match &reqs[remove].request_type {
+        Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(p)) => p.to_string(),
+        _ => unreachable!(),
+    };
+    let added_key = match &reqs[add].request_type {
+        Some(RequestType::AddHttpFrontendWithHeaderPredicates(p)) => p.to_string(),
+        _ => unreachable!(),
+    };
+    assert_eq!(removed_key, added_key, "one route key");
+    insta::assert_json_snapshot!(reqs);
+}
+
+#[test]
+fn a_reordered_or_respelled_conjunction_is_no_change() {
+    // `HttpFrontend` equality, which `ConfigState::diff` compares, is
+    // order-sensitive: the translator must send one spelling of a conjunction
+    // or a respelled shadow would remove and re-add a live route.
+    let previous = canary_ir("canary");
+    let mut desired = previous.clone();
+    for f in &mut desired.frontends {
+        f.header_matches.reverse();
+        for m in &mut f.header_matches {
+            m.name = m.name.to_uppercase();
+        }
+    }
+    assert_ne!(previous, desired);
+    let reqs = tr::reconcile(&previous, &desired).expect("reconcile");
+    assert!(reqs.is_empty(), "{dump}", dump = dump(&reqs));
 }
 
 #[test]

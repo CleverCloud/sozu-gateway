@@ -73,6 +73,8 @@ fn is_teardown(request: &Request) -> bool {
                 | RequestType::RemoveBackend(_)
                 | RequestType::RemoveHttpFrontend(_)
                 | RequestType::RemoveHttpsFrontend(_)
+                | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+                | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)
                 | RequestType::RemoveTcpFrontend(_)
                 | RequestType::RemoveUdpFrontend(_)
                 | RequestType::RemoveListener(_)
@@ -121,6 +123,8 @@ fn is_duplicate_add(request: &Request, failure_message: &str) -> bool {
         Some(
             RequestType::AddHttpFrontend(_)
             | RequestType::AddHttpsFrontend(_)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(_)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(_)
             | RequestType::AddTcpFrontend(_)
             | RequestType::AddTcpListener(_)
             | RequestType::AddUdpListener(_),
@@ -208,9 +212,12 @@ fn is_already_gone(request: &Request, failure_message: &str) -> bool {
             "no tcp listener to remove",
             "no udp listener to remove",
         ],
-        Some(RequestType::RemoveHttpFrontend(_)) | Some(RequestType::RemoveHttpsFrontend(_)) => {
-            &["could not remove route"]
-        }
+        Some(
+            RequestType::RemoveHttpFrontend(_)
+            | RequestType::RemoveHttpsFrontend(_)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_),
+        ) => &["could not remove route"],
         _ => &[],
     };
     let mut saw_gone = false;
@@ -311,14 +318,22 @@ fn addition_for(replace: &ReplaceCertificate) -> Request {
 /// adds, which are tolerated instead: a listener is keyed by its address
 /// alone, so a duplicate cannot mask a different routing target, and
 /// repairing one would need deactivate-before-remove ordering.
+///
+/// An HTTP(S) removal goes out on the verb Sōzu's own helper picks — the
+/// header-predicate one (67/69) for a frontend that carries predicates — as
+/// `ConfigState::diff` sends it: a worker that predates predicates would read
+/// the historical verb as the removal of the unpredicated route sharing the
+/// rest of the key.
 fn removal_for(request: &Request) -> Option<Request> {
     match &request.request_type {
-        Some(RequestType::AddHttpFrontend(front)) => {
-            Some(RequestType::RemoveHttpFrontend(front.clone()).into())
-        }
-        Some(RequestType::AddHttpsFrontend(front)) => {
-            Some(RequestType::RemoveHttpsFrontend(front.clone()).into())
-        }
+        Some(
+            RequestType::AddHttpFrontend(front)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(front),
+        ) => Some(RequestType::remove_http_frontend(front.clone()).into()),
+        Some(
+            RequestType::AddHttpsFrontend(front)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(front),
+        ) => Some(RequestType::remove_https_frontend(front.clone()).into()),
         Some(RequestType::AddTcpFrontend(front)) => {
             Some(RequestType::RemoveTcpFrontend(front.clone()).into())
         }
@@ -336,24 +351,30 @@ fn removal_for(request: &Request) -> Option<Request> {
 /// filter would drop them).
 fn owner_query(request: &Request) -> Option<Request> {
     let filters = match &request.request_type {
-        Some(RequestType::AddHttpFrontend(front) | RequestType::RemoveHttpFrontend(front)) => {
-            FrontendFilters {
-                http: true,
-                https: false,
-                tcp: false,
-                domain: Some(front.hostname.clone()),
-                cluster_id: None,
-            }
-        }
-        Some(RequestType::AddHttpsFrontend(front) | RequestType::RemoveHttpsFrontend(front)) => {
-            FrontendFilters {
-                http: false,
-                https: true,
-                tcp: false,
-                domain: Some(front.hostname.clone()),
-                cluster_id: None,
-            }
-        }
+        Some(
+            RequestType::AddHttpFrontend(front)
+            | RequestType::RemoveHttpFrontend(front)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(front)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(front),
+        ) => FrontendFilters {
+            http: true,
+            https: false,
+            tcp: false,
+            domain: Some(front.hostname.clone()),
+            cluster_id: None,
+        },
+        Some(
+            RequestType::AddHttpsFrontend(front)
+            | RequestType::RemoveHttpsFrontend(front)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(front)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(front),
+        ) => FrontendFilters {
+            http: false,
+            https: true,
+            tcp: false,
+            domain: Some(front.hostname.clone()),
+            cluster_id: None,
+        },
         Some(
             RequestType::AddTcpFrontend(_)
             | RequestType::RemoveTcpFrontend(_)
@@ -377,7 +398,8 @@ fn owner_query(request: &Request) -> Option<Request> {
 ///
 /// The key is the route key for HTTP/HTTPS (`address;hostname;path[;method]`,
 /// `RequestHttpFrontend`'s `Display`, which Sōzu 2.3 extends with a frontend's
-/// header predicates — none of ours carries any), the listen address — plus
+/// header predicates — so a canary and its base are two keys, and the stored
+/// entry is removed on the predicate verb when it carries any), the listen address — plus
 /// SNI and ALPN — for TCP, the address alone for UDP (Sōzu 2.2 admits a second
 /// UDP frontend on an address instead of refusing it, so there the first one
 /// listed is evicted). None of them includes the cluster, so
@@ -391,21 +413,31 @@ fn owner_query(request: &Request) -> Option<Request> {
 /// forever, and such a removal `NotFound` while the route keeps serving.
 fn stored_removal(request: &Request, listed: ListedFrontends) -> Option<Request> {
     match &request.request_type {
-        Some(RequestType::AddHttpFrontend(front) | RequestType::RemoveHttpFrontend(front)) => {
+        Some(
+            RequestType::AddHttpFrontend(front)
+            | RequestType::RemoveHttpFrontend(front)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(front)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(front),
+        ) => {
             let key = front.to_string();
             listed
                 .http_frontends
                 .into_iter()
                 .find(|stored| stored.to_string() == key)
-                .map(|stored| RequestType::RemoveHttpFrontend(stored).into())
+                .map(|stored| RequestType::remove_http_frontend(stored).into())
         }
-        Some(RequestType::AddHttpsFrontend(front) | RequestType::RemoveHttpsFrontend(front)) => {
+        Some(
+            RequestType::AddHttpsFrontend(front)
+            | RequestType::RemoveHttpsFrontend(front)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(front)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(front),
+        ) => {
             let key = front.to_string();
             listed
                 .https_frontends
                 .into_iter()
                 .find(|stored| stored.to_string() == key)
-                .map(|stored| RequestType::RemoveHttpsFrontend(stored).into())
+                .map(|stored| RequestType::remove_https_frontend(stored).into())
         }
         Some(RequestType::AddTcpFrontend(front) | RequestType::RemoveTcpFrontend(front)) => listed
             .tcp_frontends
@@ -481,6 +513,8 @@ fn is_frontend_teardown(request: &Request) -> bool {
         Some(
             RequestType::RemoveHttpFrontend(_)
                 | RequestType::RemoveHttpsFrontend(_)
+                | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+                | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)
                 | RequestType::RemoveTcpFrontend(_)
                 | RequestType::RemoveUdpFrontend(_)
         )
@@ -1303,9 +1337,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use sozu_command_lib::proto::command::{
-        AddBackend, CertificateAndKey, Cluster, DeactivateListener, ListenerType, PathRule,
-        PathRuleKind, RemoveBackend, RemoveCertificate, RequestHttpFrontend, RequestTcpFrontend,
-        RequestUdpFrontend, SocketAddress, TcpListenerConfig, TlsVersion, WorkerInfo, WorkerInfos,
+        AddBackend, CertificateAndKey, Cluster, DeactivateListener, HeaderMatchKind,
+        HeaderPredicate, ListenerType, PathRule, PathRuleKind, RemoveBackend, RemoveCertificate,
+        RequestHttpFrontend, RequestTcpFrontend, RequestUdpFrontend, SocketAddress,
+        TcpListenerConfig, TlsVersion, WorkerInfo, WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -2868,6 +2903,23 @@ mod tests {
         }
     }
 
+    /// `http_front(cluster, "/")` guarded by two header predicates, spelled
+    /// the way the translator sends them.
+    fn canary_front(cluster: &str) -> RequestHttpFrontend {
+        let predicate = |name: &str, kind: HeaderMatchKind, value: &str| HeaderPredicate {
+            name: name.to_string(),
+            kind: kind as i32,
+            value: Some(value.to_string()),
+        };
+        RequestHttpFrontend {
+            header_predicates: vec![
+                predicate("x-canary", HeaderMatchKind::Exact, "always"),
+                predicate("x-env", HeaderMatchKind::Regex, "pre(prod|view)"),
+            ],
+            ..http_front(cluster, "/")
+        }
+    }
+
     fn frontend_list_response(listed: ListedFrontends) -> Response {
         Response {
             status: ResponseStatus::Ok as i32,
@@ -3196,6 +3248,214 @@ mod tests {
             stored_removal(&add, listed),
             Some(RequestType::RemoveTcpFrontend(stored).into())
         );
+    }
+
+    /// A frontend carrying header predicates (Sōzu 2.3, verbs 66-69) has the
+    /// same failure modes as any other: its add can meet `Exists` on a stale
+    /// key and its removal `Did not find`. Each check must know the verbs.
+    #[test]
+    fn header_predicate_verbs_get_the_frontend_handling() {
+        let canary = canary_front("canary");
+        let add: Request = RequestType::AddHttpFrontendWithHeaderPredicates(canary.clone()).into();
+        let remove: Request =
+            RequestType::RemoveHttpFrontendWithHeaderPredicates(canary.clone()).into();
+        let add_tls: Request =
+            RequestType::AddHttpsFrontendWithHeaderPredicates(canary.clone()).into();
+        let remove_tls: Request =
+            RequestType::RemoveHttpsFrontendWithHeaderPredicates(canary.clone()).into();
+
+        assert!(is_duplicate_add(&add, EXISTS_MESSAGE_2_2_1));
+        assert!(is_duplicate_add(&add_tls, EXISTS_MESSAGE_2_2_1));
+        for teardown in [&remove, &remove_tls] {
+            assert!(is_teardown(teardown) && is_frontend_teardown(teardown));
+            assert!(is_already_gone(
+                teardown,
+                "could not apply request on the main process state: Did not find HttpFrontend \
+                 with address or id_bytes=64"
+            ));
+            assert!(is_already_gone(
+                teardown,
+                "0: Could not remove route, route_bytes=12, 1: OK"
+            ));
+        }
+        assert!(!is_teardown(&add) && !is_frontend_teardown(&add));
+
+        // The repair removal is the predicate verb, never the historical one
+        // a pre-2.3 worker would apply to the base route.
+        assert_eq!(removal_for(&add), Some(remove.clone()));
+        assert_eq!(removal_for(&add_tls), Some(remove_tls.clone()));
+        for (request, https) in [(&add, false), (&remove, false), (&add_tls, true)] {
+            assert_eq!(
+                owner_query(request),
+                Some(
+                    RequestType::ListFrontends(FrontendFilters {
+                        http: !https,
+                        https,
+                        tcp: false,
+                        domain: Some("lb.example.com".to_string()),
+                        cluster_id: None,
+                    })
+                    .into()
+                )
+            );
+        }
+    }
+
+    /// The base route and its canary share hostname, path and method: only the
+    /// predicates tell their keys apart, so the lookup must evict the stored
+    /// canary — on the predicate verb — and leave the base route alone.
+    #[test]
+    fn a_stale_canary_is_found_by_its_predicates_and_removed_on_their_verb() {
+        let stale = canary_front("stale");
+        let listed = ListedFrontends {
+            http_frontends: vec![http_front("base", "/"), stale.clone()],
+            ..ListedFrontends::default()
+        };
+        let add: Request =
+            RequestType::AddHttpFrontendWithHeaderPredicates(canary_front("mine")).into();
+        assert_eq!(
+            stored_removal(&add, listed.clone()),
+            Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(stale).into())
+        );
+        let base: Request = RequestType::AddHttpFrontend(http_front("mine", "/")).into();
+        assert_eq!(
+            stored_removal(&base, listed),
+            Some(RequestType::RemoveHttpFrontend(http_front("base", "/")).into())
+        );
+    }
+
+    #[test]
+    fn duplicate_header_matched_add_is_repaired_on_the_predicate_verbs() {
+        let path = temp_socket_path("repair-predicates");
+        let stale = canary_front("stale");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(
+                    "could not apply request on the main process state: HttpFrontend with \
+                     id_bytes=64 already exists; remove it first",
+                ),
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![http_front("base", "/"), stale.clone()],
+                    ..ListedFrontends::default()
+                }),
+                ok_response(),
+                ok_response(),
+            ],
+        );
+        let add: Request =
+            RequestType::AddHttpFrontendWithHeaderPredicates(canary_front("mine")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent
+            .apply(std::slice::from_ref(&add))
+            .expect("the stale canary is evicted and the add lands");
+        drop(agent);
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(received.len(), 4, "add, lookup, eviction, re-add");
+        assert_eq!(
+            received[2],
+            RequestType::RemoveHttpFrontendWithHeaderPredicates(stale).into()
+        );
+        assert_eq!(received[3], add);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A header-matched route's removal settled as already gone cuts the
+    /// replayable head exactly where a plain route's does: the main process's
+    /// own refusal proves it gone, every worker refusing it does not, and
+    /// neither does the route listed again (the removal reverted). Its key
+    /// carries its predicates, so the plain route on the same hostname, path
+    /// and method — and, for the plain removal, the canary — is another key:
+    /// not what the lookup finds, and never evicted.
+    #[test]
+    fn a_header_matched_removal_settled_as_gone_cuts_the_replayable_head_like_a_plain_one() {
+        let main_gone = failure_response(
+            "could not apply request on the main process state: Did not find HttpFrontend with \
+             address or id_bytes=64",
+        );
+        let every_worker_gone = failure_response(
+            "0: Could not execute order on config state: Did not find HttpFrontend with \
+             address or id_bytes=64, 1: Could not execute order on config state: Did not find \
+             HttpFrontend with address or id_bytes=64",
+        );
+        let refused = failure_response(
+            "could not apply request on the main process state: Invalid character 'z' at \
+             position 0",
+        );
+        let listed = |fronts: Vec<RequestHttpFrontend>| {
+            frontend_list_response(ListedFrontends {
+                http_frontends: fronts,
+                ..ListedFrontends::default()
+            })
+        };
+        for (verb, removed, sibling, removal) in [
+            (
+                "plain",
+                http_front("shadow", "/"),
+                canary_front("other"),
+                RequestType::RemoveHttpFrontend(http_front("shadow", "/")),
+            ),
+            (
+                "predicates",
+                canary_front("shadow"),
+                http_front("other", "/"),
+                RequestType::RemoveHttpFrontendWithHeaderPredicates(canary_front("shadow")),
+            ),
+        ] {
+            let remove: Request = removal.into();
+            assert_eq!(
+                remove,
+                RequestType::remove_http_frontend(removed.clone()).into(),
+                "{verb}: the verb Sōzu's own helper picks"
+            );
+            for (name, answer, holders, replayable) in [
+                ("main-gone", main_gone.clone(), vec![sibling.clone()], 2),
+                (
+                    "every-worker-gone",
+                    every_worker_gone.clone(),
+                    vec![sibling.clone()],
+                    0,
+                ),
+                (
+                    "reverted",
+                    every_worker_gone.clone(),
+                    vec![sibling.clone(), removed.clone()],
+                    0,
+                ),
+            ] {
+                let context = format!("{verb}, {name}");
+                let path = temp_socket_path(&format!("cut-{verb}-{name}"));
+                let server = spawn_scripted_fake_sozu(
+                    &path,
+                    vec![answer, listed(holders), ok_response(), refused.clone()],
+                );
+                let batch: Vec<Request> = vec![
+                    remove.clone(),
+                    RequestType::RemoveCluster("other".to_string()).into(),
+                    RequestType::RemoveCertificate(RemoveCertificate {
+                        address: socket_address(8443),
+                        fingerprint: "zz".to_string(),
+                    })
+                    .into(),
+                ];
+                let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+                let err = agent.apply_counted(&batch).unwrap_err();
+                assert_eq!(
+                    (err.applied, err.replayable),
+                    (2, replayable),
+                    "{context}: {err:?}"
+                );
+                drop(agent);
+                let received = server.join().expect("fake sozu thread");
+                assert_eq!(received.len(), 4, "{context}: {received:?}");
+                assert_eq!(received[0], remove, "{context}");
+                assert_eq!(
+                    received[2], batch[1],
+                    "{context}: the sibling is never evicted"
+                );
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     /// Since Sōzu 2.3.0 a removal naming a cluster the main process does not

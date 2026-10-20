@@ -4,6 +4,81 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## HTTPRoute header matches are honoured
+
+A match with `headers` used to be skipped and reported
+(`HeaderOrQueryMatchUnsupported`); requests it should have matched fell through
+to the route's other matches or got a 404. It is now programmed as a Sōzu 2.3
+header predicate — `Exact` and `RegularExpression`, the name case-insensitive,
+the first occurrence of the header tested — so that traffic **moves to the
+header-matched backends** on the first reconcile after the upgrade. Query
+parameter matches are still skipped, now reported as `QueryMatchUnsupported`;
+an alert or dashboard keyed on the old reason must follow.
+
+A header match the gateway cannot honour as written is skipped and reported as
+`HeaderMatchRefused`, with the route still `Accepted`: `Host`, `Cookie`, a name
+that is not a token, an `Exact` value that is empty, carries a control
+character or has surrounding whitespace, a regex Sōzu cannot compile, and the
+headers Sōzu sets before it routes (`X-Forwarded-For`, `-Proto`, `-Port`,
+`Forwarded`, `X-Request-Id`, the `sozu.hardening.sozuIdHeader` header, and
+`X-Real-IP` with `sendXRealIp` or `elideXRealIp`). An unknown match `type`
+reads `Accepted: False` / `UnsupportedValue`. The chart hands the last two
+options to the controller as well; a deployment that configures Sōzu by other
+means sets `--sozu-id-header` and `--sozu-x-real-ip` to match.
+
+Sōzu ranks a frontend whose header conditions hold above every frontend
+without any, whatever their paths or methods, and settles the rest partly by
+the order it added them, which a worker restart changes
+([#80](https://github.com/CleverCloud/sozu-gateway/issues/80)); the Gateway API
+ranks path, method, header count, then route age. At most 64 header matches
+are weighed per hostname and listener; past them, the oldest routes' first,
+the rest are skipped (`HeaderMatchLimit`). The builder copies each route
+that outranks a header match on its hostname above it, so the frontend count
+grows (at most 64 added copies per hostname; past that the header match is
+skipped, `HeaderMatchPrecedenceLimit`). A header match is then programmed only
+where Sōzu orders it the Gateway API's way, whatever order it holds them in,
+against every route, every other header match and every copy one request can
+meet together with it on a different backend. Where it cannot, the lower-ranked
+header match is skipped on that hostname, the route still `Accepted`, and its
+traffic goes where it went before the upgrade, or to a header match it
+outranked:
+
+- `HeaderMatchOutranksRoute`, a plain route outranks it: on a route without
+  hostnames, any more specific route to another backend; on the root `/` of a
+  hostname, a plain `/` with a method or a plain Exact `/`, unless the header
+  match names a method; on a longer prefix, a plain path below it that names
+  no method (any, if the header match names one); and above two overlapping
+  plain routes to different backends whose copies Sōzu cannot order (a plain
+  Exact `/foo` and a plain prefix `/foo` under a header match on the root).
+- `HeaderMatchOverlap`, another header match outranks it: two on the root `/`
+  (fewer header matches, else the newer route, loses), nested prefixes, an
+  Exact path and a prefix on one path, an Exact path beside a prefix with a
+  method (Sōzu would serve the method one, every time), and on a route without
+  hostnames any two one request can meet. Header matches on one header with
+  different exact values never meet and are all kept. HTTPRouteHeaderMatching
+  loses `version: two`, `color: red` and `color: yellow` this way.
+- `HeaderMatchCopyKeyTaken`, a `RegularExpression` path elsewhere spells the
+  Sōzu route key a needed copy takes.
+
+What is left to Sōzu's order is the order between overlapping plain routes,
+which header matches do not change: a request a header match or a copy can
+serve reaches the Gateway API's choice, and any other request reaches the
+plain routes as it did before the upgrade; see
+[features](features.md#header-matches).
+
+**A Sōzu older than 2.3 cannot serve them.** Header-matched frontends travel on
+the dedicated verbs (66-69), which Sōzu 2.2.1 never answers: the reconcile
+fails, and keeps failing, rather than routing every request for the host to the
+header-matched backend (measured, `docs/probes/header-matches_sozu-2.2.1_2026-10-19.txt`).
+
+**Downgrading the controller requires restarting Sōzu.** The shadow file now
+records each frontend's header matches; an older build drops that field, takes
+the header-matched frontends and their copies for frontends without
+conditions, and never removes them from Sōzu. Restart the Sōzu container (or
+roll the Pods) after a downgrade.
+
+---
+
 ## Active TCP health checks, opt-in
 
 New and off by default, so nothing changes until you ask: `sozu.healthCheck`

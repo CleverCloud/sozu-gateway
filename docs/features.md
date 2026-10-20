@@ -53,14 +53,14 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | API gateway | Redirects — hostname / path / port target | ✅ | `hostname`, `path.replaceFullPath` and `port`, under 301/302/308. An unset target keeps the request's own value. The query string is kept only without a `path` target: `path.replaceFullPath` drops it (measured on 2.2.1 and 2.3.2; a known defect, not fixed yet). Refused, with the reason: `path.replacePrefixMatch`, a literal `$` (Sōzu reads it as a rewrite template and rejects the frontend), a redirect that changes nothing, and combining with `URLRewrite` |
 | API gateway | HTTP Basic auth | 🟡 | Sōzu Cluster field; not wired (no core Gateway filter) |
 | API gateway | Connection limit per source IP | ✅ | Service annotation `sozu.io/max-connections-per-ip` (a connection cap, not an RPS quota); chart-wide default `sozu.maxConnectionsPerIp`, `0` (unlimited). Counted per Service port and per worker, on the client IP the Service preserves; its `429` rejections appear in `/metrics` only with `metrics.perCluster: true`. Never applied to a UDPRoute: Sōzu 2.3 would turn it into a silent per-source flow cap counting every client port, so the controller sends none on a UDP cluster |
-| API gateway | Match on header value | 🟡 | Sōzu 2.3.2 has header predicates on HTTP(S) frontends; not wired yet (reported, that match skipped) |
+| API gateway | Match on header value | ✅ | HTTPRoute header matches, see the Gateway API rows (Sōzu ≥ 2.3) |
 | API gateway | Match on query param | ❌ | not supported by Sōzu |
 | API gateway | Weighted split across multiple Services | ❌ | not a weight problem (weights are honoured; since Sōzu 2.3.2 by every policy): Sōzu selects a backend per backend connection, not per request, so a keep-alive client stays on one Service, and it has no native `500` for the spec's invalid-backend share ([#79](https://github.com/CleverCloud/sozu-gateway/issues/79), [#78](https://github.com/CleverCloud/sozu-gateway/issues/78)) |
 | API gateway | Request mirroring / shadowing | ❌ | not supported by Sōzu |
 | Gateway API | `GatewayClass` (by `controllerName`) | ✅ | status `Accepted` reported |
 | Gateway API | `Gateway.spec.infrastructure.parametersRef` | ❌ | no parameter kinds are supported; an explicit reference rejects the Gateway with `Accepted: False` / `InvalidParameters`, without programming its routes or certificates |
 | Gateway API | `Gateway` HTTP/HTTPS listeners | ✅ | must declare a port the chart's `exposure` table advertises for that protocol (default `80`/`443`); a mismatch is rejected with `PortUnavailable`. A Gateway with no accepted listeners reports `Accepted: False` / `ListenersNotValid`; a mix of accepted and rejected listeners reports `Accepted: True` / `ListenersNotValid`. An unresolved certificate affects `Programmed` and `ResolvedRefs`, without rejecting the Gateway. A listener `hostname` Sōzu cannot parse (IDNA) is rejected with `UnsupportedValue` and reported (`InvalidHostname`) |
-| Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent. A `RegularExpression` match Sōzu cannot compile is dropped and reported (`InvalidPathRegex`, a Warning Event), like an unsupported header/query match; the rule's other matches still program and the route stays `Accepted`. A hostname Sōzu cannot parse (IDNA) is dropped the same way (`InvalidHostname`). A route whose hostnames intersect none of the listener's is `Accepted: False` / `NoMatchingListenerHostname` and does not count toward `attachedRoutes` — it is attached to nothing |
+| Gateway API | `HTTPRoute` (host, path, method) | ✅ | status `Accepted`/`ResolvedRefs` per parent. A `RegularExpression` match Sōzu cannot compile is dropped and reported (`InvalidPathRegex`, a Warning Event), like a query match or a refused header match; the rule's other matches still program and the route stays `Accepted`. A hostname Sōzu cannot parse (IDNA) is dropped the same way (`InvalidHostname`). A route whose hostnames intersect none of the listener's is `Accepted: False` / `NoMatchingListenerHostname` and does not count toward `attachedRoutes` — it is attached to nothing |
 | Gateway API | HTTPRoute collision precedence | ✅ | among emitted frontends sharing one Sōzu route key (the `;`-joined listener, host, rule and method string): oldest creation timestamp, then alphabetical `namespace/name`, then first rule; two different matches of one route that share the key report the second as `RouteCollision`. Skipped rules do not reserve a match. See [mixed Ingress collisions](UPGRADING.md#httproute-collision-precedence) |
 | Gateway API | Separate Gateway addresses and routing tables | ✅ | `gatewayProvisioning.enabled` automatically provisions a Deployment and Service per owned Gateway; the default instance serves Ingress. Local routing controllers remain per Pod. See [UPGRADING](UPGRADING.md#automatic-gateway-instances) |
 | Gateway API | `ReferenceGrant` (cross-namespace refs) | ✅ | gates cross-ns backend/cert refs |
@@ -68,8 +68,9 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
 | Gateway API | `allowedRoutes.namespaces` — `from: Selector` | ✅ | evaluated against Namespace labels (`matchLabels` + `matchExpressions`, ANDed; an empty selector matches every namespace). `Selector` **replaces** `Same`: the Gateway's own namespace is admitted only if its labels match. A selector this build cannot evaluate — an unknown `operator`, a malformed expression, `from: Selector` with no selector — still fails closed and is reported (`NamespaceSelectorInvalid`) |
 | Gateway API | One Service `backendRef` per rule | ✅ | a single ref with `weight: 0` (drain) is rejected (`ZeroWeightBackendUnsupported`): Sōzu cannot express the spec's all-zero-weight 500 |
 | Gateway API | Weighted multi-`backendRef` split | ❌ | per-connection backend selection under connection reuse, and no native `500` ([#79](https://github.com/CleverCloud/sozu-gateway/issues/79), [#78](https://github.com/CleverCloud/sozu-gateway/issues/78)) — see the API-gateway row |
-| Gateway API | Header matches | 🟡 | Sōzu 2.3.2 has header predicates; not wired yet: reported (`HeaderOrQueryMatchUnsupported`) and that match skipped — the rule's other matches still program |
-| Gateway API | Query-parameter matches | ❌ | not supported by Sōzu; reported and that match skipped |
+| Gateway API | Header matches — `Exact`, `RegularExpression` | ✅ | Sōzu ≥ 2.3 header predicates; refusals in [Header matches](#header-matches) below (`HeaderMatchRefused`, the match is skipped and the route stays `Accepted`; an unknown `type` reads `UnsupportedValue`) |
+| Gateway API | Header-match precedence | 🟡 | Sōzu ranks a frontend whose header conditions hold above every frontend without any, and settles the rest partly by the order it added them. The builder weighs at most 64 header matches per hostname (the oldest routes' first; the rest are skipped, `HeaderMatchLimit`), copies the routes that outrank a header match (Exact path, longer prefix, method) above it, up to 64 added copies per hostname, and programs a header match only where Sōzu orders it the Gateway API's way in every order against every route, header match and copy to another backend that one request can meet with it: a path other than `/` naming a method above one naming none, a path longer than `/` above the root `/`. Otherwise the lower header match is skipped there and reported (`HeaderMatchOutranksRoute`, `HeaderMatchOverlap`, `HeaderMatchCopyKeyTaken`): e.g. one without a method under a plain `/` with a method or a plain Exact `/`, one on `/` above two overlapping plain routes Sōzu orders by insertion (Exact `/foo` and prefix `/foo`), two header matches on `/` that one request can meet, an Exact path beside a prefix with a method, nested prefixes, any two to different backends that can meet on a route without hostnames. Regex paths are not copied — see [Header matches](#header-matches) |
+| Gateway API | Query-parameter matches | ❌ | not supported by Sōzu; reported (`QueryMatchUnsupported`) and that match skipped — the rule's other matches still program |
 | Gateway API | Listener isolation (`GatewayHTTPListenerIsolation`) | ❌ | not supported, and not claimed. Listeners on one Sōzu listener share its route table: a request whose path or method misses on its exact host falls through to a covering `*.` host, then to the hostname-less routes, whichever listeners they came from |
 | Gateway API | Wildcard hostnames (`*.example.com`) | 🟡 | exactly one label, as Sōzu matches them ([#82](https://github.com/CleverCloud/sozu-gateway/issues/82)) |
 | Gateway API | Rule-level filters (header edit, redirect) | ✅ | see the API-gateway rows above (URLRewrite reported unsupported) |
@@ -146,14 +147,77 @@ Legend: ✅ supported · 🟡 planned · ❌ not supported.
   not wired). `URLRewrite.hostname` is blocked by Sōzu sending two `Host` lines.
   The per-source-IP connection limit is wired through Service annotations (see below). HTTP Basic
   auth exists in Sōzu's data plane but has no core Gateway API filter, so it remains unwired.
+- <a id="header-matches"></a>**Header matches.** An HTTPRoute `headers` match becomes a Sōzu
+  header predicate (2.3+): the name is case-insensitive, the first occurrence of the header is
+  tested, `Exact` compares bytes and `RegularExpression` must match the whole value; several
+  entries naming one header count once, the first. Refused, so the match is skipped and reported:
+  `Host` and `Cookie`, a name that is not a token, an `Exact` value that is empty, carries a
+  control character or starts or ends with whitespace (Sōzu trims it from the request), a regex
+  Sōzu cannot compile, and the headers Sōzu sets before it routes, whose value would be Sōzu's —
+  `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `Forwarded`, `X-Request-Id`, the
+  correlation header (`sozu.hardening.sozuIdHeader`, `Sozu-Id` by default) and, with
+  `sendXRealIp` or `elideXRealIp`, `X-Real-IP` (measured, [docs/probes](probes/)). Sōzu ranks a
+  frontend whose conditions hold above every frontend without any, whatever their paths or
+  methods, and settles the rest partly by the order it added them, which differs between a
+  fresh batch, an incremental add and a worker it re-forks (route-key order,
+  [#80](https://github.com/CleverCloud/sozu-gateway/issues/80)); the Gateway API ranks path
+  (Exact, then the longest prefix), then method, then header count, then the oldest route. The
+  builder weighs at most 64 header matches per hostname and listener: past them, in the order
+  route collisions are settled in (the oldest route first, then `namespace/name`, then rule
+  order, whatever order the routes arrive in), the rest are skipped there and reported,
+  `HeaderMatchLimit`, so a newcomer cannot displace an older route's header match by adding more.
+  That cap is what bounds the controller's work, a pairwise check repeated after each skip, which
+  one tenant could otherwise make cubic in its header matches, and the skips it reports reach
+  their routes through an index rather than a scan per report; it is far above the seven of the
+  busiest conformance shape. The builder then copies each plain route that outranks a header
+  match on the same hostname — an Exact path it covers, a longer prefix, the same path with a
+  method — above it with the header conditions added and, where the plain route names no method,
+  the header match's own, so a copy takes no request its header match cannot; up to 64 added
+  copies per hostname (beyond that the header match is skipped there,
+  `HeaderMatchPrecedenceLimit`; a copy a header match on that very path already stands in for is
+  not added and not counted). That budget bounds the route table, not the work: a header match
+  that needs no copy costs none of it. It then programs a header match only if, against every
+  route, header match and copy one request can meet together with it or its copies (same
+  hostname, a common path, compatible methods, header values one request can carry for both)
+  and that sends it elsewhere, Sōzu's own rules pick the Gateway API's winner whatever order it
+  holds the two in:
+  a path other than `/` naming a method above one naming none, a path longer than `/` above a
+  header match on the root `/` (measured through incremental adds, worker restarts and a fresh
+  batch). Otherwise the
+  lower-ranked header match is skipped on that hostname and reported, the route staying
+  `Accepted`, so the requests both can match keep reaching the higher one; the skipped match's own
+  requests go to whatever else matches them — a plain route, a header match it outranked, or a
+  404. Reported as `HeaderMatchOutranksRoute` when a plain route outranks it: under a plain root
+  `/` with a method or a plain Exact `/` when it is on the root and names no method; under a more
+  specific plain route without a method when it is on a longer prefix, or under any when it also
+  names a method; under any more specific plain route to another backend on a route without
+  hostnames; and above two plain routes to different backends whose copies Sōzu cannot order
+  between themselves (a header match on the root above a plain Exact `/foo` and a plain prefix
+  `/foo`: with the header, `GET /foo` would reach whichever copy Sōzu holds last). Reported
+  as `HeaderMatchOverlap` when another header match outranks it: two on the root `/` (the one
+  with fewer header matches loses, else the newer route: `version: two` loses to
+  `version: two` + `color: orange`), two whose
+  paths nest or are Exact and prefix on one path, an Exact path beside a prefix with a method —
+  Sōzu serves the method one first whatever the order, against the Gateway API's Exact-first
+  rule — and on a route without hostnames any two, whose frontends Sōzu searches first-match (so
+  HTTPRouteHeaderMatching keeps `version: one`, `version: two` + `color: orange`, `color: blue`
+  and `color: green` and skips `version: two`, `color: red` and `color: yellow`). Two header
+  matches that cannot meet one request never compete: `version: one` and `version: two` on the
+  root are both kept. Reported as `HeaderMatchCopyKeyTaken` when a regular-expression path
+  elsewhere spells the Sōzu key the copy needs. `RegularExpression` paths are neither copied nor
+  copied above, their precedence being implementation-specific: a header-matched one outranks
+  every plain route on its hostname and is weighed against the other header matches like any.
+  What is left to Sōzu's order is the order between overlapping plain routes, which header
+  matches do not change: a request a header match or a copy can serve reaches the Gateway API's
+  choice in every order, and any other request reaches the plain routes exactly as it would
+  without header matches, where two that one request can match (plain `/api` and `/api/v2`)
+  go to whichever Sōzu holds last (#80).
 - **Hard limits.** Matching on query parameters, a weighted traffic split across several
   Services (weights are honoured — since Sōzu 2.3.2 by every policy — but a backend is selected
   per backend connection rather than per request, and there is no native `500` for an invalid
   backend's share), and request mirroring are not expressible in Sōzu today, so they are out of
-  scope rather than merely deferred. Header matching is not one of them: Sōzu 2.3.2 has header
-  predicates, but a frontend whose predicates hold outranks every unpredicated frontend of the
-  host, whatever its path or method (measured), so a direct mapping misroutes and wiring them
-  needs its own design.
+  scope rather than merely deferred. Header matching is not one of them: it is programmed, with
+  the precedence caveats under [Header matches](#header-matches) above.
 - **Listener isolation.** Gateway API asks an implementation without it to say so: this one has
   none. Every Gateway listener on one Sōzu listener (one `exposure` entry) shares its route table,
   and Sōzu 2.3 lets a request whose path or method misses on an exact host fall through to a

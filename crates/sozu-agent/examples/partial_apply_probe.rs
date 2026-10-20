@@ -408,6 +408,7 @@ fn route(listener: SocketAddr, host: &str, cluster_id: &str, tls: bool) -> ir::F
         tls,
         listener,
         filters: ir::FrontendFilters::default(),
+        header_matches: vec![],
     }
 }
 

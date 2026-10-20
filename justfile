@@ -87,6 +87,12 @@ chart-lint:
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=abc > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=4294967296 > /dev/null 2>&1
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.serviceMonitor.enabled=true > /dev/null
+    # The controller refuses header matches on what Sōzu sets before routing,
+    # so the listener options that change it must reach the controller too.
+    ! helm template {{HELM_RELEASE}} {{CHART}} | grep -qE 'SOZU_GW_SOZU_(ID_HEADER|X_REAL_IP)'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.hardening.sozuIdHeader=X-Trace-Id | grep -A1 SOZU_GW_SOZU_ID_HEADER | grep -q '"X-Trace-Id"'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.hardening.sendXRealIp=true | grep -q SOZU_GW_SOZU_X_REAL_IP
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.hardening.elideXRealIp=true | grep -q SOZU_GW_SOZU_X_REAL_IP
     # Both sides of the metrics switch, asserted rather than merely rendered.
     helm template {{HELM_RELEASE}} {{CHART}} | grep -q SOZU_GW_METRICS_LISTEN
     ! helm template {{HELM_RELEASE}} {{CHART}} --set metrics.enabled=false | grep -q SOZU_GW_METRICS_LISTEN

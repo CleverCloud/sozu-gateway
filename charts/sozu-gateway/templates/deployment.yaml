@@ -146,6 +146,17 @@ spec:
             # and where Sōzu listens for it. Rendered from `exposure`.
             - name: SOZU_GW_EXPOSURE
               value: {{ toJson (.Values.exposure | default list) | quote }}
+            # Headers the Sōzu config above sets or strips before routing: an
+            # HTTPRoute header match on one would test Sōzu's value, so the
+            # controller refuses it. Rendered from the same values as Sōzu's.
+            {{- with .Values.sozu.hardening.sozuIdHeader }}
+            - name: SOZU_GW_SOZU_ID_HEADER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.sozu.hardening.sendXRealIp .Values.sozu.hardening.elideXRealIp }}
+            - name: SOZU_GW_SOZU_X_REAL_IP
+              value: "true"
+            {{- end }}
             - name: SOZU_GW_DEBOUNCE_MS
               value: {{ .Values.controller.debounceMs | quote }}
             - name: SOZU_GW_RESYNC_SECS

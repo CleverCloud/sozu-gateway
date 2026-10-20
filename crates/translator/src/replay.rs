@@ -89,12 +89,16 @@ pub fn replay_if_exact(
 ///   clusters), so the result is the same.
 /// - `AddBackend` and `RemoveBackend`: the backends with that cluster, id and
 ///   address.
-/// - `AddHttpFrontend`/`AddHttpsFrontend` and their removals: the frontends
-///   of that protocol stored under the payload's route key
-///   ([`ir::Frontend::sozu_route_key`], the payload's `Display`), whatever
-///   their cluster. Sōzu holds one route per key, the agent repairs an add on
-///   an occupied key by evicting its holder, and it evicts a route another
-///   cluster holds under a key it removes.
+/// - `AddHttpFrontend`/`AddHttpsFrontend` and their removals, on the plain
+///   verbs or the header-predicate ones (Sōzu 2.3 sends a frontend that
+///   carries predicates on those, and files it alike): the frontends of that
+///   protocol stored under the payload's route key
+///   ([`ir::Frontend::sozu_route_key`], the payload's `Display`, its
+///   predicates included, so a header-matched route and the plain one on its
+///   hostname, path and method are two keys), whatever their cluster. Sōzu
+///   holds one route per key, the agent repairs an add on an occupied key by
+///   evicting its holder, and it evicts a route another cluster holds under a
+///   key it removes.
 /// - `AddTcpFrontend`/`AddUdpFrontend` and their removals: the layer-4
 ///   frontends of that protocol on that address (one cluster per address,
 ///   evicted alike).
@@ -339,14 +343,22 @@ impl<'a> Replay<'a> {
                 );
                 self.backends.remove(&key);
             }
-            RequestType::AddHttpFrontend(f) | RequestType::AddHttpsFrontend(f) => {
-                let https = matches!(request, RequestType::AddHttpsFrontend(_));
-                let key = route_key(https, f);
-                let wanted = self.wanted_frontends.get(&key);
-                self.frontends.set(key, wanted, step);
+            RequestType::AddHttpFrontend(f)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(f) => {
+                self.set_frontend(route_key(false, f), step)
             }
-            RequestType::RemoveHttpFrontend(f) => self.frontends.remove(&route_key(false, f)),
-            RequestType::RemoveHttpsFrontend(f) => self.frontends.remove(&route_key(true, f)),
+            RequestType::AddHttpsFrontend(f)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(f) => {
+                self.set_frontend(route_key(true, f), step)
+            }
+            RequestType::RemoveHttpFrontend(f)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(f) => {
+                self.frontends.remove(&route_key(false, f))
+            }
+            RequestType::RemoveHttpsFrontend(f)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(f) => {
+                self.frontends.remove(&route_key(true, f))
+            }
             RequestType::AddTcpFrontend(f) => {
                 self.set_l4((ir::L4Protocol::Tcp, plain(f.address.into())), step)
             }
@@ -407,6 +419,11 @@ impl<'a> Replay<'a> {
             // changes no routing object.
             _ => {}
         }
+    }
+
+    fn set_frontend(&mut self, key: ir::SozuRouteKey, step: usize) {
+        let wanted = self.wanted_frontends.get(&key);
+        self.frontends.set(key, wanted, step);
     }
 
     fn set_l4(&mut self, key: L4Key, step: usize) {
@@ -512,6 +529,9 @@ fn simulate(previous: &ir::Ir, acknowledged: &[Request]) -> Option<ConfigState> 
 ///   also 2.3's refusal of an address another cluster holds) was repaired:
 ///   the holder evicted, the add sent again.
 ///
+/// The header-predicate verbs are settled as their plain siblings are: the
+/// state files them alike, under a key that carries the predicates.
+///
 /// Anything else that `state` refuses was not something the agent settles.
 fn settle(state: &mut ConfigState, request: &Request) -> Option<bool> {
     let kind = request.request_type.as_ref()?;
@@ -532,6 +552,8 @@ fn settle(state: &mut ConfigState, request: &Request) -> Option<bool> {
             StateError::Exists { .. },
             RequestType::AddHttpFrontend(_)
             | RequestType::AddHttpsFrontend(_)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(_)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(_)
             | RequestType::AddTcpFrontend(_),
         )
         | (_, RequestType::AddUdpFrontend(_)) => {
@@ -549,6 +571,8 @@ fn is_teardown(kind: &RequestType) -> bool {
             | RequestType::RemoveBackend(_)
             | RequestType::RemoveHttpFrontend(_)
             | RequestType::RemoveHttpsFrontend(_)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)
             | RequestType::RemoveTcpFrontend(_)
             | RequestType::RemoveUdpFrontend(_)
             | RequestType::RemoveListener(_)
@@ -559,15 +583,21 @@ fn is_teardown(kind: &RequestType) -> bool {
 
 /// Remove whatever `state` stores under this frontend request's key,
 /// whichever cluster it names, as the agent's eviction does: the route key
-/// for HTTP/HTTPS, the address with the same SNI and ALPN claim for TCP, the
-/// address for UDP. Whether anything was there; `false` for any other
-/// request.
+/// for HTTP/HTTPS (header predicates included), the address with the same SNI
+/// and ALPN claim for TCP, the address for UDP. Whether anything was there;
+/// `false` for any other request.
 fn evict(state: &mut ConfigState, kind: &RequestType) -> bool {
     match kind {
-        RequestType::AddHttpFrontend(f) | RequestType::RemoveHttpFrontend(f) => {
+        RequestType::AddHttpFrontend(f)
+        | RequestType::RemoveHttpFrontend(f)
+        | RequestType::AddHttpFrontendWithHeaderPredicates(f)
+        | RequestType::RemoveHttpFrontendWithHeaderPredicates(f) => {
             state.http_fronts.remove(&f.to_string()).is_some()
         }
-        RequestType::AddHttpsFrontend(f) | RequestType::RemoveHttpsFrontend(f) => {
+        RequestType::AddHttpsFrontend(f)
+        | RequestType::RemoveHttpsFrontend(f)
+        | RequestType::AddHttpsFrontendWithHeaderPredicates(f)
+        | RequestType::RemoveHttpsFrontendWithHeaderPredicates(f) => {
             state.https_fronts.remove(&f.to_string()).is_some()
         }
         RequestType::AddTcpFrontend(f) | RequestType::RemoveTcpFrontend(f) => {

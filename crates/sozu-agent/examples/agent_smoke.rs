@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
                 tls: false,
                 listener: listen_http,
                 filters: ir::FrontendFilters::default(),
+                header_matches: vec![],
             },
             ir::Frontend {
                 hostname: host.clone(),
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
                 tls: true,
                 listener: listen_https,
                 filters: ir::FrontendFilters::default(),
+                header_matches: vec![],
             },
         ],
         certificates: vec![ir::Certificate {

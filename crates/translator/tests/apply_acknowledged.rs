@@ -68,6 +68,19 @@ fn route(host: &str, path: ir::PathMatch, cluster_id: Option<&str>, tls: bool) -
         tls,
         listener: addr(if tls { HTTPS } else { HTTP }),
         filters: ir::FrontendFilters::default(),
+        header_matches: vec![],
+    }
+}
+
+/// `frontend` guarded by one header match, which sends it on Sōzu 2.3's
+/// header-predicate verbs and adds the predicate to its route key.
+fn header_matched(frontend: ir::Frontend, name: &str, kind: ir::HeaderMatchKind) -> ir::Frontend {
+    ir::Frontend {
+        header_matches: vec![ir::HeaderMatch {
+            name: name.to_string(),
+            kind,
+        }],
+        ..frontend
     }
 }
 
@@ -258,6 +271,8 @@ fn is_teardown(request: &Request) -> bool {
                 | RequestType::RemoveBackend(_)
                 | RequestType::RemoveHttpFrontend(_)
                 | RequestType::RemoveHttpsFrontend(_)
+                | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+                | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)
                 | RequestType::RemoveTcpFrontend(_)
                 | RequestType::RemoveUdpFrontend(_)
                 | RequestType::RemoveListener(_)
@@ -268,13 +283,24 @@ fn is_teardown(request: &Request) -> bool {
 }
 
 /// The agent's eviction: remove whatever the main process stores under this
-/// frontend request's key, whichever cluster it names.
+/// frontend request's key, whichever cluster it names. An HTTP(S) key carries
+/// the frontend's header predicates, on whichever verb it was sent.
 fn evict_holder(state: &mut ConfigState, request: &Request) {
     match &request.request_type {
-        Some(RequestType::AddHttpFrontend(f) | RequestType::RemoveHttpFrontend(f)) => {
+        Some(
+            RequestType::AddHttpFrontend(f)
+            | RequestType::RemoveHttpFrontend(f)
+            | RequestType::AddHttpFrontendWithHeaderPredicates(f)
+            | RequestType::RemoveHttpFrontendWithHeaderPredicates(f),
+        ) => {
             state.http_fronts.remove(&f.to_string());
         }
-        Some(RequestType::AddHttpsFrontend(f) | RequestType::RemoveHttpsFrontend(f)) => {
+        Some(
+            RequestType::AddHttpsFrontend(f)
+            | RequestType::RemoveHttpsFrontend(f)
+            | RequestType::AddHttpsFrontendWithHeaderPredicates(f)
+            | RequestType::RemoveHttpsFrontendWithHeaderPredicates(f),
+        ) => {
             state.https_fronts.remove(&f.to_string());
         }
         Some(RequestType::AddTcpFrontend(f) | RequestType::RemoveTcpFrontend(f)) => {
@@ -321,6 +347,8 @@ fn settle(sozu: Sozu, state: &mut ConfigState, request: &Request) -> bool {
             Some(
                 RequestType::AddHttpFrontend(_)
                 | RequestType::AddHttpsFrontend(_)
+                | RequestType::AddHttpFrontendWithHeaderPredicates(_)
+                | RequestType::AddHttpsFrontendWithHeaderPredicates(_)
                 | RequestType::AddTcpFrontend(_)
                 | RequestType::AddUdpFrontend(_),
             ) => {
@@ -593,6 +621,48 @@ fn udp_affinity() -> Case {
     }
 }
 
+/// Header-matched routes next to the plain ones on `x.example.com`, keyed
+/// apart from them by their predicates and sent on Sōzu 2.3's predicate
+/// verbs: one re-pointed from cluster `y` to `x` (removal and add on one
+/// key), one removed and one added on the HTTPS listener. `third` drops them
+/// all.
+fn header_matches() -> Case {
+    let canary = |cluster: &str, tls: bool, name: &str, kind: ir::HeaderMatchKind| {
+        header_matched(
+            route("x.example.com", root(), Some(cluster), tls),
+            name,
+            kind,
+        )
+    };
+    let always = || ir::HeaderMatchKind::Exact("always".into());
+    let mut previous = applied();
+    previous
+        .frontends
+        .push(canary("y", false, "x-canary", always()));
+    previous.frontends.push(canary(
+        "y",
+        true,
+        "x-env",
+        ir::HeaderMatchKind::Regex("pre(prod|view)".into()),
+    ));
+    let mut desired = applied();
+    desired
+        .frontends
+        .push(canary("x", false, "x-canary", always()));
+    desired.frontends.push(canary(
+        "y",
+        true,
+        "x-canary",
+        ir::HeaderMatchKind::Regex("al(ways|so)".into()),
+    ));
+    Case {
+        name: "header matches",
+        previous,
+        desired,
+        third: applied(),
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Single requests
 // ----------------------------------------------------------------------------
@@ -789,6 +859,74 @@ fn a_route_removal_drops_every_entry_under_its_key() {
     assert_eq!(
         tr::replay_if_exact(&applied(), &desired, &[removal]),
         Some(desired)
+    );
+}
+
+/// A header-matched route goes out on the predicate verbs, under a key that
+/// carries its predicates: its removal drops it alone, the plain route on the
+/// same hostname, path and listener staying, its add sets it back under that
+/// key alone, and an add on that key held already is settled as the agent
+/// repairs it.
+#[test]
+fn a_header_matched_route_is_replayed_under_its_own_key() {
+    let mut previous = applied();
+    previous.frontends.push(header_matched(
+        route("x.example.com", root(), Some("y"), false),
+        "x-canary",
+        ir::HeaderMatchKind::Exact("always".into()),
+    ));
+    let desired = applied();
+    let removal = one_request(&previous, &desired);
+    assert!(matches!(
+        &removal.request_type,
+        Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(f))
+            if f.cluster_id.as_deref() == Some("y")
+    ));
+    assert_eq!(
+        tr::replay_if_exact(&previous, &desired, &[removal]),
+        Some(desired.clone())
+    );
+    let add = one_request(&desired, &previous);
+    assert!(matches!(
+        &add.request_type,
+        Some(RequestType::AddHttpFrontendWithHeaderPredicates(f))
+            if f.cluster_id.as_deref() == Some("y")
+    ));
+    assert_eq!(
+        tr::replay_if_exact(&desired, &previous, &[add]),
+        Some(previous.clone())
+    );
+
+    // Every add again, the header-matched one on its key included: the agent
+    // repairs each, so the main process holds what it held.
+    let again = tr::ir_to_requests(&previous);
+    assert!(again.iter().any(|r| matches!(
+        r.request_type,
+        Some(RequestType::AddHttpFrontendWithHeaderPredicates(_))
+    )));
+    assert_eq!(
+        tr::replay_if_exact(&previous, &ir::Ir::default(), &again),
+        Some(previous)
+    );
+
+    // The case `wherever_a_batch_stops_the_adopted_baseline_converges` runs
+    // sends every predicate verb.
+    let case = header_matches();
+    let batch = tr::reconcile(&case.previous, &case.desired).expect("translate");
+    let verbs: BTreeSet<&str> = batch
+        .iter()
+        .filter_map(|r| match r.request_type {
+            Some(RequestType::AddHttpFrontendWithHeaderPredicates(_)) => Some("add http"),
+            Some(RequestType::AddHttpsFrontendWithHeaderPredicates(_)) => Some("add https"),
+            Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(_)) => Some("remove http"),
+            Some(RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)) => Some("remove https"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        verbs,
+        BTreeSet::from(["add http", "add https", "remove http", "remove https"]),
+        "{batch:?}"
     );
 }
 
@@ -1419,6 +1557,7 @@ fn wherever_a_batch_stops_the_adopted_baseline_converges() {
         layer4_move(),
         mixed(),
         udp_affinity(),
+        header_matches(),
     ] {
         let batch = tr::reconcile(&case.previous, &case.desired).expect("translate");
         assert!(batch.iter().any(is_teardown), "{}: {batch:?}", case.name);

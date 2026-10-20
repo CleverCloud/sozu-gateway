@@ -37,7 +37,9 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use sozu_gw_agent::SozuAgentHandle;
-use sozu_gw_builder::{build, BuildConfig, ExposedPort, HealthCheckDefault, Inputs};
+use sozu_gw_builder::{
+    build, BuildConfig, ExposedPort, HealthCheckDefault, Inputs, SozuRequestHeaders,
+};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute, ReferenceGrant, TcpRoute, UdpRoute};
 use sozu_gw_translator as tr;
 
@@ -265,6 +267,24 @@ struct Args {
         default_value_t = HealthCheckDefault::DEFAULT_CHECK.unhealthy_threshold
     )]
     health_check_unhealthy_threshold: u32,
+    /// The correlation header Sōzu adds to every request: its `sozu_id_header`
+    /// listener option, which the chart renders from the same value
+    /// (`sozu.hardening.sozuIdHeader`). Sōzu adds it before it routes, so an
+    /// HTTPRoute header match on this name would test Sōzu's id rather than
+    /// anything the client sent, and is refused.
+    #[arg(long, env = "SOZU_GW_SOZU_ID_HEADER", default_value = "Sozu-Id")]
+    sozu_id_header: String,
+    /// Whether Sōzu sets or strips `X-Real-IP` before it routes: its
+    /// `send_x_real_ip` or `elide_x_real_ip` listener option, which the chart
+    /// renders from the same values. An HTTPRoute header match on `X-Real-IP`
+    /// is then refused, for the same reason as `sozu_id_header`.
+    #[arg(
+        long,
+        env = "SOZU_GW_SOZU_X_REAL_IP",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    sozu_x_real_ip: bool,
 }
 
 /// `--default-health-check`.
@@ -938,6 +958,15 @@ async fn run_provisioner(
     Ok(())
 }
 
+/// The request headers Sōzu sets before it routes, as its listener options
+/// (rendered by the chart from the same values) make them.
+fn sozu_request_headers(args: &Args) -> SozuRequestHeaders {
+    SozuRequestHeaders {
+        correlation_header: args.sozu_id_header.clone(),
+        x_real_ip: args.sozu_x_real_ip,
+    }
+}
+
 /// One global reconcile: caches → IR → diff → apply. Advances `shadow` (the
 /// last-applied IR) to the desired IR only on a successful apply; a failed
 /// push replays onto it the requests Sōzu acknowledged when the result
@@ -960,6 +989,7 @@ async fn reconcile(
         controller_name: args.controller_name.clone(),
         exposure: exposure.to_vec(),
         health_check: health_check_default(args),
+        sozu_request_headers: sozu_request_headers(args),
     };
     // The stores hand out `Arc`s to the cached objects; the builder borrows
     // them as-is, so a reconcile never deep-clones the whole cluster state.
@@ -1800,6 +1830,46 @@ mod tests {
             arg.get_env(),
             Some(std::ffi::OsStr::new("SOZU_GW_METRICS_PER_CLUSTER"))
         );
+    }
+
+    /// The builder refuses header matches on what Sōzu sets before routing,
+    /// which depends on listener options the chart renders into Sōzu's config
+    /// and, through these variables, into the controller's.
+    #[test]
+    fn sozu_request_headers_follow_the_flags_and_their_env_names() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            sozu_request_headers(&Args::try_parse_from(["controller"]).unwrap()),
+            SozuRequestHeaders::default()
+        );
+        assert_eq!(
+            sozu_request_headers(
+                &Args::try_parse_from([
+                    "controller",
+                    "--sozu-id-header",
+                    "X-Trace-Id",
+                    "--sozu-x-real-ip",
+                    "true"
+                ])
+                .unwrap()
+            ),
+            SozuRequestHeaders {
+                correlation_header: "X-Trace-Id".to_string(),
+                x_real_ip: true,
+            }
+        );
+        let command = Args::command();
+        for (id, env) in [
+            ("sozu_id_header", "SOZU_GW_SOZU_ID_HEADER"),
+            ("sozu_x_real_ip", "SOZU_GW_SOZU_X_REAL_IP"),
+        ] {
+            let arg = command
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .expect("the argument exists");
+            assert_eq!(arg.get_env(), Some(std::ffi::OsStr::new(env)));
+        }
     }
 
     /// What `main` starts the metrics server with, from parsed flags: the

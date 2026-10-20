@@ -524,7 +524,7 @@ fn a_route_collision_loser_leaves_its_cluster_unchecked() {
 
 #[test]
 fn a_rule_whose_every_match_is_skipped_leaves_its_cluster_unchecked() {
-    // A header match is reported and skipped after the backend resolved: the
+    // A query match is reported and skipped after the backend resolved: the
     // rule programs no frontend, so its cluster carries nothing to check.
     let class: GatewayClass = from_json(json!({
         "metadata": { "name": "sozu" },
@@ -540,7 +540,7 @@ fn a_rule_whose_every_match_is_skipped_leaves_its_cluster_unchecked() {
         "spec": {
             "parentRefs": [{ "name": "gw" }],
             "rules": [{
-                "matches": [{ "headers": [{ "name": "x-canary", "value": "1" }] }],
+                "matches": [{ "queryParams": [{ "name": "canary", "value": "1" }] }],
                 "backendRefs": [{ "name": "web", "port": 80 }]
             }]
         }
@@ -556,6 +556,88 @@ fn a_rule_whose_every_match_is_skipped_leaves_its_cluster_unchecked() {
     let out = build(&with_default_on(), &inputs);
     assert!(out.ir.frontends.is_empty(), "{:?}", out.ir.frontends);
     assert_eq!(check_of(&out), None);
+}
+
+#[test]
+fn a_header_match_skipped_for_precedence_leaves_its_cluster_unchecked() {
+    // A plain Exact `/foo/bar` outranks a header match on the prefix `/foo`,
+    // and Sōzu cannot order the plain route's copy above it in every order,
+    // so the header match is skipped after collision resolution
+    // (`HeaderMatchOutranksRoute`). Nothing then routes to its Service: no
+    // more than a collision loser may its cluster keep a check — nor through
+    // an identical header match from another route, folded into the skipped
+    // one, which Sōzu would have served through that same frontend.
+    let (web, web_slice) = http_backend("web", "10.244.0.5");
+    let (api, api_slice) = http_backend("api", "10.244.0.6");
+    let class: GatewayClass = from_json(json!({
+        "metadata": { "name": "sozu" },
+        "spec": { "controllerName": "sozu.io/gateway-controller" }
+    }));
+    let gateway: Gateway = from_json(json!({
+        "metadata": { "name": "gw", "namespace": "demo" },
+        "spec": { "gatewayClassName": "sozu",
+            "listeners": [{ "name": "http", "protocol": "HTTP", "port": 80 }] }
+    }));
+    let route = |name: &str, created: &str, matched: serde_json::Value, service: &str| {
+        from_json::<HttpRoute>(json!({
+            "metadata": { "name": name, "namespace": "demo", "creationTimestamp": created },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": ["app.example.com"],
+                "rules": [{
+                    "matches": [matched],
+                    "backendRefs": [{ "name": service, "port": 80 }]
+                }]
+            }
+        }))
+    };
+    let canary = json!({
+        "path": { "type": "PathPrefix", "value": "/foo" },
+        "headers": [{ "name": "x-canary", "value": "1" }]
+    });
+    let inputs = Inputs {
+        gateway_classes: arcs(vec![class]),
+        gateways: arcs(vec![gateway]),
+        http_routes: arcs(vec![
+            route(
+                "plain",
+                "2026-01-01T00:00:00Z",
+                json!({ "path": { "type": "Exact", "value": "/foo/bar" } }),
+                "api",
+            ),
+            route("canary", "2026-02-01T00:00:00Z", canary.clone(), "web"),
+            route("canary-twin", "2026-03-01T00:00:00Z", canary, "web"),
+        ]),
+        services: arcs(vec![web, api]),
+        endpointslices: arcs(vec![web_slice, api_slice]),
+        ..Default::default()
+    };
+    let out = build(&with_default_on(), &inputs);
+    assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+    assert_eq!(
+        out.ir.frontends[0].cluster_id.as_deref(),
+        Some("demo.api.80")
+    );
+    let canary = out.routes.iter().find(|r| r.name == "canary").unwrap();
+    assert!(
+        canary.parents.iter().any(|p| p
+            .problems
+            .iter()
+            .any(|p| matches!(p, Problem::HeaderMatchOutranksRoute { .. }))),
+        "{:?}",
+        canary.parents
+    );
+    assert_eq!(check_on(&out, "demo.api.80"), Some(&DEFAULT));
+    assert_eq!(check_on(&out, "demo.web.80"), None);
+    assert!(route_problems(&out, "canary").is_empty());
+    assert!(route_problems(&out, "canary-twin").is_empty());
+    assert_eq!(
+        emitted_checks(&out.ir),
+        BTreeMap::from([
+            ("demo.api.80".to_string(), true),
+            ("demo.web.80".to_string(), false),
+        ])
+    );
 }
 
 // ---------------------------------------------------------------------------
