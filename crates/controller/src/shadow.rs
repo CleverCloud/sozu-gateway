@@ -20,7 +20,7 @@
 //! already dumps four listener records, so such a probe never reads "empty".
 
 use serde::{Deserialize, Serialize};
-use sozu_gw_agent::{SozuAgentHandle, SozuError, SozuGeneration};
+use sozu_gw_agent::{Request, SozuAgentHandle, SozuError, SozuGeneration};
 use sozu_gw_ir::Ir;
 use tracing::{debug, info, warn};
 
@@ -207,6 +207,67 @@ fn should_reset(
         Some(known) => known.socket != generation.socket,
         None => true,
     }
+}
+
+/// After a batch failed part-way, replay onto the shadow the first
+/// `acknowledged` requests of `batch`, the head whose effect on Sōzu's main
+/// process the agent established (`sozu_gw_agent::ApplyError::replayable`),
+/// with [`sozu_gw_translator::replay_if_exact`] and `desired`, the IR the
+/// batch was diffed towards, and persist it when that changed anything.
+/// Returns whether it did. The generation is left alone: this is the same
+/// Sōzu, and a restart is the generation check's to find.
+///
+/// The unchanged shadow would treat what Sōzu acknowledged as never sent. A
+/// removal it still lists makes an object the desired state wants again
+/// diff to nothing and stay missing; on Sōzu 2.3, a backend added to a
+/// cluster the batch removed goes out without its `AddCluster` and is
+/// refused `ClusterNotFound` on every reconcile. An add it misses makes an
+/// object the desired state drops again diff to nothing, and Sōzu keeps it.
+/// The count only covers requests Sōzu acknowledged, and stops before a
+/// teardown settled as already gone without proof that the main process
+/// dropped the object (see `sozu_gw_agent::ApplyError`), so the replay
+/// records nothing the main process may not have done.
+///
+/// The replay is adopted only when the IR it gives describes exactly the
+/// routing state those requests left. Some states have no IR spelling (a
+/// layer-4 listener held without its frontend, a cluster upserted without
+/// the UDP affinity its remaining UDP frontend implies), and a baseline that
+/// misdescribes Sōzu diffs some desired state to nothing where it must not.
+/// The shadow then stays as it was, the baseline the controller diffed from
+/// before it replayed anything.
+///
+/// A count past the end of the batch cannot come from the agent; it is read
+/// as nothing acknowledged rather than trusted.
+pub fn replay_acknowledged(
+    shadow_file: &str,
+    shadow: &mut Shadow,
+    desired: &Ir,
+    batch: &[Request],
+    acknowledged: usize,
+) -> bool {
+    let Some(applied) = batch.get(..acknowledged) else {
+        warn!(
+            acknowledged,
+            requests = batch.len(),
+            "sozu acknowledged more requests than the batch held; keeping the shadow"
+        );
+        return false;
+    };
+    let Some(replayed) = sozu_gw_translator::replay_if_exact(&shadow.ir, desired, applied) else {
+        warn!(
+            acknowledged,
+            requests = batch.len(),
+            "the requests sozu acknowledged leave a state the IR cannot describe; keeping the \
+             shadow as it was before the batch"
+        );
+        return false;
+    };
+    if replayed == shadow.ir {
+        return false;
+    }
+    shadow.ir = replayed;
+    persist(shadow_file, shadow);
+    true
 }
 
 /// Persist the shadow. Best-effort: a write failure must never fail a reconcile.
@@ -660,6 +721,132 @@ mod tests {
         let current = generation_fixture([7, 8]);
         let loaded = load_initial(&path, Some(&current));
         assert_eq!(loaded.ir, Ir::default());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// After a failed batch the shadow becomes the previous one with the
+    /// requests Sōzu acknowledged replayed onto it, adds included, keeps its
+    /// generation, and is persisted only when that changed it, so a
+    /// controller restart resumes from the same baseline.
+    #[test]
+    fn a_failed_batch_replays_what_sozu_acknowledged_onto_the_shadow() {
+        let path = temp_shadow_path("partial-apply");
+        let _ = std::fs::remove_file(&path);
+        let backend = |n: u8| sozu_gw_ir::Backend {
+            cluster_id: "demo.web.80".into(),
+            backend_id: format!("demo.web.80-{n}"),
+            address: std::net::SocketAddr::from(([10, 0, 0, n], 80)),
+            weight: None,
+            sticky_id: None,
+        };
+        let mut applied = applied_ir();
+        applied.backends.push(backend(1));
+        let mut desired = applied_ir();
+        desired.backends.push(backend(2));
+        // The new backend goes in, then the old one out.
+        let batch = sozu_gw_translator::reconcile(&applied, &desired).expect("translate");
+        assert_eq!(batch.len(), 2);
+        let generation = Some(generation_fixture([7, 8]));
+        let fresh = || Shadow {
+            generation: generation.clone(),
+            ir: applied.clone(),
+        };
+
+        let mut shadow = fresh();
+        assert!(!replay_acknowledged(
+            &path,
+            &mut shadow,
+            &desired,
+            &batch,
+            0
+        ));
+        assert!(
+            !replay_acknowledged(&path, &mut shadow, &desired, &batch, batch.len() + 1),
+            "a count past the batch is not trusted"
+        );
+        assert_eq!(shadow, fresh());
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "an unchanged shadow is not rewritten"
+        );
+
+        assert!(replay_acknowledged(&path, &mut shadow, &desired, &batch, 1));
+        let mut both = applied.clone();
+        both.backends.push(backend(2));
+        assert_eq!(shadow.ir, both, "the new backend's add was acknowledged");
+        assert_eq!(shadow.generation, generation);
+        let raw = std::fs::read_to_string(&path).expect("shadow file present");
+        let persisted: Shadow = serde_json::from_str(&raw).expect("persisted shadow parses");
+        assert_eq!(persisted, shadow);
+
+        let mut shadow = fresh();
+        assert!(replay_acknowledged(&path, &mut shadow, &desired, &batch, 2));
+        assert_eq!(shadow.ir, desired);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A replay that would misdescribe Sōzu is not adopted: the cluster's
+    /// upsert dropped the UDP affinity its route implies, and the route's
+    /// removal never landed. The shadow stays as it was and is not
+    /// rewritten, so a desired state that wants the route back re-sends the
+    /// cluster with affinity.
+    #[test]
+    fn a_replay_the_ir_cannot_spell_keeps_the_shadow() {
+        let path = temp_shadow_path("partial-apply-inexact");
+        let _ = std::fs::remove_file(&path);
+        let mut applied = applied_ir();
+        applied.backends.push(sozu_gw_ir::Backend {
+            cluster_id: "demo.web.80".into(),
+            backend_id: "demo.web.80-1".into(),
+            address: std::net::SocketAddr::from(([10, 0, 0, 1], 53)),
+            weight: None,
+            sticky_id: None,
+        });
+        applied.l4_frontends.push(sozu_gw_ir::L4Frontend {
+            protocol: sozu_gw_ir::L4Protocol::Udp,
+            listener: std::net::SocketAddr::from(([0, 0, 0, 0], 5353)),
+            cluster_id: "demo.web.80".into(),
+        });
+        let mut desired = applied.clone();
+        desired.clusters[0].load_balancing = sozu_gw_ir::LbAlgorithm::Random;
+        desired.l4_frontends.clear();
+        let batch = sozu_gw_translator::reconcile(&applied, &desired).expect("translate");
+        let fresh = Shadow {
+            generation: Some(generation_fixture([7, 8])),
+            ir: applied.clone(),
+        };
+
+        let mut shadow = fresh.clone();
+        assert!(!replay_acknowledged(
+            &path,
+            &mut shadow,
+            &desired,
+            &batch,
+            1
+        ));
+        assert_eq!(shadow, fresh);
+        assert!(!std::path::Path::new(&path).exists());
+
+        let mut route_back = desired.clone();
+        route_back.l4_frontends = applied.l4_frontends.clone();
+        let retry = sozu_gw_translator::reconcile(&shadow.ir, &route_back).expect("translate");
+        assert!(
+            retry.iter().any(|r| matches!(
+                &r.request_type,
+                Some(sozu_command_lib::proto::command::request::RequestType::AddCluster(c))
+                    if c.udp.is_some()
+            )),
+            "{retry:?}"
+        );
+
+        assert!(replay_acknowledged(
+            &path,
+            &mut shadow,
+            &desired,
+            &batch,
+            batch.len()
+        ));
+        assert_eq!(shadow.ir, desired);
         let _ = std::fs::remove_file(&path);
     }
 }

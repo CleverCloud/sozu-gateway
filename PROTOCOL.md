@@ -147,6 +147,17 @@ cookie alternated between both backends; after an `AddBackend` upsert setting
 the cookie was no longer re-issued. The upsert updates `sticky_id` in place in
 the main process's state and in each worker.
 
+An `AddBackend` naming a cluster the main process does not hold is refused since
+2.3: `could not apply request on the main process state: Backend names a cluster
+that does not exist (cluster_id_bytes=N); add the cluster first`. 2.2.1 accepts it
+and serves nothing for it. ✅ Measured on both
+([partial-apply probes](docs/probes/)): after an acknowledged `RemoveCluster`, a
+shadow that still lists the cluster re-sends only the new backend, which 2.3.2
+refuses on every reconcile. On 2.3 `RemoveCluster` also removes the cluster's
+backends and its HTTP, HTTPS, TCP and UDP frontends (`ConfigState::remove_cluster`,
+read in the 2.3.2 source); 2.2.1 removes the cluster entry alone. The translator's
+batches remove the frontends and backends explicitly before the cluster either way.
+
 ### `PathRule`
 ```rust
 kind:  i32      // PathRuleKind: Prefix=0, Regex=1, Equals=2

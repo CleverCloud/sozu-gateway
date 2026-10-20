@@ -29,16 +29,17 @@ use std::time::{Duration, Instant};
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
     request::RequestType, response_content::ContentType, AddCertificate, FrontendFilters,
-    ListedFrontends, ReplaceCertificate, Request, RequestTcpFrontend, Response, ResponseContent,
+    ListedFrontends, ReplaceCertificate, RequestTcpFrontend, Response, ResponseContent,
     ResponseStatus, RunState, Status,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-// Re-exported so callers (the controller) can drive `query_metrics` without
-// taking a direct dependency on `sozu-command-lib`.
-pub use sozu_command_lib::proto::command::{AggregatedMetrics, QueryMetricsOptions};
+// Re-exported so callers (the controller) can drive `query_metrics`, and name
+// the batch they apply, without taking a direct dependency on
+// `sozu-command-lib`.
+pub use sozu_command_lib::proto::command::{AggregatedMetrics, QueryMetricsOptions, Request};
 
 /// Client-side socket buffer sizes (server bounds come from `config.toml`).
 const DEFAULT_BUFFER_SIZE: u64 = 1024 * 1024;
@@ -189,6 +190,9 @@ fn worker_segments(message: &str) -> Vec<&str> {
 /// only folds the responses it received and answers `Failure` when a worker
 /// timed out, so all-`OK` under a `Failure` status means a worker never
 /// answered, not that the object is gone.
+///
+/// Settling such a teardown keeps reconciliation going; it does not always
+/// prove the main process dropped the object (see [`gone_from_main_process`]).
 fn is_already_gone(request: &Request, failure_message: &str) -> bool {
     if !is_teardown(request) {
         return false;
@@ -218,6 +222,28 @@ fn is_already_gone(request: &Request, failure_message: &str) -> bool {
         gone
     });
     all_benign && saw_gone
+}
+
+/// Does a teardown refusal that [`is_already_gone`] accepts also prove that
+/// Sōzu's main process does not hold the object? It does when the main
+/// process refused the request itself (its own prefix: it found nothing to
+/// remove and sent the request to no worker), or when a worker answered
+/// `OK`: the main process applied the removal before fanning it out, and a
+/// worker took it, so it is kept.
+///
+/// Otherwise every worker refused it, and the main process may hold the
+/// object anyway: since Sōzu 2.3.0 it reverts its own state when no worker
+/// acknowledges a change (`should_rollback_fanout`, the inverse of a
+/// frontend removal snapshotted by `ConfigState::rollback_for`), and a worker
+/// it forks later is fed that state. 2.2.1 keeps the removal, but the two
+/// cannot be told apart from the answer, so such a settlement is not proof.
+fn gone_from_main_process(failure_message: &str) -> bool {
+    failure_message
+        .to_ascii_lowercase()
+        .starts_with("could not apply request on the main process state:")
+        || worker_segments(failure_message)
+            .iter()
+            .any(|segment| segment.eq_ignore_ascii_case("ok"))
 }
 
 /// Was this `ReplaceCertificate` refused because Sōzu's main process holds no
@@ -387,6 +413,37 @@ fn stored_removal(request: &Request, listed: ListedFrontends) -> Option<Request>
     }
 }
 
+/// What the main process holds under a frontend key once
+/// [`SozuAgent::evict_stale_holder`] is done with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Eviction {
+    /// Another cluster's route was there, and its removal was acknowledged.
+    Removed,
+    /// Nothing was there.
+    Nothing,
+    /// A route is left there that the teardown meant to take out: the one it
+    /// named, or another cluster's whose removal was refused as already gone.
+    Left,
+}
+
+/// How far a batch got (see [`SozuAgent::apply_tracked`]).
+#[derive(Debug, Default)]
+struct Progress {
+    /// Requests at the head that Sōzu acknowledged or that were settled.
+    acknowledged: usize,
+    /// The index of the first settled request whose effect on the main
+    /// process is not established (see [`ApplyError::replayable`]).
+    unproven: Option<usize>,
+}
+
+impl Progress {
+    /// The request at `index` was settled without establishing what the
+    /// main process holds; only the first such index is kept.
+    fn unproven(&mut self, index: usize) {
+        self.unproven.get_or_insert(index);
+    }
+}
+
 /// What a lookup of the entry holding a frontend key found.
 #[derive(Debug)]
 enum Holder {
@@ -434,6 +491,39 @@ pub enum SozuError {
     WorkerGone,
     #[error("apply abandoned by its caller after {applied} of {total} requests")]
     Abandoned { applied: usize, total: usize },
+}
+
+/// A batch that stopped part-way: how many requests at its head Sōzu
+/// acknowledged, and why it stopped.
+///
+/// A request counts when Sōzu answered it `Ok`, or when this crate settled
+/// its failure: a teardown of an object Sōzu no longer holds, a repaired
+/// duplicate frontend add, a duplicate listener add, a replacement added
+/// instead (see [`SozuAgent::apply`]). The request the batch stopped on never
+/// counts, whatever it left behind, because its effects are not reliably
+/// established. A refusal can still have changed something: Sōzu 2.2.1's main
+/// process drops a `ReplaceCertificate`'s old certificate before it parses
+/// the new one, and refuses the request when that parse fails. A frontend add
+/// can fail after its repair evicted the stored entry. A reply that never
+/// came (a read timeout, a broken channel) says nothing either way. So the
+/// first `applied` requests are exactly the ones Sōzu acknowledged.
+///
+/// A settled teardown does not always establish what the main process
+/// holds: when every worker refused it, the main process may have reverted
+/// it (see [`gone_from_main_process`]), and an eviction this crate gave up on
+/// leaves a route in the main process. `replayable` stops before the first
+/// such request, so a caller that replays the first `replayable` requests
+/// onto its baseline records nothing the main process may not hold.
+#[derive(Debug, Error)]
+#[error("{cause} (after sozu acknowledged {applied} of the batch's requests)")]
+pub struct ApplyError {
+    /// Requests at the head of the batch that Sōzu acknowledged.
+    pub applied: usize,
+    /// The head of those whose effect on the main process is established:
+    /// `applied`, cut before the first settlement that does not prove it.
+    pub replayable: usize,
+    /// Why the batch stopped.
+    pub cause: SozuError,
 }
 
 /// Identity of the command socket in the shared filesystem. Container restarts
@@ -676,18 +766,47 @@ impl SozuAgent {
     /// certificate at that listener (see [`is_replace_into_empty_listener`]),
     /// which is applied as an add of the replacement instead.
     pub fn apply(&mut self, requests: &[Request]) -> Result<(), SozuError> {
+        self.apply_counted(requests)
+            .map_err(|failure| failure.cause)
+    }
+
+    /// [`Self::apply`], reporting on failure how many requests at the head of
+    /// the batch Sōzu acknowledged (see [`ApplyError`]).
+    pub fn apply_counted(&mut self, requests: &[Request]) -> Result<(), ApplyError> {
         self.apply_unless(requests, || false)
     }
 
-    /// [`Self::apply`], stopping between two requests once `abandoned()` turns
-    /// true. The caller that bounds an apply with a deadline drops its side of
-    /// the reply channel when it gives up; the batch must not keep landing on
-    /// the socket after that, or Sōzu drifts from a shadow the caller already
-    /// declared not applied and the next batch queues behind the orphan.
+    /// [`Self::apply_counted`], stopping between two requests once
+    /// `abandoned()` turns true. The caller that bounds an apply with a
+    /// deadline drops its side of the reply channel when it gives up; the
+    /// batch must not keep landing on the socket after that, or Sōzu drifts
+    /// from a shadow the caller already declared not applied and the next
+    /// batch queues behind the orphan.
     fn apply_unless(
         &mut self,
         requests: &[Request],
         abandoned: impl Fn() -> bool,
+    ) -> Result<(), ApplyError> {
+        let mut progress = Progress::default();
+        self.apply_tracked(requests, abandoned, &mut progress)
+            .map_err(|cause| ApplyError {
+                applied: progress.acknowledged,
+                replayable: progress
+                    .unproven
+                    .map_or(progress.acknowledged, |at| at.min(progress.acknowledged)),
+                cause,
+            })
+    }
+
+    /// The loop behind [`Self::apply_unless`]. `progress.acknowledged`
+    /// counts the requests settled so far; it moves past a request only once
+    /// Sōzu acknowledged it or its failure was settled, so on an error it is
+    /// the index of the request the batch stopped on.
+    fn apply_tracked(
+        &mut self,
+        requests: &[Request],
+        abandoned: impl Fn() -> bool,
+        progress: &mut Progress,
     ) -> Result<(), SozuError> {
         for (applied, request) in requests.iter().enumerate() {
             if abandoned() {
@@ -714,13 +833,17 @@ impl SozuAgent {
                             .to_ascii_lowercase()
                             .contains("nothing to remove") =>
                 {
-                    if self.evict_stale_holder(
+                    match self.evict_stale_holder(
                         request,
                         &response.message,
                         &abandoned,
                         (applied, requests.len()),
                     )? {
-                        warn!(message = %response.message, "sozu still routes this key for another cluster; removed the stored route");
+                        Eviction::Removed => {
+                            warn!(message = %response.message, "sozu still routes this key for another cluster; removed the stored route");
+                        }
+                        Eviction::Nothing => {}
+                        Eviction::Left => progress.unproven(applied),
                     }
                 }
                 Ok(_) => {}
@@ -740,17 +863,25 @@ impl SozuAgent {
                 // can belong to a cluster the shadow never knew (see
                 // [`stored_removal`]), so it is evicted as stored first.
                 Err(SozuError::Failure(msg)) if is_already_gone(request, &msg) => {
-                    if is_frontend_teardown(request)
-                        && self.evict_stale_holder(
+                    let eviction = if is_frontend_teardown(request) {
+                        self.evict_stale_holder(
                             request,
                             &msg,
                             &abandoned,
                             (applied, requests.len()),
                         )?
-                    {
+                    } else {
+                        Eviction::Nothing
+                    };
+                    if eviction == Eviction::Removed {
                         warn!(error = %msg, "sozu still routes this key for another cluster; removed the stored route");
                     } else {
                         warn!(error = %msg, "sozu no longer holds the object this teardown targets; treating it as already-gone so reconciliation converges");
+                    }
+                    // Settled, but only the main process's own refusal or a
+                    // worker that took the removal proves it holds nothing.
+                    if eviction == Eviction::Left || !gone_from_main_process(&msg) {
+                        progress.unproven(applied);
                     }
                 }
                 // The mirror image: an add Sōzu already holds (the shadow missed
@@ -789,9 +920,9 @@ impl SozuAgent {
                                 Err(channel_error) => return Err(channel_error),
                             }
                             // One repair attempt only: if the re-add fails — even
-                            // with another `Exists` — fail the batch, so the
-                            // shadow stays put and the next reconcile retries
-                            // from the unchanged baseline.
+                            // with another `Exists` — fail the batch. The add is
+                            // not counted as acknowledged, so the next reconcile
+                            // sends it again.
                             self.apply_one(request)?;
                         }
                         // L4 listener adds: address-keyed, a duplicate cannot
@@ -813,22 +944,24 @@ impl SozuAgent {
                 }
                 Err(e) => return Err(e),
             }
+            progress.acknowledged = applied + 1;
         }
         Ok(())
     }
 
     /// After a frontend removal Sōzu answered with "nothing to remove",
     /// remove whatever still holds the key under another cluster (see
-    /// [`stored_removal`]). `true` when it removed one. A listing that cannot
-    /// be read fails: "could not tell" is not "nothing there", and tolerating
-    /// it would advance the shadow over a route that may still serve.
+    /// [`stored_removal`]), and say what the main process is left holding
+    /// under it. A listing that cannot be read fails: "could not tell" is not
+    /// "nothing there", and tolerating it would advance the shadow over a
+    /// route that may still serve.
     fn evict_stale_holder(
         &mut self,
         request: &Request,
         answer: &str,
         abandoned: &impl Fn() -> bool,
         (applied, total): (usize, usize),
-    ) -> Result<bool, SozuError> {
+    ) -> Result<Eviction, SozuError> {
         match self.key_holder(request)? {
             Holder::Stored(stored) if *stored != *request => {
                 // The lookup took a round-trip: a caller that gave up
@@ -837,7 +970,7 @@ impl SozuAgent {
                     return Err(SozuError::Abandoned { applied, total });
                 }
                 match self.apply_one(&stored) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => Ok(Eviction::Removed),
                     // Every worker refuses the removal as not routing the key
                     // either: the main process holds a route nothing serves.
                     // Sōzu 2.3 leaves one behind when every worker stayed
@@ -848,7 +981,7 @@ impl SozuAgent {
                     // reaches; a Sōzu restart clears it.
                     Err(SozuError::Failure(refusal)) if is_already_gone(&stored, &refusal) => {
                         warn!(error = %refusal, "sozu's main process keeps a route for this key that no worker serves; leaving it until sozu restarts");
-                        Ok(false)
+                        Ok(Eviction::Left)
                     }
                     Err(error) => Err(error),
                 }
@@ -857,7 +990,10 @@ impl SozuAgent {
                 "{answer} (and the frontends holding this key could not be listed to tell \
                  whether it still routes)"
             ))),
-            Holder::Stored(_) | Holder::Nothing => Ok(false),
+            // The main process still stores the very route the removal
+            // named: the removal was reverted (see `gone_from_main_process`).
+            Holder::Stored(_) => Ok(Eviction::Left),
+            Holder::Nothing => Ok(Eviction::Nothing),
         }
     }
 
@@ -865,7 +1001,8 @@ impl SozuAgent {
     /// certificate (see [`is_replace_into_empty_listener`]), send the
     /// replacement as an `AddCertificate` (see [`addition_for`]); the replace
     /// counts as applied when the add is. A refused add fails the batch with
-    /// both answers, so the shadow stays put and the next reconcile retries.
+    /// both answers, the replace not counted as acknowledged, so the next
+    /// reconcile retries it.
     fn add_replacement(
         &mut self,
         request: &Request,
@@ -996,7 +1133,7 @@ impl SozuAgent {
 // ----------------------------------------------------------------------------
 
 enum Job {
-    Apply(Vec<Request>, oneshot::Sender<Result<(), SozuError>>),
+    Apply(Vec<Request>, oneshot::Sender<Result<(), ApplyError>>),
     SaveState(String, oneshot::Sender<Result<(), SozuError>>),
     QueryMetrics(
         QueryMetricsOptions,
@@ -1090,13 +1227,21 @@ impl SozuAgentHandle {
         self.reconnects.load(Ordering::Relaxed)
     }
 
-    /// Apply a batch of requests, awaiting Sōzu's acks.
-    pub async fn apply(&self, requests: Vec<Request>) -> Result<(), SozuError> {
+    /// Apply a batch of requests, awaiting Sōzu's acks. A failure reports how
+    /// many requests at the head of the batch Sōzu acknowledged (see
+    /// [`ApplyError`]); none when the worker thread is gone, since nothing
+    /// then says how far it got.
+    pub async fn apply(&self, requests: Vec<Request>) -> Result<(), ApplyError> {
+        let worker_gone = || ApplyError {
+            applied: 0,
+            replayable: 0,
+            cause: SozuError::WorkerGone,
+        };
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Job::Apply(requests, reply_tx))
-            .map_err(|_| SozuError::WorkerGone)?;
-        reply_rx.await.map_err(|_| SozuError::WorkerGone)?
+            .map_err(|_| worker_gone())?;
+        reply_rx.await.map_err(|_| worker_gone())?
     }
 
     /// Ask Sōzu to dump its full routing state to `path` (a file both the
@@ -1407,6 +1552,408 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A failed batch reports how many requests at its head Sōzu acknowledged:
+    /// those it answered `Ok` and those whose failure was settled (here an
+    /// already-gone teardown). The request it stopped on is not counted, and
+    /// nothing after it is sent. The controller replays exactly that many
+    /// requests onto its shadow, so one too many would record a request Sōzu
+    /// refused.
+    #[test]
+    fn a_failed_batch_counts_the_requests_sozu_acknowledged_before_it() {
+        let path = temp_socket_path("partial-count");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                ok_response(),
+                failure_response(
+                    "could not apply request on the main process state: Did not find Cluster \
+                     with address or id_bytes=4",
+                ),
+                failure_response(
+                    "could not apply request on the main process state: Invalid character 'z' \
+                     at position 0",
+                ),
+            ],
+        );
+        let batch: Vec<Request> = vec![
+            RequestType::RemoveBackend(RemoveBackend::default()).into(),
+            RequestType::RemoveCluster("gone".to_string()).into(),
+            RequestType::RemoveCertificate(RemoveCertificate {
+                address: socket_address(8443),
+                fingerprint: "zz".to_string(),
+            })
+            .into(),
+            RequestType::RemoveCluster("never-sent".to_string()).into(),
+        ];
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply_counted(&batch).unwrap_err();
+        assert_eq!(err.applied, 2, "got {err:?}");
+        assert_eq!(
+            err.replayable, 2,
+            "the main process refused the teardown itself: {err:?}"
+        );
+        assert!(
+            matches!(&err.cause, SozuError::Failure(m) if m.contains("Invalid character")),
+            "got {err:?}"
+        );
+        drop(agent);
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(
+            received,
+            batch[..3],
+            "nothing may follow the failed request"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every worker refusing a removal as already gone, in the main process's
+    /// aggregate of their answers (2.2.1 and 2.3.2 alike).
+    const EVERY_WORKER_GONE: &str = "0: Could not execute order on config state: Did not \
+         find Cluster with address or id_bytes=1, 1: Could not execute order on config state: \
+         Did not find Cluster with address or id_bytes=1";
+
+    /// A settled teardown proves the main process holds nothing only by the
+    /// main process's own refusal, or by a worker that took the removal.
+    /// Every worker refusing it proves nothing: since 2.3.0 the main process
+    /// then reverts its own state.
+    #[test]
+    fn only_the_main_process_refusal_or_a_worker_ok_proves_a_teardown_gone() {
+        let remove: Request = RequestType::RemoveCluster("c".to_string()).into();
+        for (message, proves) in [
+            (
+                "could not apply request on the main process state: Did not find Cluster with \
+                 address or id_bytes=1",
+                true,
+            ),
+            (
+                "Could Not Apply Request On The Main Process State: dispatching this request \
+                 did not bring any change to the state",
+                true,
+            ),
+            (
+                "0: OK, 1: Could not execute order on config state: Did not find Cluster with \
+                 address or id_bytes=1",
+                true,
+            ),
+            (
+                "1: Could not execute order on config state: Did not find Cluster with address \
+                 or id_bytes=1, 0: ok",
+                true,
+            ),
+            (EVERY_WORKER_GONE, false),
+            ("Did not find Cluster with address or id_bytes=1", false),
+            (
+                "0: found no listener for that address, 1: not ok: Did not find Cluster with \
+                 address or id_bytes=1",
+                false,
+            ),
+        ] {
+            assert!(is_already_gone(&remove, message), "{message}");
+            assert_eq!(gone_from_main_process(message), proves, "{message}");
+        }
+    }
+
+    /// The first settlement that proves nothing cuts what the batch reports
+    /// for replay, there: that request and everything after it are left out,
+    /// though Sōzu acknowledged them.
+    #[test]
+    fn a_settlement_that_proves_nothing_cuts_the_replayable_head() {
+        let path = temp_socket_path("partial-unproven");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(
+                    "0: OK, 1: Could not execute order on config state: Did not find Cluster \
+                     with address or id_bytes=1",
+                ),
+                failure_response(EVERY_WORKER_GONE),
+                failure_response(
+                    "could not apply request on the main process state: Did not find Cluster \
+                     with address or id_bytes=1",
+                ),
+                failure_response(
+                    "could not apply request on the main process state: Invalid character 'z' \
+                     at position 0",
+                ),
+            ],
+        );
+        let batch: Vec<Request> = vec![
+            RequestType::RemoveCluster("a".to_string()).into(),
+            RequestType::RemoveCluster("b".to_string()).into(),
+            RequestType::RemoveCluster("c".to_string()).into(),
+            RequestType::RemoveCertificate(RemoveCertificate {
+                address: socket_address(8443),
+                fingerprint: "zz".to_string(),
+            })
+            .into(),
+        ];
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply_counted(&batch).unwrap_err();
+        assert_eq!((err.applied, err.replayable), (3, 1), "{err:?}");
+        drop(agent);
+        assert_eq!(server.join().expect("fake sozu thread"), batch);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A frontend teardown whose key the main process still holds afterwards
+    /// proves nothing either: the route it named is listed again (the
+    /// removal was reverted), or another cluster's route whose removal every
+    /// worker refused is left in place. Both after a refusal and after 2.3's
+    /// "nothing to remove".
+    #[test]
+    fn a_route_the_main_process_still_holds_cuts_the_replayable_head() {
+        let nothing_to_remove = Response {
+            status: ResponseStatus::Ok as i32,
+            message: "nothing to remove: cluster shadow does not exist (removed, or never \
+                      added); this key belongs to cluster stale, left in place"
+                .to_string(),
+            content: None,
+        };
+        let main_gone = || {
+            failure_response(
+                "could not apply request on the main process state: Did not find \
+                 HttpFrontend with address or id_bytes=36",
+            )
+        };
+        let listed = |front: RequestHttpFrontend| {
+            frontend_list_response(ListedFrontends {
+                http_frontends: vec![front],
+                ..ListedFrontends::default()
+            })
+        };
+        let refused = failure_response(
+            "could not apply request on the main process state: Invalid character 'z' at \
+             position 0",
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(http_front("shadow", "/")).into();
+        let every_worker_gone = failure_response(
+            "0: Could not execute order on config state: Did not find HttpFrontend with \
+             address or id_bytes=36, 1: Could not execute order on config state: Did not find \
+             HttpFrontend with address or id_bytes=36",
+        );
+        for (name, script, replayable) in [
+            (
+                "evicted",
+                vec![
+                    main_gone(),
+                    listed(http_front("stale", "/")),
+                    ok_response(),
+                    ok_response(),
+                    refused.clone(),
+                ],
+                2,
+            ),
+            (
+                "eviction-refused",
+                vec![
+                    main_gone(),
+                    listed(http_front("stale", "/")),
+                    every_worker_gone.clone(),
+                    ok_response(),
+                    refused.clone(),
+                ],
+                0,
+            ),
+            (
+                "reverted",
+                vec![
+                    every_worker_gone.clone(),
+                    listed(http_front("shadow", "/")),
+                    ok_response(),
+                    refused.clone(),
+                ],
+                0,
+            ),
+            (
+                "nothing-left",
+                vec![
+                    nothing_to_remove.clone(),
+                    listed(http_front("stale", "/")),
+                    every_worker_gone.clone(),
+                    ok_response(),
+                    refused.clone(),
+                ],
+                0,
+            ),
+        ] {
+            let path = temp_socket_path(&format!("unproven-{name}"));
+            let server = spawn_scripted_fake_sozu(&path, script);
+            let batch: Vec<Request> = vec![
+                remove.clone(),
+                RequestType::RemoveCluster("other".to_string()).into(),
+                RequestType::RemoveCertificate(RemoveCertificate {
+                    address: socket_address(8443),
+                    fingerprint: "zz".to_string(),
+                })
+                .into(),
+            ];
+            let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+            let err = agent.apply_counted(&batch).unwrap_err();
+            assert_eq!(
+                (err.applied, err.replayable),
+                (2, replayable),
+                "{name}: {err:?}"
+            );
+            drop(agent);
+            server.join().expect("fake sozu thread");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// What the cut is for. A teardown every worker refused may have been
+    /// reverted in the main process; replayed, it would leave the shadow, and
+    /// no later reconcile would ask for it again. Replaying the established
+    /// head keeps it, and the next reconcile sends the removal again. Sōzu
+    /// 2.3.2 reverts a frontend removal, not a backend one (`rollback_for`
+    /// has no inverse for it), but the answer does not say which verb it was
+    /// for, so the agent cuts at both alike; the backend removal here
+    /// exercises that bookkeeping.
+    #[test]
+    fn a_cut_replay_keeps_what_the_main_process_may_still_hold() {
+        use sozu_gw_ir as ir;
+        use sozu_gw_translator as tr;
+
+        let cluster = ir::Cluster {
+            id: "c".to_string(),
+            load_balancing: ir::LbAlgorithm::RoundRobin,
+            sticky_session: false,
+            https_redirect: false,
+            max_connections_per_ip: None,
+            retry_after: None,
+        };
+        let backend = |n: u8| ir::Backend {
+            cluster_id: "c".to_string(),
+            backend_id: format!("c-{n}"),
+            address: std::net::SocketAddr::from(([10, 0, 0, n], 80)),
+            weight: None,
+            sticky_id: None,
+        };
+        let previous = ir::Ir {
+            clusters: vec![cluster.clone()],
+            backends: vec![backend(1), backend(2), backend(3)],
+            ..ir::Ir::default()
+        };
+        let desired = ir::Ir {
+            clusters: vec![cluster],
+            backends: vec![backend(1)],
+            ..ir::Ir::default()
+        };
+        let removals = tr::reconcile(&previous, &desired).expect("translate");
+        assert_eq!(removals.len(), 2, "{removals:?}");
+        let mut batch = removals.clone();
+        batch.push(
+            RequestType::RemoveCertificate(RemoveCertificate {
+                address: socket_address(8443),
+                fingerprint: "zz".to_string(),
+            })
+            .into(),
+        );
+
+        let path = temp_socket_path("unproven-replay");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(EVERY_WORKER_GONE),
+                ok_response(),
+                failure_response(
+                    "could not apply request on the main process state: Invalid character 'z' \
+                     at position 0",
+                ),
+            ],
+        );
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply_counted(&batch).unwrap_err();
+        assert_eq!((err.applied, err.replayable), (2, 0), "{err:?}");
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+
+        let cut = tr::replay_if_exact(&previous, &desired, &batch[..err.replayable])
+            .expect("nothing replayed");
+        assert_eq!(cut, previous);
+        assert_eq!(
+            tr::reconcile(&cut, &desired).expect("translate"),
+            removals,
+            "both removals are sent again"
+        );
+        let uncut = tr::replay_if_exact(&previous, &desired, &batch[..err.applied])
+            .expect("the replay of every acknowledged request is exact");
+        assert_eq!(uncut, desired);
+        assert!(
+            tr::reconcile(&uncut, &desired)
+                .expect("translate")
+                .is_empty(),
+            "replayed in full, nothing would ask for the removal again"
+        );
+    }
+
+    /// A request whose reply never came is indeterminate and not counted: the
+    /// first request is acknowledged, the second is read and never answered,
+    /// on the first connection and on the retry.
+    #[test]
+    fn a_request_whose_reply_never_came_is_not_counted() {
+        let path = temp_socket_path("partial-unanswered");
+        let read_timeout = Duration::from_millis(100);
+        let server = spawn_per_connection_fake_sozu(
+            &path,
+            vec![
+                Box::new(|mut channel: Channel<Response, Request>| {
+                    if channel
+                        .read_message_blocking_timeout(Some(Duration::from_secs(2)))
+                        .is_ok()
+                    {
+                        let _ = channel.write_message(&ok_response());
+                    }
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                }),
+                Box::new(|mut channel: Channel<Response, Request>| {
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                    let _ = channel.read_message_blocking_timeout(Some(Duration::from_secs(2)));
+                }),
+            ],
+        );
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.read_timeout = read_timeout;
+        let batch: Vec<Request> = vec![
+            RequestType::RemoveCluster("first".to_string()).into(),
+            RequestType::RemoveCluster("unanswered".to_string()).into(),
+        ];
+        let err = agent.apply_counted(&batch).unwrap_err();
+        assert_eq!(err.applied, 1, "got {err:?}");
+        assert!(matches!(err.cause, SozuError::Channel(_)), "got {err:?}");
+        drop(agent);
+        server.join().expect("fake sozu thread");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The async handle hands the count back to its caller.
+    #[tokio::test]
+    async fn the_handle_reports_how_far_a_failed_batch_got() {
+        let path = temp_socket_path("partial-handle");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![ok_response(), failure_response("refused for the test")],
+        );
+        let handle = SozuAgentHandle::spawn(path.to_str().expect("utf-8 path")).expect("spawn");
+        let err = handle
+            .apply(vec![
+                RequestType::RemoveCluster("a".to_string()).into(),
+                RequestType::RemoveCluster("b".to_string()).into(),
+                RequestType::RemoveCluster("c".to_string()).into(),
+            ])
+            .await
+            .unwrap_err();
+        assert_eq!(err.applied, 1, "got {err:?}");
+        assert!(
+            matches!(&err.cause, SozuError::Failure(m) if m == "refused for the test"),
+            "got {err:?}"
+        );
+        drop(handle);
+        assert_eq!(server.join().expect("fake sozu thread").len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// What one accepted connection of [`spawn_per_connection_fake_sozu`] does.
     type ConnectionHandler = Box<dyn FnOnce(Channel<Response, Request>) + Send>;
 
@@ -1567,9 +2114,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SozuError::Abandoned {
+                ApplyError {
                     applied: 1,
-                    total: 2
+                    replayable: 1,
+                    cause: SozuError::Abandoned {
+                        applied: 1,
+                        total: 2
+                    }
                 }
             ),
             "got {err:?}"
@@ -1746,7 +2297,7 @@ mod tests {
     }
 
     /// If the re-add after the repair fails hard, the batch must fail — the
-    /// shadow stays put and the next reconcile retries; never a silent skip.
+    /// add is not counted and the next reconcile retries; never a silent skip.
     /// A lookup Sōzu cannot answer falls back to the add's own payload.
     #[test]
     fn failed_readd_after_repair_fails_the_batch() {
@@ -2261,7 +2812,17 @@ mod tests {
             .apply(vec![RequestType::Status(Status {}).into()])
             .await
             .unwrap_err();
-        assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                ApplyError {
+                    applied: 0,
+                    replayable: 0,
+                    cause: SozuError::Channel(_)
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     fn http_front(cluster: &str, path: &str) -> RequestHttpFrontend {
@@ -2557,9 +3118,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SozuError::Abandoned {
+                ApplyError {
                     applied: 0,
-                    total: 1
+                    replayable: 0,
+                    cause: SozuError::Abandoned {
+                        applied: 0,
+                        total: 1
+                    }
                 }
             ),
             "{err:?}"
@@ -2857,9 +3422,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SozuError::Abandoned {
+                ApplyError {
                     applied: 0,
-                    total: 1
+                    replayable: 0,
+                    cause: SozuError::Abandoned {
+                        applied: 0,
+                        total: 1
+                    }
                 }
             ),
             "{err:?}"

@@ -861,9 +861,10 @@ async fn run_provisioner(
     Ok(())
 }
 
-/// One global reconcile: caches → IR → diff → apply. Updates `shadow` (the
-/// last-applied IR) only on a successful apply, so a failed push is retried from
-/// the same baseline.
+/// One global reconcile: caches → IR → diff → apply. Advances `shadow` (the
+/// last-applied IR) to the desired IR only on a successful apply; a failed
+/// push replays onto it the requests Sōzu acknowledged when the result
+/// describes what Sōzu holds, so it is retried from there.
 #[allow(clippy::too_many_arguments)]
 async fn reconcile(
     args: &Args,
@@ -952,11 +953,34 @@ async fn reconcile(
             "applying changes to sozu"
         );
         // Bound the apply so a wedged Sōzu socket surfaces as a retryable error
-        // instead of stalling the reconcile loop indefinitely.
-        tokio::time::timeout(Duration::from_secs(60), agent.apply(requests))
+        // instead of stalling the reconcile loop indefinitely. On that timeout
+        // the agent stops between two requests but the count of what landed
+        // never reaches us, so the shadow stays where it is, as before.
+        let applied = tokio::time::timeout(Duration::from_secs(60), agent.apply(requests.clone()))
             .await
-            .context("timed out applying requests to sozu")?
-            .context("apply requests to sozu")?;
+            .context("timed out applying requests to sozu")?;
+        if let Err(failure) = applied {
+            // Sōzu holds what it acknowledged before the batch stopped: the
+            // shadow must record it, removals and adds alike, or a desired
+            // state that wants a removed object again, or drops an added one,
+            // diffs to nothing for it. It does when the IR can describe the
+            // result; otherwise it stays put (see `replay_acknowledged`).
+            if shadow::replay_acknowledged(
+                &args.shadow_file,
+                shadow,
+                &out.ir,
+                &requests,
+                failure.replayable,
+            ) {
+                warn!(
+                    acknowledged = failure.applied,
+                    recorded = failure.replayable,
+                    requests = requests.len(),
+                    "sozu applied part of the batch; the shadow now records what it acknowledged"
+                );
+            }
+            return Err(anyhow::Error::new(failure).context("apply requests to sozu"));
+        }
         // The shadow advances the moment the socket apply succeeds, before any
         // apiserver call below can fail: Sōzu now holds `out.ir`, and a
         // baseline that lags behind it would re-emit the same delta next pass —
@@ -965,12 +989,15 @@ async fn reconcile(
         // unhappy. Persisting here also narrows the window in which a
         // controller restart finds a file that predates the apply.
         //
-        // Only a successful apply advances it. On failure it stays at the
-        // previous applied IR; the emitted requests are not all idempotent, so
-        // re-diffing from the unchanged shadow converges thanks to Sōzu's
-        // upsert semantics for clusters/backends plus the agent's handling of
-        // the rest: already-gone teardowns are tolerated, duplicate frontend
-        // adds repaired (remove + re-add on the same route key).
+        // Only a successful apply advances it. On failure it becomes the
+        // previous applied IR with the requests Sōzu acknowledged replayed
+        // onto it, when that describes what Sōzu holds, and stays put
+        // otherwise (see `replay_acknowledged`). The emitted requests are not
+        // all idempotent, so a retry of the same desired state converges from
+        // either thanks to Sōzu's upsert semantics for clusters/backends plus
+        // the agent's handling of the rest: already-gone teardowns are
+        // tolerated, duplicate frontend adds repaired (remove + re-add on the
+        // same route key).
         shadow.ir = out.ir.clone();
         shadow::persist(&args.shadow_file, shadow);
     }
