@@ -39,6 +39,10 @@ sozu-gw-translator = { workspace = true }
 # The SNI ownership probe reads which certificate a handshake is served; the
 # same rustls and ring the builder already links, so the lock gains no package.
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# The header-match probe starts one step earlier, from HTTPRoute objects
+# through the builder, so what it measures is what the controller programs.
+sozu-gw-builder = { workspace = true }
+k8s-openapi = { version = "0.28", features = ["v1_36"] }
 
 # Throwaway protocol probe (Étape 1): connect to a live Sōzu, exercise
 # AddCluster/AddBackend/AddHttpFrontend/AddCertificate, verify with curl.

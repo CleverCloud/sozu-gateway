@@ -1,0 +1,216 @@
+---
+source: crates/translator/tests/golden.rs
+expression: reqs
+---
+[
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "canary-v2",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": null,
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_HTTPS_FRONTEND_WITH_HEADER_PREDICATES": {
+        "cluster_id": "canary",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null,
+        "header_predicates": [
+          {
+            "name": "x-canary",
+            "kind": 0,
+            "value": "always"
+          },
+          {
+            "name": "x-env",
+            "kind": 1,
+            "value": "pre(prod|view)"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_HTTP_FRONTEND_WITH_HEADER_PREDICATES": {
+        "cluster_id": "canary",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null,
+        "header_predicates": [
+          {
+            "name": "x-canary",
+            "kind": 0,
+            "value": "always"
+          },
+          {
+            "name": "x-env",
+            "kind": 1,
+            "value": "pre(prod|view)"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTPS_FRONTEND_WITH_HEADER_PREDICATES": {
+        "cluster_id": "canary-v2",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 443
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null,
+        "header_predicates": [
+          {
+            "name": "x-canary",
+            "kind": 0,
+            "value": "always"
+          },
+          {
+            "name": "x-env",
+            "kind": 1,
+            "value": "pre(prod|view)"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request_type": {
+      "ADD_HTTP_FRONTEND_WITH_HEADER_PREDICATES": {
+        "cluster_id": "canary-v2",
+        "address": {
+          "ip": {
+            "inner": {
+              "V4": 0
+            }
+          },
+          "port": 80
+        },
+        "hostname": "app.example.com",
+        "path": {
+          "kind": 0,
+          "value": "/"
+        },
+        "method": null,
+        "position": 2,
+        "tags": {},
+        "redirect": null,
+        "required_auth": null,
+        "redirect_scheme": null,
+        "redirect_template": null,
+        "rewrite_host": null,
+        "rewrite_path": null,
+        "rewrite_port": null,
+        "headers": [],
+        "hsts": null,
+        "header_predicates": [
+          {
+            "name": "x-canary",
+            "kind": 0,
+            "value": "always"
+          },
+          {
+            "name": "x-env",
+            "kind": 1,
+            "value": "pre(prod|view)"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request_type": {
+      "REMOVE_CLUSTER": "canary"
+    }
+  }
+]

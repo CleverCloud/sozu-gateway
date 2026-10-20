@@ -21,7 +21,8 @@ sozu-command-lib = { workspace = true }
 # makes, so it becomes a per-object Problem instead of a request that fails
 # every reconcile of the shared instance (translation is all-or-nothing).
 #
-# A `Regex` path rule is compiled by Sōzu with `regex::bytes::Regex::new`
+# A `Regex` path rule, and a `regex` header predicate value, is compiled by
+# Sōzu with `regex::bytes::Regex::new`
 # (default flags, no builder limits), as written and wrapped in `\A(?:…)\z`.
 # The lock resolves this to 1.13.1, the version Sōzu 2.3.2 builds against, so
 # the accepted grammar is the same;

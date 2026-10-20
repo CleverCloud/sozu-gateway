@@ -232,20 +232,94 @@ pub struct Frontend {
     /// Per-route filters (Phase 3): header edits, redirect, rewrite.
     #[serde(default)]
     pub filters: FrontendFilters,
+    /// Request headers the route additionally requires, all of them (an AND),
+    /// as Sōzu 2.3's frontend header predicates (sozu#1253, 88a3bfef). Empty
+    /// for every frontend but an HTTPRoute match with `headers`, or a copy the
+    /// builder lifts above one (see `lift_header_matches` in the builder).
+    ///
+    /// Kept in Sōzu's canonical order ([`HeaderMatch::canonical`]): Sōzu's
+    /// `HttpFrontend` equality, which `ConfigState::diff` compares, depends on
+    /// the order, so a reordered list would diff as a Remove + Add of the same
+    /// route. Not serialised when empty, so a shadow without header matches is
+    /// byte-identical to one an older build wrote. An older build reading one
+    /// that has them drops the field and loses track of those frontends, which
+    /// is why a downgrade restarts Sōzu (`docs/UPGRADING.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_matches: Vec<HeaderMatch>,
+}
+
+/// One request-header condition of a frontend: Sōzu's `HeaderPredicate`.
+///
+/// Sōzu reads the **first** occurrence of the header, compares the name
+/// ASCII-case-insensitively, and fails the condition when the request does not
+/// carry the header (`lib/src/router/mod.rs`, `HeaderRule::matches`). Measured
+/// on 2.3.2, that is Gateway API `HTTPHeaderMatch` semantics for one match.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct HeaderMatch {
+    /// The header name, ASCII-lowercased: Sōzu lowercases it in the route key
+    /// and in the router, so any other spelling is the same condition.
+    pub name: String,
+    pub kind: HeaderMatchKind,
+}
+
+/// How a [`HeaderMatch`] tests the header's value. The variant order is
+/// Sōzu's `HeaderMatchKind` numbering (`EXACT = 0`, `REGEX = 1`), which the
+/// derived `Ord` — and so [`HeaderMatch::canonical`] — relies on to sort the
+/// way Sōzu's route key does. Sōzu's third kind, `PRESENT`, has no Gateway
+/// API spelling and is not modelled.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HeaderMatchKind {
+    /// The value, byte for byte (case-sensitive). Sōzu trims the request
+    /// value's surrounding whitespace before comparing.
+    Exact(String),
+    /// A regular expression that must match the whole value: Sōzu compiles
+    /// it as written and wrapped in `\A(?:…)\z`, and matches with the latter.
+    Regex(String),
+}
+
+impl HeaderMatchKind {
+    /// Sōzu's `HeaderMatchKind` number and the value it carries.
+    pub fn sozu_kind_and_value(&self) -> (i32, &str) {
+        match self {
+            HeaderMatchKind::Exact(value) => (0, value),
+            HeaderMatchKind::Regex(value) => (1, value),
+        }
+    }
+}
+
+impl HeaderMatch {
+    /// A conjunction in the form Sōzu files it under: names ASCII-lowercased,
+    /// sorted by (name, kind, value), duplicates dropped — what
+    /// `RequestHttpFrontend`'s `Display` and the router's `HeaderRules` both
+    /// do, so two spellings of one conjunction are one route.
+    pub fn canonical(matches: impl IntoIterator<Item = HeaderMatch>) -> Vec<HeaderMatch> {
+        let mut out: Vec<HeaderMatch> = matches
+            .into_iter()
+            .map(|m| HeaderMatch {
+                name: m.name.to_ascii_lowercase(),
+                kind: m.kind,
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// The identity Sōzu stores an HTTP(S) frontend under: which frontend map it
 /// lands in (`https`, one map per protocol) and the map key itself.
 ///
-/// Sōzu keys the map on `RequestHttpFrontend`'s `Display`, the
-/// **unescaped** string `{address};{hostname};{kind}{rule}[;{method}]` (2.2.1
-/// and 2.3.2 alike; 2.3 appends header predicates, which we never set), and
-/// rejects an add on an occupied key. Because the rule and method are joined
-/// with a bare `;`, two routes that differ as tuples can share one key: a regex
-/// `/x;GET` with no method and a regex `/x` restricted to `GET` both key as
-/// `…;R/x;GET`. Anything that decides whether two frontends collide must
-/// therefore compare this, never a tuple of their fields. The translator's
-/// tests pin it to `RequestHttpFrontend::to_string()`.
+/// Sōzu keys the map on `RequestHttpFrontend`'s `Display`, the **unescaped**
+/// string `{address};{hostname};{kind}{rule}[;{method}]`, followed since 2.3.0
+/// by one `;H{kind}:{name:?}={value:?}` per header predicate (canonical order,
+/// see [`HeaderMatch::canonical`]), and rejects an add on an occupied key.
+/// Because the rule and method are joined with a bare `;`, two routes that
+/// differ as tuples can share one key: a regex `/x;GET` with no method and a
+/// regex `/x` restricted to `GET` both key as `…;R/x;GET`, and a regex path
+/// can spell a predicate suffix the same way. Only the predicate's name and
+/// value are `Debug`-quoted. Anything that decides whether two frontends
+/// collide must therefore compare this, never a tuple of their fields. The
+/// translator's tests pin it to `RequestHttpFrontend::to_string()`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SozuRouteKey {
     /// `true` for Sōzu's HTTPS frontend map, `false` for the HTTP one.
@@ -268,6 +342,12 @@ impl Frontend {
         if let Some(method) = &self.method {
             key.push(';');
             key.push_str(method);
+        }
+        // `Debug` quoting is injective whatever the toolchain escapes, so two
+        // keys are equal exactly when the predicates are, here as in Sōzu.
+        for predicate in HeaderMatch::canonical(self.header_matches.iter().cloned()) {
+            let (kind, value) = predicate.kind.sozu_kind_and_value();
+            key.push_str(&format!(";H{kind}:{:?}={value:?}", predicate.name));
         }
         SozuRouteKey {
             https: self.tls,
@@ -512,6 +592,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn header(name: &str, kind: HeaderMatchKind) -> HeaderMatch {
+        HeaderMatch {
+            name: name.to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_conjunction_is_canonical_whatever_its_spelling() {
+        let exact = |v: &str| HeaderMatchKind::Exact(v.to_string());
+        let regex = |v: &str| HeaderMatchKind::Regex(v.to_string());
+        let canonical = vec![
+            header("color", exact("blue")),
+            header("version", exact("two")),
+            header("version", regex("t.*")),
+        ];
+        assert_eq!(
+            HeaderMatch::canonical(vec![
+                header("Version", regex("t.*")),
+                header("VERSION", exact("two")),
+                header("color", exact("blue")),
+                header("version", exact("two")),
+            ]),
+            canonical,
+            "lowercased, sorted by (name, kind, value) with Exact before Regex, deduplicated"
+        );
+    }
+
+    #[test]
+    fn header_matches_extend_the_route_key_in_canonical_order() {
+        let mut frontend = Frontend {
+            hostname: "h.example.com".to_string(),
+            path: PathMatch::Prefix("/".to_string()),
+            method: Some("GET".to_string()),
+            cluster_id: Some("c".to_string()),
+            tls: false,
+            listener: "0.0.0.0:80".parse().expect("listener"),
+            filters: FrontendFilters::default(),
+            header_matches: vec![],
+        };
+        assert_eq!(
+            frontend.sozu_route_key().key,
+            "0.0.0.0:80;h.example.com;P/;GET"
+        );
+        frontend.header_matches = vec![
+            header("X-B", HeaderMatchKind::Regex("a\"b".to_string())),
+            header("x-a", HeaderMatchKind::Exact("v;1".to_string())),
+        ];
+        assert_eq!(
+            frontend.sozu_route_key().key,
+            r#"0.0.0.0:80;h.example.com;P/;GET;H0:"x-a"="v;1";H1:"x-b"="a\"b""#
+        );
+    }
+
+    #[test]
+    fn a_frontend_without_header_matches_serialises_as_before() {
+        // The frozen controller fixture covers the read side; this is the write
+        // side, which an older build reads back after a downgrade.
+        let frontend = Frontend {
+            hostname: "h".to_string(),
+            path: PathMatch::Prefix("/".to_string()),
+            method: None,
+            cluster_id: None,
+            tls: false,
+            listener: "0.0.0.0:80".parse().expect("listener"),
+            filters: FrontendFilters::default(),
+            header_matches: vec![],
+        };
+        let json = serde_json::to_value(&frontend).expect("serialises");
+        assert!(json.get("header_matches").is_none(), "{json}");
     }
 
     #[test]

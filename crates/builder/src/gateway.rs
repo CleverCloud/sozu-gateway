@@ -11,19 +11,21 @@
 //!    the protocol — the Service-exposed port, not the pod bind); HTTPS loads
 //!    its `certificateRefs` (Terminate only);
 //!  - `HTTPRoute` attached by `parentRef` (optional `sectionName`), with path
-//!    (`PathPrefix`/`Exact`/`RegularExpression`) and method matches, and either
-//!    one Service `backendRef` or a redirect-only rule (no backend);
+//!    (`PathPrefix`/`Exact`/`RegularExpression`), method and header
+//!    (`Exact`/`RegularExpression`, Sōzu ≥ 2.3 header predicates) matches, and
+//!    either one Service `backendRef` or a redirect-only rule (no backend);
 //!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
 //!    RequestRedirect (scheme, status, hostname/path/port targets);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
 //!
-//! Not yet: header/query matches, weighted multi-backend split (incl. a
-//! single weight-0 drain), rule timeouts, per-backendRef filters, TLS
-//! Passthrough, RequestMirror, redirect `ReplacePrefixMatch`, and URLRewrite.
+//! Not yet: query matches, weighted multi-backend split (incl. a single
+//! weight-0 drain), rule timeouts, per-backendRef filters, TLS Passthrough,
+//! RequestMirror, redirect `ReplacePrefixMatch`, and URLRewrite. Header matches
+//! are programmed, but Sōzu ranks them above path and method, so the builder
+//! lifts the routes that outrank them (`lift_header_matches`).
 //! Query match and weighted split are Sōzu limits (weights are honoured, since
 //! 2.3.2 by every policy, but a backend is selected per connection, not per
-//! request, and there is no native 500); header match is not wired yet,
-//! though Sōzu 2.3.2 carries header predicates. URLRewrite's path is merely
+//! request, and there is no native 500). URLRewrite's path is merely
 //! unwired — measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and
 //! 2.3.2 (PROTOCOL.md §13) — with two conditions any wiring owes first: a
 //! literal `$` in a rewrite value makes Sōzu reject the frontend outright (and
@@ -36,13 +38,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 
 use serde::Serialize;
+use sozu_command_lib::config::validate_header_predicate;
+use sozu_command_lib::proto::command::{HeaderMatchKind, HeaderPredicate};
 use sozu_gw_gateway_api::gateway::{
     GatewayListenersAllowedRoutesNamespacesFrom as ApiAllowedFrom, GatewayListenersTlsMode,
 };
 use sozu_gw_gateway_api::httproute::{
     HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectPathType,
     HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
-    HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
+    HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesHeadersType, HttpRouteRulesMatchesMethod,
+    HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
 };
 use sozu_gw_gateway_api::{TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
@@ -51,7 +56,7 @@ use crate::selector::NamespaceSelector;
 use crate::{
     add_service_route, admit_path, extract_cert, meta_nn, BuildConfig, CertificateSource,
     ClaimedCert, ExposedProtocol, FrontendSource, HttpBackendProtocol, Index, Inputs, PortRef,
-    Problem, SourcedFrontend,
+    Problem, SourcedFrontend, SozuRequestHeaders,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -768,6 +773,7 @@ pub(crate) fn build_gateway(
                         &matching,
                         rule,
                         &source,
+                        &cfg.sozu_request_headers,
                         &mut problems,
                         &mut resolved_refs,
                         &mut resolved_refs_reason,
@@ -986,6 +992,7 @@ fn attach_rule(
     candidates: &[&ListenerInfo],
     rule: &sozu_gw_gateway_api::httproute::HttpRouteRules,
     source: &FrontendSource,
+    sozu_headers: &SozuRequestHeaders,
     problems: &mut Vec<Problem>,
     resolved_refs: &mut bool,
     resolved_refs_reason: &mut &'static str,
@@ -1144,33 +1151,49 @@ fn attach_rule(
         }
     };
 
-    // Reduce the rule's matches to (path, method) pairs. No `matches` means
-    // "match everything" → prefix "/". Header/query matches are skipped.
-    let mut route_matches: Vec<(ir::PathMatch, Option<String>)> = Vec::new();
+    // Reduce the rule's matches to (path, method, header matches) triples. No
+    // `matches` means "match everything" → prefix "/". Query matches are
+    // skipped.
+    let mut route_matches: Vec<(ir::PathMatch, Option<String>, Vec<ir::HeaderMatch>)> = Vec::new();
     match rule.matches.as_ref() {
-        None => route_matches.push((ir::PathMatch::Prefix("/".to_string()), None)),
+        None => route_matches.push((ir::PathMatch::Prefix("/".to_string()), None, vec![])),
         Some(ms) if ms.is_empty() => {
-            route_matches.push((ir::PathMatch::Prefix("/".to_string()), None))
+            route_matches.push((ir::PathMatch::Prefix("/".to_string()), None, vec![]))
         }
         Some(ms) => {
             for m in ms {
-                if m.headers.as_ref().is_some_and(|h| !h.is_empty())
-                    || m.query_params.as_ref().is_some_and(|q| !q.is_empty())
-                {
-                    problems.push(Problem::HeaderOrQueryMatchUnsupported);
+                if m.query_params.as_ref().is_some_and(|q| !q.is_empty()) {
+                    if !problems.contains(&Problem::QueryMatchUnsupported) {
+                        problems.push(Problem::QueryMatchUnsupported);
+                    }
                     continue;
                 }
-                // A regex Sōzu cannot compile is a match dimension we cannot
-                // serve, exactly like a header or query match: skip *this match*
-                // and report it, rather than take the whole route out. Emitting
-                // the frontend would fail the whole reconcile (translation is
-                // all-or-nothing); dropping the match keeps the route's other
-                // matches and rules programmable, and the `Problem` surfaces as
-                // a Warning Event on the route. (This is not yet a spec-correct
-                // `PartiallyInvalid=True`; the same gap applies to the
-                // header/query skip above and to unhonourable filters, and
-                // closing it means adding that condition across the status
-                // writer — tracked separately.)
+                // A match dimension we cannot serve — a query match above, a
+                // header match or a regex Sōzu would refuse below — skips
+                // *this match* and is reported, rather than taking the whole
+                // route out or widening the match. Emitting the frontend would
+                // fail the whole reconcile (translation is all-or-nothing);
+                // dropping the match keeps the route's other matches and rules
+                // programmable, and the `Problem` surfaces as a Warning Event
+                // on the route. (This is not yet a spec-correct
+                // `PartiallyInvalid=True`; the same gap applies to
+                // unhonourable filters, and closing it means adding that
+                // condition across the status writer — tracked separately.)
+                let headers =
+                    match header_matches(m.headers.as_deref().unwrap_or(&[]), sozu_headers) {
+                        Ok(headers) => headers,
+                        Err(refusal) => {
+                            // An unknown match type is the one case the API
+                            // spells out: the route reads `UnsupportedValue`.
+                            if refusal.unsupported_type {
+                                *accepted_override = Some("UnsupportedValue");
+                            }
+                            if !problems.contains(&refusal.problem) {
+                                problems.push(refusal.problem);
+                            }
+                            continue;
+                        }
+                    };
                 let path = match path_match(m.path.as_ref()) {
                     Ok(path) => path,
                     Err(problem) => {
@@ -1178,12 +1201,12 @@ fn attach_rule(
                         continue;
                     }
                 };
-                route_matches.push((path, m.method.as_ref().and_then(method_string)));
+                route_matches.push((path, m.method.as_ref().and_then(method_string), headers));
             }
         }
     }
 
-    for (path, method) in &route_matches {
+    for (path, method, header_matches) in &route_matches {
         for l in candidates {
             // A bound-but-unprogrammed listener (e.g. a cert-less HTTPS listener)
             // counts toward attachedRoutes but carries no frontend.
@@ -1219,6 +1242,7 @@ fn attach_rule(
                         tls: protocol == ListenerProtocol::Https,
                         filters: filters.clone(),
                         listener: bind,
+                        header_matches: header_matches.clone(),
                     },
                     source: source.clone(),
                 });
@@ -1244,6 +1268,118 @@ fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> Result<ir::PathMatch,
         // PathPrefix (the default) or unset.
         _ => ir::PathMatch::Prefix(crate::canonical_prefix(&value)),
     })
+}
+
+/// Why an HTTPRoute match's header conditions cannot be programmed.
+struct HeaderMatchRefusal {
+    problem: Problem,
+    /// The match type is one this build does not know, which the Gateway API
+    /// wants reported as `Accepted=False` with `UnsupportedValue`.
+    unsupported_type: bool,
+}
+
+/// Map an HTTPRoute match's `headers` onto Sōzu header predicates
+/// ([`ir::HeaderMatch`], canonical order), or refuse the whole match.
+///
+/// `Exact` (the default) maps to Sōzu's `exact` and `RegularExpression` to its
+/// `regex`; measured on 2.3.2, one predicate then means what one Gateway API
+/// header match means (case-insensitive name, byte-equal or whole-value regex,
+/// first occurrence, a missing header never matches). Entries naming one
+/// header in different cases count once, the first: the API says later ones
+/// MUST be ignored.
+///
+/// Refused, so the match is skipped and reported rather than programmed:
+/// - what Sōzu itself refuses, with Sōzu's own check
+///   (`sozu_command_lib::config::validate_header_predicate`, which the main
+///   process runs before accepting a frontend): a name that is not a token,
+///   `Host` and `Cookie`, an exact value carrying a control byte. Programmed,
+///   it would fail every reconcile of the shared instance;
+/// - a regex Sōzu cannot compile, by the calls it makes
+///   ([`crate::sozu_regex_refusal`]);
+/// - a header Sōzu sets or rewrites before it routes
+///   ([`SozuRequestHeaders::set_before_routing`]): the condition would test
+///   Sōzu's value, not the client's;
+/// - an exact value that is empty, or starts or ends with a space or a tab:
+///   Sōzu trims a request value's surrounding whitespace, so it could never
+///   match, and the match would silently serve nothing.
+fn header_matches(
+    headers: &[HttpRouteRulesMatchesHeaders],
+    sozu_headers: &SozuRequestHeaders,
+) -> Result<Vec<ir::HeaderMatch>, HeaderMatchRefusal> {
+    let refuse = |header: &str, reason: String| HeaderMatchRefusal {
+        problem: Problem::HeaderMatchRefused {
+            header: header.to_string(),
+            reason,
+        },
+        unsupported_type: false,
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    for header in headers {
+        let name = header.name.to_ascii_lowercase();
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let value = header.value.clone();
+        let (kind, sozu_kind) = match header.r#type {
+            None | Some(HttpRouteRulesMatchesHeadersType::Exact) => {
+                (ir::HeaderMatchKind::Exact(value), HeaderMatchKind::Exact)
+            }
+            Some(HttpRouteRulesMatchesHeadersType::RegularExpression) => {
+                (ir::HeaderMatchKind::Regex(value), HeaderMatchKind::Regex)
+            }
+            Some(HttpRouteRulesMatchesHeadersType::Unknown) => {
+                return Err(HeaderMatchRefusal {
+                    unsupported_type: true,
+                    ..refuse(
+                        &header.name,
+                        "the match type is not supported (Exact and RegularExpression are)"
+                            .to_string(),
+                    )
+                });
+            }
+        };
+        let predicate = HeaderPredicate {
+            name: header.name.clone(),
+            kind: sozu_kind as i32,
+            value: Some(header.value.clone()),
+        };
+        if let Err(reason) = validate_header_predicate(&predicate) {
+            return Err(refuse(&header.name, format!("Sōzu refuses it: {reason}")));
+        }
+        if let Some(reason) = sozu_headers.set_before_routing(&name) {
+            return Err(refuse(&header.name, reason.to_string()));
+        }
+        match &kind {
+            ir::HeaderMatchKind::Exact(value) if value.is_empty() => {
+                return Err(refuse(
+                    &header.name,
+                    "an exact value cannot be empty".to_string(),
+                ));
+            }
+            ir::HeaderMatchKind::Exact(value)
+                if value.starts_with([' ', '\t']) || value.ends_with([' ', '\t']) =>
+            {
+                return Err(refuse(
+                    &header.name,
+                    "Sōzu trims the surrounding whitespace of a request value, so an exact value \
+                     starting or ending with a space or a tab never matches"
+                        .to_string(),
+                ));
+            }
+            ir::HeaderMatchKind::Regex(pattern) => {
+                if let Some(reason) = crate::sozu_regex_refusal(pattern) {
+                    return Err(refuse(
+                        &header.name,
+                        format!("not a regular expression Sōzu can compile: {reason}"),
+                    ));
+                }
+            }
+            ir::HeaderMatchKind::Exact(_) => {}
+        }
+        out.push(ir::HeaderMatch { name, kind });
+    }
+    Ok(ir::HeaderMatch::canonical(out))
 }
 
 /// A rule's parsed filters, plus whether one of them makes the rule

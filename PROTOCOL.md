@@ -8,7 +8,8 @@ If this document and the scoping prompt disagree, this document wins.
 - **Crate**: `sozu-command-lib` **2.3.2** (pinned). License **LGPL-3.0**.
   Edition 2024, `rust-version = 1.93.1`. protobuf via **prost 0.14**. It redacts sensitive
   `Debug` and error output (since 2.2.1). Its `command.proto` only *adds* to 2.2.1's — new
-  fields and verbs we leave unset, §4 — so the messages we send are encoded as before.
+  fields and verbs we leave unset, §4, but for the header predicates of §14 — so every message
+  without a header match is encoded as before.
 - **Data plane**: Sōzu **2.3.2** (`clevercloud/sozu:2.3.2`; binary is **musl** → run via Docker).
   The dated 2.1.0/2.2.0/2.2.1 observations below retain their original versions; what 2.3
   changed in the state semantics we rely on is in §3, §6, §7 and §9, and
@@ -89,6 +90,7 @@ Rust variant names (PascalCase; proto field names are snake_case):
 | `RemoveHttpFrontend(RequestHttpFrontend)` | verb=16 | |
 | `AddHttpsFrontend(RequestHttpFrontend)` | verb=17 | HTTPS route (**same payload**, different verb) |
 | `RemoveHttpsFrontend(RequestHttpFrontend)` | verb=18 | |
+| `Add/RemoveHttp(s)FrontendWithHeaderPredicates(RequestHttpFrontend)` | verbs 66-69 (2.3+) | a frontend carrying `header_predicates`; see §14 |
 | `AddCertificate(AddCertificate)` | | load Secret cert onto :443 listener |
 | `ReplaceCertificate(ReplaceCertificate)` | | atomic cert rotation |
 | `RemoveCertificate(RemoveCertificate)` | by fingerprint | |
@@ -160,16 +162,15 @@ upstream 99e6aee2); the translator never sets it on a UDP cluster.
 ### Added in 2.3, not used here
 
 Fields: `interface` on every listener config, `ActivateListener` / `DeactivateListener` /
-`RemoveListener` (bind to a network interface); `AddBackend.unix_path` (a UNIX-socket backend);
-`RequestHttpFrontend.header_predicates` (header-based routing). Verbs 60–75:
-`set/query_max_connections_per_subnet`, `set_max_connection_attempts`,
+`RemoveListener` (bind to a network interface); `AddBackend.unix_path` (a UNIX-socket backend).
+Verbs 60–75 other than the header-predicate ones (66–69, used for HTTPRoute header matches, see
+§14): `set/query_max_connections_per_subnet`, `set_max_connection_attempts`,
 `add/update_https_listener_with_client_auth`, `close_sessions`,
-`add/remove_http(s)_frontend_with_header_predicates` (66–69),
 `add_http(s)_frontend_with_silent_close` (70–71), `add_unix_backend` (72) and the protected
 health-check verbs (73–75). `RequestType::add_http_frontend` and siblings pick the predicate or
 `silent_close` verb when the payload needs it — `ConfigState::diff` included — so the
-translator tiers those verbs with the plain ones even though our IR never produces them. A
-2.2.x data plane does not answer verbs it does not know.
+translator tiers those verbs with the plain ones, the `silent_close` ones even though our IR
+never produces them. A 2.2.x data plane does not answer verbs it does not know.
 
 ### `AddBackend` / `RemoveBackend`
 ```rust
@@ -578,3 +579,138 @@ edits the builder admits but Sōzu does not apply faithfully: a delete + append 
 reaches the backend as two different `Host` lines and a delete of `Host` removes nothing, and a
 CR/LF in a header value or a redirect path is written raw into the backend request or the
 client response.
+
+---
+
+## 14. Header predicates (HTTPRoute header matches) — measured on Sōzu 2.3.2
+
+Sōzu 2.3 (#1253, 88a3bfef) adds `RequestHttpFrontend.header_predicates` (field 17), a
+conjunction of `HeaderPredicate { name, kind, value }` with `kind` `EXACT = 0` (byte-equal),
+`REGEX = 1` (compiled bare and as `\A(?:value)\z` with `regex::bytes`, matched with the
+latter) or `PRESENT = 2` (not used: the Gateway API has no such type). The router reads the
+**first** occurrence of the header, names compare ASCII-case-insensitively, and a request
+without the header fails the predicate.
+
+**Verbs.** A frontend with predicates travels on `Add/RemoveHttpFrontendWithHeaderPredicates`
+(66/67) and `Add/RemoveHttpsFrontendWithHeaderPredicates` (68/69). Build requests with
+`RequestType::add_http_frontend` / `remove_http_frontend` / `add_https_frontend` /
+`remove_https_frontend`, which pick the verb from the payload; `ConfigState::diff` uses the
+same helpers. A worker that predates predicates cannot decode these verbs and fails the
+request, where the historical verb would install the frontend **without** its guard. Measured
+against `clevercloud/sozu:2.2.1`: the first predicate add gets no answer and the batch fails
+on the agent's read deadline
+([docs/probes/header-matches_sozu-2.2.1_2026-10-19.txt](docs/probes/header-matches_sozu-2.2.1_2026-10-19.txt)).
+
+**Route key.** `RequestHttpFrontend`'s `Display` appends one `;H{kind}:{name:?}={value:?}`
+per predicate after the method: names ASCII-lowercased, entries sorted by
+`(name, kind, value)` and deduplicated, name and value `Debug`-quoted. Without predicates
+nothing is appended, so every older key is unchanged. Example:
+`0.0.0.0:8080;app.example.com;P/;H0:"x-canary"="always";H1:"x-env"="pre(prod|view)"`.
+The path is **not** quoted, so a regex path can spell a predicate suffix and share the key of
+a real predicated frontend (Sōzu answers `Exists`); `ir::Frontend::sozu_route_key` mirrors the
+whole key and the builder arbitrates such a clash like any other. It can also spell the key of a
+copy the builder generates (below): `^/foo(?:\?(?-u:.*))?$;H0:"x"="1"`, a plain regex that
+matches nothing, keys exactly like the copy of a plain Exact `/foo` lifted above a header match
+`x: 1`. Equal keys therefore never mean equal matches. `HttpFrontend` equality, which
+`ConfigState::diff` compares, is order-sensitive, so the translator always sends the canonical
+order. Removal is cluster-scoped like any frontend's since 2.3.0.
+
+**Refusals** (main process, before any worker sees the request — `validate_header_predicate`,
+`command/src/config.rs`): a name that is not an RFC 9110 token, `Host`, `Cookie`, `EXACT`/`REGEX`
+without a value, `PRESENT` with one, an `EXACT` value with a byte in `0x00-0x08`, `0x0A-0x1F`
+or `0x7F`, and a regex that fails either compile. Each fails the batch; the builder refuses the
+same inputs first (`HeaderMatchRefused`).
+
+**Precedence.** Within one hostname leaf or one `PRE`/`POST` list, a frontend whose predicates
+all hold outranks **every** frontend without predicates, whatever its path or method
+(`select_tree_rule`, `select_listed_rule`, `lib/src/router/mod.rs`). Inside each class the
+historical rules apply to the matching rules, in the order the leaf or list holds them:
+
+- In a tree leaf (`TreeSelection::offer`, `lib/src/router/mod.rs:1071-1115`) the first regex
+  rule whose method equals the request's wins at once. A method-less regex replaces whatever was
+  chosen before it and raises the bar to the request target's length. A prefix rule **never
+  reads the method**: it replaces the choice when it is at least as long as the bar, so of two
+  equal prefixes the later wins, and a prefix as long as the target overrides an earlier regex —
+  the root `/`, our only `Prefix` rule, on the target `/`.
+- In a list the first match wins.
+
+What decides by order differs between a fresh batch, an incremental add and a worker the main
+process forks (`UpgradeWorker`, an automatic restart), which replays frontends in route-key
+order (#80). Only two outcomes are fixed by the rules alone: a regex naming the method beats
+every matching rule that is not a regex naming it (the root prefix never reads the method), and
+a regex that cannot match a target as short as `/` beats the root prefix. Everything else between two rules of one class — two regexes naming the
+method, two method-less regexes (every non-root path we emit), two root prefixes, an Exact `/`
+and the root on the target `/`, any two rules of a list — goes to whichever the order favours.
+
+The builder (`lift_header_matches`) makes the predicated class hold Gateway API precedence
+(Exact path, longest prefix, method, most header matches, oldest route, name, rule order) as far
+as those two outcomes reach, and skips what they cannot hold:
+
+- **Copies.** Each plain route that outranks a header match on its hostname (Exact path it
+  covers, longer prefix, the same path with a method; never a regex path either way) is copied
+  into the predicated class with the header match's conditions and its own cluster and filters.
+  A copy whose key a real frontend holds is dropped only when that frontend is its very match
+  (compiled rule, method and predicates: a header match on the copied path, which outranks the
+  plain route there whatever its backend); any other holder is a key spelled by a regex path,
+  and the header match that needed the copy is skipped (`HeaderMatchCopyKeyTaken`). At most 64
+  copies are added per (listener, hostname), counting only those actually added
+  (`HeaderMatchPrecedenceLimit` beyond). A copy also takes its header match's method where the
+  plain route names none: a copy matching a request its header match cannot would outrank, in
+  the predicated class, every plain route for that request that outranks the copied one without
+  outranking the header match, and none of those is copied.
+- **Cap.** At most 64 header matches are weighed per (listener, hostname); the rest are skipped
+  before any planning (`HeaderMatchLimit`), in collision-resolution order (oldest route, then
+  `namespace/name`, then rule order), so input order never decides. The admission below is
+  pairwise and settles one skip at a time, planning that hostname again after each; uncapped, n
+  header matches that all overlap unsettled and need no copy (n root prefixes on n header names,
+  each with its own response header filter) cost about n³/6 pair checks, 10¹⁰ at n = 4000, and
+  the copy budget never applies to them. With the cap, one hostname's predicated class holds at
+  most 128 frontends and sees at most 64 skips, each later round re-checks only the entries the
+  last skip added, and each (listener, hostname) is planned alone, so the work is linear in the
+  hostnames.
+- **Admission.** Every two frontends of the predicated class — header matches and copies, a copy
+  ranking as the plain route it copies — that one request can match, to different backends or
+  with different filters, must be ordered by one of the two fixed outcomes, the Gateway API's way.
+  "One request can match both" is decided conservatively: only paths with no common target,
+  different methods, or one header with values no single value meets (two different exact values,
+  an exact value the other's regex refuses) keep two apart. Where a pair is not ordered so, the
+  lower-precedence header match is skipped on that hostname — the one a lower copy was made for —
+  so the requests both match keep reaching the higher one: `HeaderMatchOutranksRoute` when the
+  higher is a copy (a plain route), `HeaderMatchOverlap` when it is another header match. This
+  refuses, besides a header-matched root naming no method under a plain root with a method or
+  a plain Exact `/`, a header match on a prefix longer than `/` under a method-less plain route
+  that outranks it, or under any when it names a method itself: two header matches on the root
+  (the root prefixes tie, whichever has more header matches or the older route), an Exact
+  `/foo` header match beside a header match on the prefix `/foo` that names a method (the
+  method regex wins **deterministically**, against the Gateway API's Exact-first rule), two
+  header matches on nested prefixes, and on a route without hostnames any two header matches
+  one request can meet, or any copy, to different backends.
+- **Two copies are weighed against each other too.** They carry the paths and methods of the
+  plain routes they copy, so Sōzu orders them by the same rules, but in an insertion order of
+  their own, for the requests with the header match's conditions: a header-matched root above a
+  plain Exact `/foo` and a plain prefix `/foo` (two method-less regexes) would send a
+  header-bearing `GET /foo` to whichever copy it holds last, where the Gateway API wants the
+  Exact route. The header match is skipped (`HeaderMatchOutranksRoute`, naming both plain
+  routes), and those requests reach the plain routes as they do without it. So a request a
+  header match or a copy can serve reaches the Gateway API's choice in every order, and every
+  other request reaches the plain routes exactly as without header matches: what is left to
+  insertion order is only what two plain routes already leave to it (#80).
+
+Measured: the kept plain-versus-header-match shapes route alike after incremental adds, worker
+re-forks and a fresh batch, whichever way their cluster ids sort; each refused shape, programmed
+anyway, hands the plain route's request to the header match in at least one of those orders; and
+on a route without hostnames, HTTPRouteHeaderMatching's `version: two` + `color: blue` reached
+`color: blue`'s backend in every round instead of `version: two`'s (the run predates the
+admission check, which now skips `version: two`, `color: red` and `color: yellow` there). The
+builder's tests replay every order of the matching frontends through a model of
+`select_tree_rule` and `select_listed_rule` (`crates/builder/tests/header_matches.rs`).
+
+**Headers Sōzu has already set when it routes.** The request editor runs before the lookup,
+so a predicate sees its value, not the client's. Measured with a `regex .+` predicate and a
+request that carries none of them: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Port`,
+`Forwarded`, `X-Request-Id` and the correlation header (`Sozu-Id`, or the listener's
+`sozu_id_header`) are present; `X-Real-IP` too once `send_x_real_ip` is on;
+`X-Forwarded-Host`, `traceparent` (the image is built without `opentelemetry`) and
+`User-Agent` are not.
+
+Raw run: [docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt](docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt).

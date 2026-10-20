@@ -1041,8 +1041,8 @@ fn referenced_services_cover_httproute_backends_resolved_or_not() {
 #[test]
 fn a_regex_match_sozu_cannot_compile_refuses_the_rule_not_the_route() {
     // Same measured failure as the Ingress side: the pattern reaches Sōzu
-    // verbatim and fails every reconcile. Refused like an unsupported header
-    // or query match — that one match is skipped and reported, while the
+    // verbatim and fails every reconcile. Refused like a query match or a
+    // refused header match — that one match is skipped and reported, while the
     // rule's other match, and the route's other rules, still program and the
     // route stays Accepted.
     let route: HttpRoute = from_json(json!({

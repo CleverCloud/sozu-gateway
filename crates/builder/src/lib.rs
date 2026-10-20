@@ -122,6 +122,9 @@ pub struct BuildConfig {
     /// The health check a Service gets when it does not choose one with
     /// `sozu.io/health-check`, and the timing a check starts from.
     pub health_check: HealthCheckDefault,
+    /// What Sōzu does to request headers before it routes, which a header
+    /// match must not test.
+    pub sozu_request_headers: SozuRequestHeaders,
 }
 
 /// The controller-wide health-check default: the `--default-health-check` and
@@ -177,6 +180,40 @@ impl Default for HealthCheckDefault {
     }
 }
 
+/// The request headers Sōzu sets or rewrites *before* it routes a request.
+///
+/// Sōzu 2.3 evaluates frontend header predicates after its request editor has
+/// run (`HttpContext::on_request_headers`, `lib/src/protocol/kawa_h1/editor.rs`),
+/// and reads the first occurrence that is not elided. A predicate on one of
+/// these headers therefore tests what Sōzu wrote — an `X-Request-Id` it
+/// generated, an `X-Forwarded-For` it extended — not what the client sent, so
+/// a header match on one can never mean what its author wrote. Measured on
+/// 2.3.2 for the forwarding headers, `X-Request-Id` and the correlation header
+/// (`docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt`).
+///
+/// Two of them depend on listener options the chart renders into Sōzu's
+/// config, so the controller is told about them; the forwarding family follows
+/// Sōzu's default `forwarded_headers = "both"`, which the chart leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SozuRequestHeaders {
+    /// The correlation header Sōzu appends to every request: its
+    /// `sozu_id_header` listener option, `Sozu-Id` by default.
+    pub correlation_header: String,
+    /// Whether Sōzu sets or strips `X-Real-IP`: its `send_x_real_ip` or
+    /// `elide_x_real_ip` listener option. With both off (the default) the
+    /// header reaches the router as the client sent it.
+    pub x_real_ip: bool,
+}
+
+impl Default for SozuRequestHeaders {
+    fn default() -> Self {
+        Self {
+            correlation_header: "Sozu-Id".to_string(),
+            x_real_ip: false,
+        }
+    }
+}
+
 /// Why Sōzu would refuse `check` on an `AddCluster`, if it would.
 ///
 /// Sōzu 2.3.2's `ConfigState::add_cluster` validates an inline check with
@@ -204,6 +241,29 @@ pub fn health_check_refusal(check: &ir::HealthCheck) -> Option<&'static str> {
         headers: vec![],
     };
     sozu_command_lib::config::validate_health_check_config(&config).err()
+}
+
+impl SozuRequestHeaders {
+    /// Why Sōzu's value, not the client's, is what a predicate on `name`
+    /// would test — `None` when the header reaches the router as sent.
+    pub fn set_before_routing(&self, name: &str) -> Option<&'static str> {
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
+            "x-forwarded-for" | "forwarded" => {
+                Some("Sōzu appends the client address to it, or adds it, before routing")
+            }
+            "x-forwarded-proto" | "x-forwarded-port" | "x-request-id" => {
+                Some("Sōzu adds it before routing when the client sent none")
+            }
+            "x-real-ip" if self.x_real_ip => {
+                Some("Sōzu sets or strips it before routing (send_x_real_ip/elide_x_real_ip)")
+            }
+            _ if lower.eq_ignore_ascii_case(&self.correlation_header) => {
+                Some("Sōzu adds its correlation id under this name to every request before routing")
+            }
+            _ => None,
+        }
+    }
 }
 
 impl BuildConfig {
@@ -300,6 +360,7 @@ impl Default for BuildConfig {
                 },
             ],
             health_check: HealthCheckDefault::default(),
+            sozu_request_headers: SozuRequestHeaders::default(),
         }
     }
 }
@@ -531,9 +592,87 @@ pub enum Problem {
     /// `rule.timeouts` has no Sōzu equivalent; the rule still routes,
     /// without the timeout, and the gap is reported.
     TimeoutsUnsupported,
-    /// An HTTPRoute match with a header or query condition. Only that match is
-    /// skipped; the rule's other matches still program.
-    HeaderOrQueryMatchUnsupported,
+    /// An HTTPRoute match with `queryParams`. Sōzu 2.3.2 has no query
+    /// predicate, and a path regex cannot express the Gateway API semantics
+    /// (first value only, an order-independent AND), so the match is skipped
+    /// rather than widened to ignore the parameters.
+    QueryMatchUnsupported,
+    /// An HTTPRoute header match this gateway cannot honour as written: a name
+    /// or value Sōzu refuses (which would fail every reconcile of the shared
+    /// instance), a header Sōzu itself sets or rewrites before it routes (so
+    /// the condition would test Sōzu's value, not the client's), or an exact
+    /// value no request can carry. The whole match is skipped — dropping only
+    /// the header would widen it — and the route's other matches still
+    /// program.
+    HeaderMatchRefused {
+        header: String,
+        reason: String,
+    },
+    /// Keeping Gateway API precedence for this header match on `hostname`
+    /// would take more than `limit` lifted frontends there (see
+    /// `lift_header_matches`). Sōzu ranks every frontend whose header
+    /// predicates hold above every frontend without any, so the match is
+    /// skipped on that hostname rather than allowed to outrank more specific
+    /// routes.
+    HeaderMatchPrecedenceLimit {
+        hostname: String,
+        limit: usize,
+    },
+    /// More than `limit` header matches target `hostname` on one listener
+    /// (see `MAX_HEADER_MATCHES_PER_HOSTNAME`). The first `limit` in the
+    /// arbitration order — oldest route, then `namespace/name`, then rule
+    /// order — are weighed and programmed as usual; this route's match is
+    /// past them and skipped on that hostname, so no newcomer can displace an
+    /// older route's header match by adding more.
+    HeaderMatchLimit {
+        hostname: String,
+        limit: usize,
+    },
+    /// `route`, a plain route on `hostname`, outranks `header_match`, a
+    /// header match of this route, under Gateway API precedence, and no copy
+    /// of it in the predicated tier would win in every order Sōzu may hold the
+    /// two (see `lift_header_matches`) — or, with `copy_of`, `header_match`
+    /// needs a copy of `copy_of`, another plain route, above it, and Sōzu
+    /// would not serve the requests that copy and one of `route` both match
+    /// to the latter in every order. The match is skipped on that hostname
+    /// rather than allowed to take `route`'s requests whenever the order goes
+    /// its way.
+    HeaderMatchOutranksRoute {
+        hostname: String,
+        header_match: String,
+        route: String,
+        /// Boxed, like [`Problem::HeaderMatchOverlap`]'s: two variants this
+        /// size would cost `Problem` its niche, and every `Result` carrying
+        /// one a word.
+        copy_of: Option<Box<str>>,
+        reason: &'static str,
+    },
+    /// `route`, another header match on `hostname`, outranks `header_match`,
+    /// a header match of this route, under Gateway API precedence for requests
+    /// both can match — or outranks `copy_of`, a plain route whose copy
+    /// `header_match` needs above it (see `lift_header_matches`) — and Sōzu
+    /// would not serve those requests to `route` in every order it may hold
+    /// the two. The lower match is skipped on that hostname, so they keep
+    /// reaching `route`.
+    HeaderMatchOverlap {
+        hostname: String,
+        header_match: String,
+        route: String,
+        copy_of: Option<Box<str>>,
+        reason: &'static str,
+    },
+    /// Keeping Gateway API precedence for `header_match`, a header match of
+    /// this route on `hostname`, takes a copy of the plain route `route` above
+    /// it, and `holder` already holds the Sōzu route key that copy needs with
+    /// a different match (a regex path can spell any key: Sōzu does not quote
+    /// the path in it). The copy cannot be programmed and `holder` is no
+    /// stand-in for it, so the match is skipped on that hostname.
+    HeaderMatchCopyKeyTaken {
+        hostname: String,
+        header_match: String,
+        route: String,
+        holder: String,
+    },
     /// A listener's `allowedRoutes.namespaces.selector` cannot be evaluated —
     /// an operator this build does not know, a malformed expression, or
     /// `from: Selector` with no selector at all. The listener fails CLOSED: it
@@ -593,7 +732,13 @@ impl Problem {
             Problem::WeightedBackendsUnsupported => "WeightedBackendsUnsupported",
             Problem::ZeroWeightBackendUnsupported { .. } => "ZeroWeightBackendUnsupported",
             Problem::TimeoutsUnsupported => "TimeoutsUnsupported",
-            Problem::HeaderOrQueryMatchUnsupported => "HeaderOrQueryMatchUnsupported",
+            Problem::QueryMatchUnsupported => "QueryMatchUnsupported",
+            Problem::HeaderMatchRefused { .. } => "HeaderMatchRefused",
+            Problem::HeaderMatchPrecedenceLimit { .. } => "HeaderMatchPrecedenceLimit",
+            Problem::HeaderMatchLimit { .. } => "HeaderMatchLimit",
+            Problem::HeaderMatchOutranksRoute { .. } => "HeaderMatchOutranksRoute",
+            Problem::HeaderMatchOverlap { .. } => "HeaderMatchOverlap",
+            Problem::HeaderMatchCopyKeyTaken { .. } => "HeaderMatchCopyKeyTaken",
             Problem::NamespaceSelectorInvalid { .. } => "NamespaceSelectorInvalid",
             Problem::FilterUnsupported { .. } => "FilterUnsupported",
             Problem::BackendRefNotPermitted { .. } => "BackendRefNotPermitted",
@@ -856,10 +1001,89 @@ impl std::fmt::Display for Problem {
             Problem::TimeoutsUnsupported => {
                 write!(f, "rule.timeouts has no Sōzu equivalent; the rule routes without it")
             }
-            Problem::HeaderOrQueryMatchUnsupported => write!(
+            Problem::QueryMatchUnsupported => write!(
                 f,
-                "header matches are not wired yet (Sōzu 2.3.2 has header predicates) and query \
-                 matches are not supported by Sōzu; only the match carrying one was skipped"
+                "query parameter matches are not supported by Sōzu; the match was skipped"
+            ),
+            Problem::HeaderMatchRefused { header, reason } => write!(
+                f,
+                "header match on {header:?} cannot be honoured ({reason}); the match was skipped"
+            ),
+            Problem::HeaderMatchPrecedenceLimit { hostname, limit } => write!(
+                f,
+                "keeping Gateway API precedence for a header match on {hostname} would take more \
+                 than {limit} copies of the more specific routes there; the match was skipped on \
+                 that hostname"
+            ),
+            Problem::HeaderMatchLimit { hostname, limit } => write!(
+                f,
+                "more than {limit} header matches target {hostname}; past the first {limit} \
+                 (oldest route first, then namespace/name, then rule order) they are skipped on \
+                 that hostname, and this route's match is among them"
+            ),
+            Problem::HeaderMatchOutranksRoute {
+                hostname,
+                header_match,
+                route,
+                copy_of: None,
+                reason,
+            } => write!(
+                f,
+                "the header match {header_match} on {hostname} would outrank the more specific \
+                 route {route} ({reason}); the match was skipped on that hostname"
+            ),
+            Problem::HeaderMatchOutranksRoute {
+                hostname,
+                header_match,
+                route,
+                copy_of: Some(copied),
+                reason,
+            } => write!(
+                f,
+                "the header match {header_match} on {hostname} needs the more specific route \
+                 {copied} copied above it, and a request that copy and a copy of the more \
+                 specific route {route} can both match goes to the latter under Gateway API \
+                 precedence, which Sōzu would not do in every order it may hold the two \
+                 ({reason}); the match was skipped on that hostname"
+            ),
+            Problem::HeaderMatchOverlap {
+                hostname,
+                header_match,
+                route,
+                copy_of: None,
+                reason,
+            } => write!(
+                f,
+                "a request the header match {header_match} and {route} on {hostname} can both \
+                 match goes to the latter under Gateway API precedence, and Sōzu would not serve \
+                 it there in every order it may hold the two ({reason}); the match was skipped on \
+                 that hostname"
+            ),
+            Problem::HeaderMatchOverlap {
+                hostname,
+                header_match,
+                route,
+                copy_of: Some(copied),
+                reason,
+            } => write!(
+                f,
+                "the header match {header_match} on {hostname} needs the more specific route \
+                 {copied} copied above it, and a request that copy and {route} can both match \
+                 goes to the latter under Gateway API precedence, which Sōzu would not do in \
+                 every order it may hold the two ({reason}); the match was skipped on that \
+                 hostname"
+            ),
+            Problem::HeaderMatchCopyKeyTaken {
+                hostname,
+                header_match,
+                route,
+                holder,
+            } => write!(
+                f,
+                "keeping Gateway API precedence for the header match {header_match} on \
+                 {hostname} needs the more specific route {route} copied above it, and {holder} \
+                 already holds the Sōzu route key that copy needs with a different match; the \
+                 match was skipped on that hostname"
             ),
             Problem::NamespaceSelectorInvalid { listener, reason } => write!(
                 f,
@@ -1019,26 +1243,39 @@ pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> 
         ir::SozuPathRule::Prefix(_) => return Ok(path),
         ir::SozuPathRule::Regex(pattern) => pattern,
     };
-    // Sōzu 2.3.2 compiles a `Regex` rule twice (`PathRule::anchored_regex`):
-    // as written, then wrapped in `\A(?:…)\z`, and refuses the frontend if
-    // either fails. The wrapper alone can fail: an `(?x)` comment swallows
-    // the closing group, the wrapper's two extra nesting levels (a group and
-    // a concatenation) push a pattern nested 248 or 249 deep past the
-    // parser's limit of 250, and the size limit trips a few bytes earlier.
-    let anchored = format!("\\A(?:{pattern})\\z");
-    match regex::bytes::Regex::new(&pattern).and_then(|_| regex::bytes::Regex::new(&anchored)) {
-        Ok(_) => Ok(path),
-        Err(e) => Err(Problem::InvalidPathRegex {
+    match sozu_regex_refusal(&pattern) {
+        None => Ok(path),
+        Some(reason) => Err(Problem::InvalidPathRegex {
             path: display_path(path_value(&path)),
-            // A syntax error renders as a multi-line diagnostic with a caret
-            // line; condition messages and Events are single lines joined by
-            // `; `, so fold it onto one.
-            reason: e
-                .to_string()
+            reason,
+        }),
+    }
+}
+
+/// Why Sōzu would refuse to compile `pattern` — a `Regex` path rule or a
+/// `regex` header predicate value, which share one grammar — if it would.
+///
+/// Sōzu 2.3.2 compiles both with its `anchored_regex` (`lib/src/router/mod.rs`):
+/// as written, then wrapped in `\A(?:…)\z`, with `regex::bytes::Regex::new`,
+/// and refuses the frontend if either fails. The wrapper alone can fail: an
+/// `(?x)` comment swallows the closing group, the wrapper's two extra nesting
+/// levels (a group and a concatenation) push a pattern nested 248 or 249 deep
+/// past the parser's limit of 250, and the size limit trips a few bytes
+/// earlier. Same calls, same `regex` version (pinned, see
+/// `tests/sozu_lock_pins.rs`).
+pub(crate) fn sozu_regex_refusal(pattern: &str) -> Option<String> {
+    let anchored = format!("\\A(?:{pattern})\\z");
+    match regex::bytes::Regex::new(pattern).and_then(|_| regex::bytes::Regex::new(&anchored)) {
+        Ok(_) => None,
+        // A syntax error renders as a multi-line diagnostic with a caret line;
+        // condition messages and Events are single lines joined by `; `, so
+        // fold it onto one.
+        Err(e) => Some(
+            e.to_string()
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),
-        }),
+        ),
     }
 }
 
@@ -1947,15 +2184,18 @@ fn route_key(frontend: &ir::Frontend) -> RouteKey {
 }
 
 /// Whether two frontends sharing a [`RouteKey`] also *match* the same requests:
-/// same listener, hostname, compiled rule and method. Only then is the loser a
-/// true duplicate; otherwise it is a different route that Sōzu's key spelling
-/// cannot hold alongside the winner, and dropping it loses traffic.
+/// same listener, hostname, compiled rule, method and header conditions. Only
+/// then is the loser a true duplicate; otherwise it is a different route that
+/// Sōzu's key spelling cannot hold alongside the winner (a regex path can
+/// spell a method or a header predicate), and dropping it loses traffic.
 fn same_match(a: &ir::Frontend, b: &ir::Frontend) -> bool {
     a.tls == b.tls
         && a.listener == b.listener
         && a.hostname == b.hostname
         && a.path.sozu_rule() == b.path.sozu_rule()
         && a.method == b.method
+        && ir::HeaderMatch::canonical(a.header_matches.iter().cloned())
+            == ir::HeaderMatch::canonical(b.header_matches.iter().cloned())
 }
 
 /// A source object's claim on a hostname, for arbitrating who wins a contested
@@ -2046,7 +2286,8 @@ fn claim_for(ident: &OwnerIdent, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> O
 /// the same requests with the same effect (cluster and filters) from another
 /// source — another object, or another parentRef of the same one. Sōzu holds
 /// one route for them, but its traffic is theirs too: whatever is said about
-/// the cluster it reaches (`settle_health_checks`) concerns their owners as
+/// the cluster it reaches (`settle_health_checks`), or about the kept one (a
+/// header match skipped by `lift_header_matches`), concerns their owners as
 /// much as the kept one's.
 fn resolve_frontend_collisions(
     frontends: Vec<SourcedFrontend>,
@@ -2290,6 +2531,931 @@ fn settle_health_checks(
             cluster.health_check = None;
         }
     }
+}
+
+/// The most frontends [`lift_header_matches`] adds on one (listener,
+/// hostname): copies multiply as header-matched routes × the more specific
+/// routes beneath them, and every one is a route-table entry in each worker.
+/// Only copies actually added count: one a real frontend stands in for (see
+/// [`lift_header_matches`]) or another header match already brought is free.
+/// It bounds the route table, not the planning: a header match that needs no
+/// copy costs none of it, which is what [`MAX_HEADER_MATCHES_PER_HOSTNAME`]
+/// is for.
+pub const MAX_LIFTED_PER_HOSTNAME: usize = 64;
+
+/// The most header matches [`lift_header_matches`] weighs on one (listener,
+/// hostname). The rest are skipped there before any planning
+/// ([`Problem::HeaderMatchLimit`]), in the order collision resolution
+/// arbitrates by — the oldest route first, then `namespace/name`, then rule
+/// order — so the choice never follows input order, and no newcomer can
+/// displace an older route's header match by adding more of its own.
+///
+/// Why a cap: the admission weighs every pair of the predicated class and
+/// skips one header match at a time, planning again after each skip.
+/// Uncapped, n header matches on one hostname that all overlap unsettled (n
+/// root prefixes, each on its own header name and with its own response
+/// header filter) take n − 1 skips of a quadratic check, about 10¹⁰ pair
+/// checks for n = 4000 from a single tenant, while every reconcile of the
+/// shared controller waits. They need no copy, so the copy budget never
+/// applies.
+///
+/// Why 64: it matches [`MAX_LIFTED_PER_HOSTNAME`], so one hostname's
+/// predicated class holds at most 128 frontends (8128 pairs) and sees at most
+/// 64 skips, each followed by a round that re-checks only what the skip
+/// changed; each hostname is planned alone, so the work stays linear in the
+/// number of hostnames. It is an order of magnitude above the busiest shape known to
+/// need header matches (HTTPRouteHeaderMatching programs seven on one
+/// hostname), and Sōzu itself walks every rule of a hostname for each request
+/// to it (`select_tree_rule`), so a hostname holding hundreds of header
+/// predicates would slow every request it serves anyway.
+pub const MAX_HEADER_MATCHES_PER_HOSTNAME: usize = 64;
+
+/// Rebuild Gateway API precedence for header-matched routes, as far as Sōzu
+/// holds it in every order it may hold them, and skip the header matches it
+/// cannot hold.
+///
+/// Sōzu 2.3 ranks a frontend whose header predicates hold above *every*
+/// frontend without predicates on the same hostname, whatever their paths or
+/// methods (`select_tree_rule` / `select_listed_rule`, `lib/src/router/mod.rs`;
+/// measured on 2.3.2: a predicated `/` beats a plain Exact `/foo`, a longer
+/// prefix and a method match). The Gateway API ranks path first, then method,
+/// then the number of header matches, then route age, name and rule order. So
+/// for each header-matched frontend P, every plain frontend U on the same
+/// listener and hostname that outranks P for a request both can match is
+/// **copied into the predicated class** ([`lifted_copy`]), carrying P's header
+/// matches, U's own cluster and filters, and P's method where U names none: a
+/// request that meets P's conditions on U's path still reaches U, and the copy
+/// takes no request P cannot match.
+///
+/// Inside that class — header matches and copies alike, every one whose
+/// conditions hold — Sōzu's historical selection applies, and part of it is
+/// insertion order. That order is not ours: a fresh batch, an incremental add
+/// and a worker the main process forks again (which replays in route-key
+/// order) all differ, and #80 rules out a controller ordering workaround. So
+/// every two frontends of the class that one request can match, to different
+/// backends or with different filters, must be ordered by Sōzu's own rules in
+/// every order, and the way the Gateway API orders them ([`unsettled`]): a
+/// regex naming the method over any frontend that is not a regex naming it
+/// (the root prefix never reads the method), and a regex that cannot match a
+/// target as short as `/` over the root prefix — nothing else, and nothing on
+/// a route without hostnames, whose list is first-match. Where they are not,
+/// the **lower-precedence header match is skipped** on that hostname and
+/// reported — the one a lower copy was made for, if the lower is a copy — so
+/// the requests both match keep reaching the higher one; its own requests go
+/// to whatever else matches them, a plain route or a header match it
+/// outranked. Reported as [`Problem::HeaderMatchOutranksRoute`] when the
+/// higher is a copy (a plain route outranks it),
+/// [`Problem::HeaderMatchOverlap`] when it is another header match. Measured
+/// on 2.3.2
+/// (`docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt`): the
+/// plain-versus-header-match shapes, and two header matches on a route
+/// without hostnames (`version: two` + `color: blue` reached `color: blue`'s
+/// backend in every round, against the Gateway API's rule order).
+///
+/// Two copies are weighed against each other like any pair. They carry the
+/// paths and methods of the plain routes they copy, so Sōzu orders them by
+/// the same rules as those plain routes, but in an insertion order of their
+/// own: under a header-matched root, the copies of a plain Exact `/foo` and a
+/// plain prefix `/foo` (two method-less regexes) would send `GET /foo` with
+/// the header to either, whichever way the plain routes themselves go. The
+/// header match is skipped instead, and those requests reach the plain routes
+/// exactly as they would without it — an order that is #80's ground and no
+/// header match's doing. Two frontends can meet one request unless their
+/// paths cannot match one target, their methods differ, or one header carries
+/// values they cannot both accept (two different exact values, or an exact
+/// value the other's regex refuses); two regexes on one header are assumed to
+/// meet.
+///
+/// What this does not do, and why:
+/// - A `RegularExpression` path is never lifted, nor lifted above: the Gateway
+///   API leaves its precedence to the implementation, and there is no order to
+///   compute between a regex and a prefix. A header-matched regex route
+///   outranks every plain route on its hostname, as Sōzu ranks it, and ranks
+///   with the other header matches by method, then header matches, then age.
+/// - Hostnames are not crossed: Sōzu tries the exact hostname before a
+///   wildcard or the hostname-less list, which is the Gateway API's order too.
+///
+/// A copy whose key a real frontend already holds is not added. When that
+/// frontend has the copy's very match ([`same_match`]: compiled path rule,
+/// method and header conditions), it is a header match with U's path and
+/// method and more header matches than U, so it outranks U for every request
+/// the copy would take and serves them in its place, whatever its backend.
+/// Any other holder spelled the key with a regex path (Sōzu does not quote the
+/// path in it): the copy cannot be programmed, so P is skipped
+/// ([`Problem::HeaderMatchCopyKeyTaken`]). Past [`MAX_LIFTED_PER_HOSTNAME`]
+/// copies on one hostname the header match that needs them is skipped and
+/// reported, never programmed without its copies.
+///
+/// Each (listener, hostname) is planned alone, once
+/// [`MAX_HEADER_MATCHES_PER_HOSTNAME`] has capped its header matches: a Sōzu
+/// route key names its listener and hostname, so nothing on one reaches
+/// another, and a skip on one hostname never plans another again. Each skip
+/// plans its hostname again, since a skipped header match may have stood in
+/// for a copy or held a budget; frontends are visited in the order collision
+/// resolution left them (oldest claimant first), so which one is skipped is
+/// stable.
+///
+/// Returns the frontends it keeps, in order and with their sources (what
+/// [`settle_health_checks`] weighs), then the copies it adds, to program after
+/// them, then the reports of the header matches it skipped.
+fn lift_header_matches(
+    frontends: Vec<SourcedFrontend>,
+    folded: &[SourcedFrontend],
+) -> (
+    Vec<SourcedFrontend>,
+    Vec<ir::Frontend>,
+    Vec<(FrontendSource, Problem)>,
+) {
+    // An identical header match from another source was folded into the one
+    // weighed here (see `resolve_frontend_collisions`): a skip is theirs too.
+    let mut folded_by_key: BTreeMap<RouteKey, Vec<&FrontendSource>> = BTreeMap::new();
+    for sf in folded {
+        folded_by_key
+            .entry(route_key(&sf.frontend))
+            .or_default()
+            .push(&sf.source);
+    }
+    let mut groups: BTreeMap<Group, Vec<usize>> = BTreeMap::new();
+    for (index, sf) in frontends.iter().enumerate() {
+        groups
+            .entry(group_of(&sf.frontend))
+            .or_default()
+            .push(index);
+    }
+    let mut regexes = HeaderRegexes::default();
+    let mut skipped: BTreeSet<usize> = BTreeSet::new();
+    let mut problems = Vec::new();
+    let mut copies: Vec<Brought> = Vec::new();
+    for members in groups.values() {
+        let (lifted, skips) = plan_group(&frontends, members, &mut regexes);
+        copies.extend(lifted);
+        for (index, problem) in skips {
+            skipped.insert(index);
+            for source in folded_by_key
+                .get(&route_key(&frontends[index].frontend))
+                .into_iter()
+                .flatten()
+            {
+                problems.push(((*source).clone(), problem.clone()));
+            }
+            problems.push((frontends[index].source.clone(), problem));
+        }
+    }
+    // Each copy after the header match that brought it, in frontend order.
+    copies.sort_by_key(|(owner, _)| *owner);
+    let kept: Vec<SourcedFrontend> = frontends
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !skipped.contains(index))
+        .map(|(_, sf)| sf)
+        .collect();
+    let copies = copies.into_iter().map(|(_, copy)| copy).collect();
+    (kept, copies, problems)
+}
+
+/// A Sōzu hostname leaf (or the hostname-less list) on one listener.
+type Group = (bool, SocketAddr, String);
+
+fn group_of(f: &ir::Frontend) -> Group {
+    (f.tls, f.listener, f.hostname.clone())
+}
+
+/// A copy [`lift_header_matches`] adds, with the header match that brought
+/// it (by frontend index).
+type Brought = (usize, ir::Frontend);
+
+/// A header match [`lift_header_matches`] skips (by frontend index), and why.
+type Skip = (usize, Problem);
+
+/// [`lift_header_matches`] on the frontends of one [`Group`], `members` in
+/// frontend order: the copies it adds and the header matches it skips.
+fn plan_group(
+    frontends: &[SourcedFrontend],
+    members: &[usize],
+    regexes: &mut HeaderRegexes,
+) -> (Vec<Brought>, Vec<Skip>) {
+    let mut skips = Vec::new();
+    let mut originals = Vec::new();
+    for &index in members {
+        let f = &frontends[index].frontend;
+        if f.header_matches.is_empty() {
+            continue;
+        }
+        if originals.len() < MAX_HEADER_MATCHES_PER_HOSTNAME {
+            originals.push(index);
+        } else {
+            skips.push((
+                index,
+                Problem::HeaderMatchLimit {
+                    hostname: f.hostname.clone(),
+                    limit: MAX_HEADER_MATCHES_PER_HOSTNAME,
+                },
+            ));
+        }
+    }
+    if originals.is_empty() {
+        return (Vec::new(), skips);
+    }
+    let mut skipped: BTreeSet<usize> = skips.iter().map(|(index, _)| *index).collect();
+    let mut plan = GroupPlan::new(frontends, members, originals);
+    loop {
+        match plan.round(&skipped, regexes) {
+            Ok(copies) => return (copies, skips),
+            Err((index, problem)) => {
+                let progress = skipped.insert(index);
+                debug_assert!(progress, "a skip must make progress");
+                skips.push((index, problem));
+            }
+        }
+    }
+}
+
+/// What [`plan_group`] works out once for a group and reuses in every round.
+struct GroupPlan<'a> {
+    frontends: &'a [SourcedFrontend],
+    /// The group's plain routes, regex paths aside, in frontend order.
+    plain: Vec<usize>,
+    /// The group's header matches within the cap, in frontend order, each
+    /// with how Sōzu offers it ([`tree_offer`]).
+    originals: Vec<(usize, TreeOffer)>,
+    /// For each of `originals`, the plain routes found so far to outrank it,
+    /// in frontend order, and how far into `plain` the search has gone. A
+    /// round reads such a list only until the copy budget runs out, so a long
+    /// `plain` is searched no further than some round needs.
+    candidates: Vec<(Vec<Candidate>, usize)>,
+    /// Every Sōzu route key of the group, to the frontend holding it.
+    held: BTreeMap<RouteKey, usize>,
+    /// The copies' route keys, numbered: two copies with one key are one
+    /// Sōzu frontend.
+    keys: BTreeMap<RouteKey, usize>,
+    admission: Admission,
+}
+
+/// A plain route that outranks one header match, with its copy above it.
+struct Candidate {
+    route: usize,
+    rule: ir::Frontend,
+    offer: TreeOffer,
+    /// The copy's route key, numbered in [`GroupPlan::keys`].
+    key: usize,
+    /// The frontend of the group already holding that key, and whether it
+    /// has the copy's very match ([`same_match`]).
+    holder: Option<(usize, bool)>,
+}
+
+impl<'a> GroupPlan<'a> {
+    fn new(frontends: &'a [SourcedFrontend], members: &[usize], originals: Vec<usize>) -> Self {
+        let plain: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|&index| {
+                let f = &frontends[index].frontend;
+                f.header_matches.is_empty() && !matches!(f.path, ir::PathMatch::Regex(_))
+            })
+            .collect();
+        // A regex path is never lifted above: nothing to search.
+        let candidates = originals
+            .iter()
+            .map(|&index| match frontends[index].frontend.path {
+                ir::PathMatch::Regex(_) => (Vec::new(), plain.len()),
+                _ => (Vec::new(), 0),
+            })
+            .collect();
+        GroupPlan {
+            frontends,
+            plain,
+            originals: originals
+                .into_iter()
+                .map(|index| (index, tree_offer(&frontends[index].frontend)))
+                .collect(),
+            candidates,
+            held: members
+                .iter()
+                .map(|&index| (route_key(&frontends[index].frontend), index))
+                .collect(),
+            keys: BTreeMap::new(),
+            admission: Admission::default(),
+        }
+    }
+
+    /// The `c`-th plain route that outranks header match `slot`, with its
+    /// copy, searched for and made on first use; `None` past the last.
+    fn candidate(&mut self, slot: usize, c: usize) -> Option<&Candidate> {
+        let frontends = self.frontends;
+        let p = &frontends[self.originals[slot].0].frontend;
+        let (found, searched) = &mut self.candidates[slot];
+        while found.len() <= c {
+            let &route = self.plain.get(*searched)?;
+            *searched += 1;
+            let u = &frontends[route].frontend;
+            if !outranks(u, p) {
+                continue;
+            }
+            let rule = lifted_copy(u, p);
+            let key = route_key(&rule);
+            let holder = self
+                .held
+                .get(&key)
+                .map(|&holder| (holder, same_match(&frontends[holder].frontend, &rule)));
+            let next = self.keys.len();
+            let key = *self.keys.entry(key).or_insert(next);
+            found.push(Candidate {
+                route,
+                offer: tree_offer(&rule),
+                rule,
+                key,
+                holder,
+            });
+        }
+        found.get(c)
+    }
+
+    /// The copies that keep Gateway API precedence with the header matches
+    /// not in `skipped`, each with the header match that brought it, or the
+    /// next header match to skip and why.
+    fn round(
+        &mut self,
+        skipped: &BTreeSet<usize>,
+        regexes: &mut HeaderRegexes,
+    ) -> Result<Vec<Brought>, Skip> {
+        let frontends = self.frontends;
+        // The copy keys added so far, and each header match's copies by slot.
+        let mut brought: BTreeSet<usize> = BTreeSet::new();
+        let mut chosen: Vec<(usize, Vec<usize>)> = Vec::new();
+        for slot in 0..self.originals.len() {
+            let index = self.originals[slot].0;
+            if skipped.contains(&index) {
+                continue;
+            }
+            let p = &frontends[index].frontend;
+            // (key, candidate) of each copy this header match adds.
+            let mut fresh: Vec<(usize, usize)> = Vec::new();
+            for c in 0.. {
+                let Some(candidate) = self.candidate(slot, c) else {
+                    break;
+                };
+                let (u, key, holder) = (candidate.route, candidate.key, candidate.holder);
+                if let Some((holder, same)) = holder.filter(|(h, _)| !skipped.contains(h)) {
+                    if same {
+                        // A header match with the copy's very match: it
+                        // outranks `u` wherever the copy would, and serves
+                        // those requests.
+                        continue;
+                    }
+                    return Err((
+                        index,
+                        Problem::HeaderMatchCopyKeyTaken {
+                            hostname: p.hostname.clone(),
+                            header_match: describe_match(p),
+                            route: describe_route(&frontends[u].frontend),
+                            holder: describe_source(&frontends[holder]),
+                        },
+                    ));
+                }
+                // A copy an earlier header match with the same conditions
+                // brought is the same frontend, to the same route.
+                if brought.contains(&key) {
+                    continue;
+                }
+                // A plain route naming the method this header match names
+                // and one naming none, on one path, copy to one Sōzu
+                // frontend: it serves the more specific of the two.
+                if let Some(entry) = fresh.iter_mut().find(|(k, _)| *k == key) {
+                    let other = &self.candidates[slot].0[entry.1];
+                    let other = &frontends[other.route].frontend;
+                    if gw_precedence(&frontends[u].frontend, other).is_gt() {
+                        entry.1 = c;
+                    }
+                    continue;
+                }
+                fresh.push((key, c));
+                if brought.len() + fresh.len() > MAX_LIFTED_PER_HOSTNAME {
+                    return Err((
+                        index,
+                        Problem::HeaderMatchPrecedenceLimit {
+                            hostname: p.hostname.clone(),
+                            limit: MAX_LIFTED_PER_HOSTNAME,
+                        },
+                    ));
+                }
+            }
+            brought.extend(fresh.iter().map(|(key, _)| *key));
+            chosen.push((slot, fresh.into_iter().map(|(_, c)| c).collect()));
+        }
+
+        let mut tier: Vec<Predicated> = Vec::new();
+        for (slot, copies) in &chosen {
+            let (index, offer) = self.originals[*slot];
+            tier.push(Predicated {
+                rule: &frontends[index].frontend,
+                offer,
+                ranks_as: index,
+                owner: index,
+                copy: false,
+            });
+            for candidate in copies
+                .iter()
+                .filter_map(|&c| self.candidates[*slot].0.get(c))
+            {
+                tier.push(Predicated {
+                    rule: &candidate.rule,
+                    offer: candidate.offer,
+                    ranks_as: candidate.route,
+                    owner: index,
+                    copy: true,
+                });
+            }
+        }
+        if let Some((high, low, reason)) = self.admission.first_unsettled(frontends, &tier, regexes)
+        {
+            return Err(overlap_problem(frontends, &tier[high], &tier[low], reason));
+        }
+        Ok(tier
+            .iter()
+            .filter(|entry| entry.copy)
+            .map(|entry| (entry.owner, entry.rule.clone()))
+            .collect())
+    }
+}
+
+/// The copy of plain route `u` lifted above header match `p` (see
+/// [`lift_header_matches`]): `u`'s path, cluster and filters under `p`'s
+/// header conditions, with `p`'s method where `u` names none. A path that
+/// outranks `p`'s (an Exact path it covers, a longer prefix, the same path)
+/// matches no target `p`'s does not, so the copy takes no request `p` cannot
+/// match. One it took would outrank, in Sōzu's predicated class, every plain
+/// route for it that outranks `u` without outranking `p`, and none of those is
+/// copied: a plain `PUT` Exact `/a` would lose `PUT /a` to the copy of a plain
+/// Exact `/a` lifted above a `GET` header match on the root.
+fn lifted_copy(u: &ir::Frontend, p: &ir::Frontend) -> ir::Frontend {
+    ir::Frontend {
+        header_matches: p.header_matches.clone(),
+        method: u.method.clone().or_else(|| p.method.clone()),
+        ..u.clone()
+    }
+}
+
+/// One frontend of Sōzu's predicated class on one [`Group`], as
+/// [`lift_header_matches`] weighs it.
+struct Predicated<'a> {
+    /// The frontend Sōzu holds.
+    rule: &'a ir::Frontend,
+    /// How Sōzu offers it ([`tree_offer`]).
+    offer: TreeOffer,
+    /// The frontend whose Gateway API precedence it carries: the header match
+    /// itself, or the plain route a copy was made from.
+    ranks_as: usize,
+    /// The header match it stands or falls with: itself, or the one the copy
+    /// was made for.
+    owner: usize,
+    copy: bool,
+}
+
+impl Predicated<'_> {
+    /// Its identity across the rounds of one group: one header match, or the
+    /// copy of one plain route that one header match brought — the same rule
+    /// every time.
+    fn id(&self) -> (usize, usize) {
+        (self.ranks_as, self.owner)
+    }
+}
+
+/// What the admission of one group established in its earlier rounds, so a
+/// round re-checks only what the last skip changed. A skip removes a header
+/// match and its copies, and may hand a copy to another header match or let
+/// one appear that the skipped match stood in for; it never changes the
+/// verdict on two given entries, which depends on their rules and ranks alone.
+#[derive(Default)]
+struct Admission {
+    /// The rounds checked so far.
+    round: usize,
+    /// Each entry of the last tier checked, with the round from which it has
+    /// been in every tier checked.
+    present: BTreeMap<(usize, usize), usize>,
+    /// The last round in which each entry, as the higher of a pair, was found
+    /// ordered the Gateway API's way against every entry of that round's tier.
+    settled: BTreeMap<(usize, usize), usize>,
+}
+
+impl Admission {
+    /// The highest-precedence pair `(high, low)` of `tier`, by position, that
+    /// one request can match and Sōzu does not order the Gateway API's way in
+    /// every order it may hold them ([`conflict`]), with why — `low` the first
+    /// such of `high`'s in tier order. Resolving from the top keeps a header
+    /// match whose only rival was itself skipped. An entry found settled is
+    /// later checked only against the entries that appeared after.
+    fn first_unsettled(
+        &mut self,
+        frontends: &[SourcedFrontend],
+        tier: &[Predicated],
+        regexes: &mut HeaderRegexes,
+    ) -> Option<(usize, usize, &'static str)> {
+        self.round += 1;
+        let round = self.round;
+        let appeared: Vec<usize> = tier
+            .iter()
+            .map(|entry| self.present.get(&entry.id()).copied().unwrap_or(round))
+            .collect();
+        self.present = tier
+            .iter()
+            .map(Predicated::id)
+            .zip(appeared.iter().copied())
+            .collect();
+        let mut newest: Vec<usize> = (0..tier.len()).collect();
+        newest.sort_by_key(|&low| (std::cmp::Reverse(appeared[low]), low));
+        let mut order: Vec<usize> = (0..tier.len()).collect();
+        order.sort_by_cached_key(|&high| std::cmp::Reverse(precedence_key(frontends, &tier[high])));
+        let mut found = None;
+        for high in order {
+            let lows = match self.settled.get(&tier[high].id()) {
+                // Ordered against every entry it met then: only one that
+                // appeared since can be out of order with it.
+                Some(&since) => newest
+                    .iter()
+                    .copied()
+                    .take_while(|&low| appeared[low] > since)
+                    .filter_map(|low| {
+                        conflict(frontends, &tier[high], &tier[low], regexes).map(|why| (low, why))
+                    })
+                    .min_by_key(|(low, _)| *low),
+                None => (0..tier.len()).find_map(|low| {
+                    conflict(frontends, &tier[high], &tier[low], regexes).map(|why| (low, why))
+                }),
+            };
+            if let Some((low, why)) = lows {
+                found = Some((high, low, why));
+                break;
+            }
+            self.settled.insert(tier[high].id(), round);
+        }
+        // Debug builds check a tier small enough for it against a scan of
+        // every pair (the randomized tests build thousands); on a large one
+        // the scan would cost what the bookkeeping above saves.
+        debug_assert!(
+            tier.len() > 32 || found == scan_unsettled(frontends, tier, regexes),
+            "the admission must find what a scan of every pair finds"
+        );
+        found
+    }
+}
+
+/// [`Admission::first_unsettled`] by a scan of every pair, which debug builds
+/// check it against on small tiers.
+fn scan_unsettled(
+    frontends: &[SourcedFrontend],
+    tier: &[Predicated],
+    regexes: &mut HeaderRegexes,
+) -> Option<(usize, usize, &'static str)> {
+    let mut found: Option<(PrecedenceKey, usize, usize, &'static str)> = None;
+    for high in 0..tier.len() {
+        for low in 0..tier.len() {
+            let Some(why) = conflict(frontends, &tier[high], &tier[low], regexes) else {
+                continue;
+            };
+            let key = precedence_key(frontends, &tier[high]);
+            if found.as_ref().is_none_or(|(best, ..)| key > *best) {
+                found = Some((key, high, low, why));
+            }
+        }
+    }
+    found.map(|(_, high, low, why)| (high, low, why))
+}
+
+/// Why Sōzu would not serve every request `high` and `low` both match with
+/// `high`, as the Gateway API does, in every order it may hold the two —
+/// `None` when the Gateway API serves them with `low`, when the two serve
+/// alike, when Sōzu's own rules settle it, or when no request matches both.
+fn conflict(
+    frontends: &[SourcedFrontend],
+    high: &Predicated,
+    low: &Predicated,
+    regexes: &mut HeaderRegexes,
+) -> Option<&'static str> {
+    if high.rule.cluster_id == low.rule.cluster_id && high.rule.filters == low.rule.filters {
+        return None;
+    }
+    if !serves_first(frontends, high, low) {
+        return None;
+    }
+    let reason = unsettled(&high.rule.hostname, high.offer, low.offer)?;
+    can_meet(high.rule, low.rule, regexes).then_some(reason)
+}
+
+/// The header match to skip for an unsettled pair of one tier, and why.
+fn overlap_problem(
+    frontends: &[SourcedFrontend],
+    high: &Predicated,
+    low: &Predicated,
+    reason: &'static str,
+) -> Skip {
+    let hostname = high.rule.hostname.clone();
+    let header_match = describe_match(&frontends[low.owner].frontend);
+    let copy_of = low
+        .copy
+        .then(|| describe_route(&frontends[low.ranks_as].frontend).into_boxed_str());
+    let problem = if high.copy {
+        Problem::HeaderMatchOutranksRoute {
+            hostname,
+            header_match,
+            route: describe_route(&frontends[high.ranks_as].frontend),
+            copy_of,
+            reason,
+        }
+    } else {
+        Problem::HeaderMatchOverlap {
+            hostname,
+            header_match,
+            route: describe_source(&frontends[high.ranks_as]),
+            copy_of,
+            reason,
+        }
+    };
+    (low.owner, problem)
+}
+
+/// Whether the Gateway API serves a request both match with `a` rather than
+/// `b`: [`gw_precedence`], then the older route, its name and rule order —
+/// the order collision resolution left the frontends in.
+fn serves_first(frontends: &[SourcedFrontend], a: &Predicated, b: &Predicated) -> bool {
+    let (ra, rb) = (
+        &frontends[a.ranks_as].frontend,
+        &frontends[b.ranks_as].frontend,
+    );
+    gw_precedence(ra, rb)
+        .then_with(|| b.ranks_as.cmp(&a.ranks_as))
+        .then_with(|| b.owner.cmp(&a.owner))
+        .is_gt()
+}
+
+/// A total order that follows [`gw_precedence`], to pick which unsettled pair
+/// to resolve first: path kind and length, method, header matches, then the
+/// earlier frontend.
+type PrecedenceKey = (u8, usize, bool, usize, std::cmp::Reverse<(usize, usize)>);
+
+fn precedence_key(frontends: &[SourcedFrontend], entry: &Predicated) -> PrecedenceKey {
+    let f = &frontends[entry.ranks_as].frontend;
+    let (kind, length) = match &f.path {
+        ir::PathMatch::Exact(path) => (2, path.len()),
+        ir::PathMatch::Prefix(prefix) => (1, prefix_body(prefix).len()),
+        ir::PathMatch::Regex(_) => (0, 0),
+    };
+    (
+        kind,
+        length,
+        f.method.is_some(),
+        f.header_matches.len(),
+        std::cmp::Reverse((entry.ranks_as, entry.owner)),
+    )
+}
+
+/// Gateway API precedence between two frontends one request can match, short
+/// of the route age, name and rule order tie-break: an Exact path, then the
+/// longest prefix, then a method, then the most header matches. A
+/// `RegularExpression` path's precedence is the implementation's: a
+/// header-matched frontend outranks a plain one (as Sōzu ranks them, and
+/// [`lift_header_matches`] never copies across a regex), and two header
+/// matches rank by method, then header matches.
+fn gw_precedence(a: &ir::Frontend, b: &ir::Frontend) -> std::cmp::Ordering {
+    use ir::PathMatch::{Exact, Prefix, Regex};
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let path = match (&a.path, &b.path) {
+        (Regex(_), _) | (_, Regex(_)) => b
+            .header_matches
+            .is_empty()
+            .cmp(&a.header_matches.is_empty()),
+        (Exact(_), Prefix(_)) => Greater,
+        (Prefix(_), Exact(_)) => Less,
+        (Prefix(x), Prefix(y)) => prefix_body(x).len().cmp(&prefix_body(y).len()),
+        (Exact(_), Exact(_)) => Equal,
+    };
+    path.then(a.method.is_some().cmp(&b.method.is_some()))
+        .then(a.header_matches.len().cmp(&b.header_matches.len()))
+}
+
+/// Whether plain frontend `u` wins over header-matched frontend `p` under the
+/// Gateway API's precedence for some request both match: an Exact path over a
+/// prefix, a longer prefix over a shorter one it extends, and on the same path
+/// a method over none. Header matches come after all three, so `p`'s never
+/// enter into it. `false` for a regex path on either side (see
+/// [`lift_header_matches`]) and for two methods no request can carry at once.
+fn outranks(u: &ir::Frontend, p: &ir::Frontend) -> bool {
+    methods_meet(u, p) && paths_meet(&u.path, &p.path) && gw_precedence(u, p).is_gt()
+}
+
+fn methods_meet(a: &ir::Frontend, b: &ir::Frontend) -> bool {
+    !matches!((&a.method, &b.method), (Some(x), Some(y)) if x != y)
+}
+
+/// Whether some request target matches both paths' Sōzu rules. A regex is
+/// assumed to; an Exact path also matches itself with a query string.
+fn paths_meet(a: &ir::PathMatch, b: &ir::PathMatch) -> bool {
+    use ir::PathMatch::{Exact, Prefix, Regex};
+    let queried = |target: &str, exact: &str| {
+        target
+            .strip_prefix(exact)
+            .is_some_and(|rest| rest.starts_with('?'))
+    };
+    match (a, b) {
+        (Regex(_), _) | (_, Regex(_)) => true,
+        (Prefix(x), Prefix(y)) => {
+            prefix_covers(x, prefix_body(y)) || prefix_covers(y, prefix_body(x))
+        }
+        (Exact(exact), Prefix(prefix)) | (Prefix(prefix), Exact(exact)) => {
+            prefix_covers(prefix, exact) || queried(prefix_body(prefix), exact)
+        }
+        (Exact(x), Exact(y)) => x == y || queried(x, y) || queried(y, x),
+    }
+}
+
+/// Whether one request can match both frontends of one [`Group`]: their
+/// paths, their methods and their header matches. Conservative: `true`
+/// wherever this cannot rule it out.
+fn can_meet(a: &ir::Frontend, b: &ir::Frontend, regexes: &mut HeaderRegexes) -> bool {
+    methods_meet(a, b)
+        && paths_meet(&a.path, &b.path)
+        && a.header_matches.iter().all(|x| {
+            b.header_matches
+                .iter()
+                .filter(|y| y.name == x.name)
+                .all(|y| match (&x.kind, &y.kind) {
+                    (ir::HeaderMatchKind::Exact(v), ir::HeaderMatchKind::Exact(w)) => v == w,
+                    (ir::HeaderMatchKind::Exact(v), ir::HeaderMatchKind::Regex(r))
+                    | (ir::HeaderMatchKind::Regex(r), ir::HeaderMatchKind::Exact(v)) => {
+                        regexes.accepts(r, v)
+                    }
+                    (ir::HeaderMatchKind::Regex(_), ir::HeaderMatchKind::Regex(_)) => true,
+                })
+        })
+}
+
+/// Header match regexes, compiled as Sōzu matches them (`\A(?:…)\z` over the
+/// value's bytes), once per pattern.
+#[derive(Default)]
+struct HeaderRegexes(BTreeMap<String, Option<regex::bytes::Regex>>);
+
+impl HeaderRegexes {
+    /// Whether a request value `value` meets regex `pattern`. `true` for a
+    /// pattern that does not compile (never admitted anyway): it cannot rule
+    /// a meeting out.
+    fn accepts(&mut self, pattern: &str, value: &str) -> bool {
+        if !self.0.contains_key(pattern) {
+            let regex = regex::bytes::Regex::new(&format!("\\A(?:{pattern})\\z")).ok();
+            self.0.insert(pattern.to_string(), regex);
+        }
+        self.0
+            .get(pattern)
+            .and_then(Option::as_ref)
+            .is_none_or(|regex| regex.is_match(value.as_bytes()))
+    }
+}
+
+/// How Sōzu 2.3.2 weighs one of the rules we emit when it selects among the
+/// matching rules of one class in a hostname leaf (`TreeSelection::offer`,
+/// `lib/src/router/mod.rs:1071-1115`; offered in the order the leaf holds them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeOffer {
+    /// The root `/`, the only Sōzu `Prefix` rule we emit
+    /// (`ir::PathMatch::sozu_rule`). A prefix ranks by its length alone and
+    /// never reads the method; it replaces what was offered before when it is
+    /// at least as long as the bar, so an equal prefix offered later wins.
+    RootPrefix,
+    /// A regex (every other path) with a method: the first one offered that
+    /// matches decides the class at once, whatever comes after it.
+    RegexWithMethod,
+    /// A method-less regex: it replaces whatever was offered before it and
+    /// raises the bar to the request target's length, so a later method-less
+    /// regex replaces it, and so does a later prefix as long as the target.
+    /// `shortest` is the length of the shortest target it matches.
+    Regex { shortest: usize },
+}
+
+fn tree_offer(f: &ir::Frontend) -> TreeOffer {
+    match (f.path.sozu_rule(), &f.method) {
+        (ir::SozuPathRule::Prefix(_), _) => TreeOffer::RootPrefix,
+        (ir::SozuPathRule::Regex(_), Some(_)) => TreeOffer::RegexWithMethod,
+        (ir::SozuPathRule::Regex(_), None) => TreeOffer::Regex {
+            // An Exact or non-root Prefix rule matches its literal path and
+            // longer targets only; a user regex could match anything.
+            shortest: match &f.path {
+                ir::PathMatch::Exact(path) => path.len(),
+                ir::PathMatch::Prefix(prefix) => prefix_body(prefix).len(),
+                ir::PathMatch::Regex(_) => 0,
+            },
+        },
+    }
+}
+
+/// Why Sōzu would not serve a frontend Sōzu offers as `high` over one it
+/// offers as `low` ([`tree_offer`]), both on `hostname`, in every order it may
+/// hold the two of its predicated class, for every request both match —
+/// `None` when it does. Both frontends' header conditions hold for such a
+/// request, so they meet in one class and its historical rules decide; only
+/// the outcomes those rules fix without consulting the order count.
+fn unsettled(hostname: &str, high: TreeOffer, low: TreeOffer) -> Option<&'static str> {
+    // The catch-all hostname goes to Sōzu's POST list (see the translator),
+    // where the first predicated rule that matches wins (`select_listed_rule`).
+    if hostname == "*" {
+        return Some(
+            "on a route without hostnames Sōzu serves the first matching header-matched \
+             frontend it holds, in an order this controller does not set",
+        );
+    }
+    match (high, low) {
+        (TreeOffer::RegexWithMethod, TreeOffer::RegexWithMethod) => Some(
+            "both name the method, and Sōzu serves the first matching path regex that names \
+             it, in the order it holds them",
+        ),
+        // Nothing else decides at once: `high` does, from wherever it stands.
+        (TreeOffer::RegexWithMethod, _) => None,
+        (_, TreeOffer::RegexWithMethod) => Some(
+            "Sōzu serves a matching path regex that names the method ahead of every one that \
+             does not, whatever their paths",
+        ),
+        // `high` raises the bar past the root's length 1 on every target it
+        // matches, so the root cannot replace it, before or after.
+        (TreeOffer::Regex { shortest }, TreeOffer::RootPrefix) if shortest > 1 => None,
+        (TreeOffer::Regex { .. }, TreeOffer::RootPrefix)
+        | (TreeOffer::RootPrefix, TreeOffer::Regex { shortest: 0 | 1 }) => Some(
+            "on the target `/` Sōzu serves whichever of a path regex and the root prefix it \
+             holds last",
+        ),
+        (TreeOffer::RootPrefix, TreeOffer::Regex { .. }) => Some(
+            "Sōzu serves a matching path regex longer than `/` ahead of the root prefix, \
+             whatever their header matches",
+        ),
+        (TreeOffer::RootPrefix, TreeOffer::RootPrefix) => Some(
+            "Sōzu ranks the root prefix by its length alone, ignoring the method, and serves \
+             whichever of two it holds last",
+        ),
+        (TreeOffer::Regex { .. }, TreeOffer::Regex { .. }) => {
+            Some("Sōzu serves whichever of two method-less path regexes it holds last")
+        }
+    }
+}
+
+/// A plain route as a problem message names it: method, path type and path,
+/// in words that fit an Ingress path as well as an HTTPRoute match.
+fn describe_route(u: &ir::Frontend) -> String {
+    let (kind, path) = match &u.path {
+        ir::PathMatch::Exact(path) => ("exact", path),
+        ir::PathMatch::Prefix(path) => ("prefix", path),
+        ir::PathMatch::Regex(path) => ("regex", path),
+    };
+    let method = u
+        .method
+        .as_deref()
+        .map(|m| format!("{m} "))
+        .unwrap_or_default();
+    format!("{method}{kind} {}", display_path(path))
+}
+
+/// A frontend's match as a problem message names it, header matches
+/// included: `prefix / with x-canary="1"`.
+fn describe_match(f: &ir::Frontend) -> String {
+    let headers: Vec<String> = f
+        .header_matches
+        .iter()
+        .map(|m| match &m.kind {
+            ir::HeaderMatchKind::Exact(value) => format!("{}={value:?}", m.name),
+            ir::HeaderMatchKind::Regex(value) => format!("{}=~{value:?}", m.name),
+        })
+        .collect();
+    if headers.is_empty() {
+        describe_route(f)
+    } else {
+        format!("{} with {}", describe_route(f), headers.join(", "))
+    }
+}
+
+/// A frontend and the object it comes from, as a problem message names them:
+/// `HTTPRoute demo/canary (prefix / with x-canary="1")`.
+fn describe_source(sf: &SourcedFrontend) -> String {
+    let (kind, namespace, name) = match &sf.source {
+        FrontendSource::Ingress { namespace, name } => ("Ingress", namespace, name),
+        FrontendSource::HttpRoute {
+            namespace, name, ..
+        } => ("HTTPRoute", namespace, name),
+    };
+    format!(
+        "{kind} {namespace}/{name} ({})",
+        describe_match(&sf.frontend)
+    )
+}
+
+/// A prefix without its insignificant trailing slash; the root is empty.
+fn prefix_body(prefix: &str) -> &str {
+    prefix.trim_end_matches('/')
+}
+
+/// Whether element-boundary prefix `prefix` matches the request target
+/// `target` (see `ir::PathMatch::sozu_rule`): the root covers everything,
+/// `/foo` covers `/foo`, `/foo/…` and `/foo?…` but never `/foobar`.
+fn prefix_covers(prefix: &str, target: &str) -> bool {
+    let prefix = prefix_body(prefix);
+    prefix.is_empty()
+        || target
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?']))
 }
 
 /// An IR certificate paired with its leaf fingerprint (SHA-256 of the DER, as
@@ -2759,6 +3925,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                     .bind_for(ExposedProtocol::Http)
                                     .expect("HTTP is always exposed"),
                                 filters: http_filters,
+                                header_matches: vec![],
                             },
                             source: source.clone(),
                         });
@@ -2774,6 +3941,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                         .bind_for(ExposedProtocol::Https)
                                         .expect("HTTPS is always exposed"),
                                     filters: ir::FrontendFilters::default(),
+                                    header_matches: vec![],
                                 },
                                 source: source.clone(),
                             });
@@ -2832,17 +4000,43 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         owner_claims.insert((GATEWAY_OWNER, ns, name), claim);
     }
     let (frontends, folded, collisions) = resolve_frontend_collisions(frontends, &owner_claims);
-    for (source, problem) in collisions {
+    // Then Gateway API precedence between header-matched and plain routes,
+    // which Sōzu does not apply on its own (see `lift_header_matches`). A
+    // header match it has to skip leaves the route Accepted, like every other
+    // skipped match; only a collision downgrades it.
+    let (frontends, copies, lift_problems) = lift_header_matches(frontends, &folded);
+    let reports = collisions
+        .into_iter()
+        .map(|(source, problem)| (source, problem, true))
+        .chain(
+            lift_problems
+                .into_iter()
+                .map(|(source, problem)| (source, problem, false)),
+        );
+    // Indexed once: a skipped header match is reported per route rule, and
+    // past the per-hostname cap one tenant can produce thousands of reports,
+    // each of which a scan of every result would make cost the route count.
+    // The first entry wins, as a scan from the start would find it.
+    let mut ingress_at: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (i, r) in results.iter().enumerate() {
+        ingress_at
+            .entry((r.namespace.clone(), r.name.clone()))
+            .or_insert(i);
+    }
+    let mut route_at: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (i, r) in gw.routes.iter().enumerate() {
+        route_at
+            .entry((r.namespace.clone(), r.name.clone()))
+            .or_insert(i);
+    }
+    for (source, problem, collision) in reports {
         // Dedup: the HTTP and HTTPS frontends of one host+path lose as a pair
         // to the same winner — one problem carries the same information.
         match source {
             // No Ingress status machinery exists, so a losing Ingress keeps
             // problem-only reporting.
             FrontendSource::Ingress { namespace, name } => {
-                if let Some(r) = results
-                    .iter_mut()
-                    .find(|r| r.namespace == namespace && r.name == name)
-                {
+                if let Some(r) = ingress_at.get(&(namespace, name)).map(|&i| &mut results[i]) {
                     if !r.problems.contains(&problem) {
                         r.problems.push(problem);
                     }
@@ -2856,10 +4050,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                 section_name,
                 port,
             } => {
-                if let Some(p) = gw
-                    .routes
-                    .iter_mut()
-                    .find(|r| r.namespace == namespace && r.name == name)
+                if let Some(p) = route_at
+                    .get(&(namespace, name))
+                    .map(|&i| &mut gw.routes[i])
                     .and_then(|r| {
                         // The parentRef identity includes sectionName/port: a
                         // route may hold several parentRefs to one Gateway,
@@ -2876,8 +4069,10 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                     // A losing route must not read fully healthy: downgrade
                     // Accepted with an implementation-specific reason so the
                     // condition (not just the log) carries the collision.
-                    p.accepted = false;
-                    p.accepted_reason = "RouteCollision";
+                    if collision {
+                        p.accepted = false;
+                        p.accepted_reason = "RouteCollision";
+                    }
                     if !p.problems.contains(&problem) {
                         p.problems.push(problem);
                     }
@@ -2932,6 +4127,20 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         }
     }
     // Only now is it known which clusters carry traffic, and of which kind.
+    // A frontend folded into one that `lift_header_matches` then skipped is
+    // not served either: Sōzu holds one route for both, and it is gone. The
+    // copies it added carry the cluster and filters of a plain route that is
+    // kept, for that route's owner, so they change nothing here.
+    let folded: Vec<SourcedFrontend> = if folded.is_empty() {
+        folded
+    } else {
+        let served: BTreeSet<RouteKey> =
+            frontends.iter().map(|sf| route_key(&sf.frontend)).collect();
+        folded
+            .into_iter()
+            .filter(|sf| served.contains(&route_key(&sf.frontend)))
+            .collect()
+    };
     settle_health_checks(
         &mut clusters,
         &frontends,
@@ -2940,7 +4149,11 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         &mut results,
         &mut gw.routes,
     );
-    let frontends: Vec<ir::Frontend> = frontends.into_iter().map(|sf| sf.frontend).collect();
+    let frontends: Vec<ir::Frontend> = frontends
+        .into_iter()
+        .map(|sf| sf.frontend)
+        .chain(copies)
+        .collect();
 
     // Merge certs that share Sōzu's (listener, fingerprint) identity, unioning
     // their names, then order deterministically. This subsumes exact-duplicate
@@ -3171,6 +4384,234 @@ mod hostname_tests {
 }
 
 #[cfg(test)]
+mod header_match_precedence {
+    use super::*;
+
+    fn frontend(path: ir::PathMatch, method: Option<&str>) -> ir::Frontend {
+        ir::Frontend {
+            hostname: "app.example.com".into(),
+            path,
+            method: method.map(str::to_string),
+            cluster_id: Some("c".into()),
+            tls: false,
+            listener: "0.0.0.0:8080".parse().unwrap(),
+            filters: Default::default(),
+            header_matches: vec![],
+        }
+    }
+
+    #[test]
+    fn a_plain_route_outranks_a_header_match_on_path_then_method_only() {
+        use ir::PathMatch::{Exact, Prefix, Regex};
+        let p = |s: &str| Prefix(s.to_string());
+        let e = |s: &str| Exact(s.to_string());
+        let r = |s: &str| Regex(s.to_string());
+        // (plain U, its method, header-matched P, its method, U outranks P)
+        let cases = [
+            (e("/foo"), None, p("/"), None, true),
+            (e("/foo"), None, p("/foo"), None, true),
+            (e("/foo/"), None, p("/foo/"), None, true),
+            (e("/foobar"), None, p("/foo"), None, false),
+            (p("/foo/bar"), None, p("/foo"), None, true),
+            (p("/foo/bar"), None, p("/foo"), Some("POST"), true),
+            (p("/foobar"), None, p("/foo"), None, false),
+            (p("/foo"), None, p("/foo/"), None, false),
+            (p("/foo"), Some("GET"), p("/foo/"), None, true),
+            (p("/foo"), Some("GET"), p("/foo"), Some("GET"), false),
+            (p("/foo/bar"), Some("GET"), p("/foo"), Some("POST"), false),
+            (p("/"), None, e("/"), None, false),
+            (p("/foo/bar"), None, e("/foo"), None, false),
+            (e("/"), Some("GET"), e("/"), None, true),
+            (e("/a"), None, e("/b"), None, false),
+            (r("/foo/.*"), None, p("/"), None, false),
+            (e("/foo"), None, r("/.*"), None, false),
+        ];
+        for (u_path, u_method, p_path, p_method, expected) in cases {
+            let u = frontend(u_path, u_method);
+            let mut p = frontend(p_path, p_method);
+            p.header_matches = vec![ir::HeaderMatch {
+                name: "x".into(),
+                kind: ir::HeaderMatchKind::Exact("1".into()),
+            }];
+            assert_eq!(
+                outranks(&u, &p),
+                expected,
+                "{:?} {u_method:?} over {:?} {p_method:?}",
+                u.path,
+                p.path
+            );
+        }
+    }
+
+    /// Which copies win against their header match in every order Sōzu 2.3.2
+    /// may hold the two (`TreeSelection::offer`; measured for the root shapes
+    /// and the longer prefix in `header_match_probe`).
+    #[test]
+    fn a_copy_is_kept_only_where_sozus_selection_does_not_consult_the_order() {
+        use ir::PathMatch::{Exact, Prefix};
+        let p = |s: &str| Prefix(s.to_string());
+        let e = |s: &str| Exact(s.to_string());
+        const HOST: &str = "app.example.com";
+        // (plain U, its method, header-matched P, its method, hostname, a
+        // copy of U wins in any order)
+        let cases = [
+            // A regex longer than `/` raises the bar past the root prefix.
+            (e("/foo"), None, p("/"), None, HOST, true),
+            (p("/foo"), None, p("/"), None, HOST, true),
+            (p("/foo"), None, p("/"), Some("PUT"), HOST, true),
+            // A regex naming the method decides at once, wherever it stands.
+            (p("/foo"), Some("GET"), p("/"), None, HOST, true),
+            (e("/"), Some("GET"), p("/"), None, HOST, true),
+            (p("/api"), Some("GET"), p("/api"), None, HOST, true),
+            (e("/api/x"), Some("GET"), p("/api"), None, HOST, true),
+            (e("/x"), Some("GET"), e("/x"), None, HOST, true),
+            // On the target `/` the root prefix meets the bar an Exact `/`
+            // sets, and the later of the two wins.
+            (e("/"), None, p("/"), None, HOST, false),
+            // Unless the header match names a method: its copy names it too.
+            (e("/"), None, p("/"), Some("POST"), HOST, true),
+            // Two root prefixes, the method unread: the later wins.
+            (p("/"), Some("GET"), p("/"), None, HOST, false),
+            // Two method-less regexes: the later wins.
+            (p("/api/v2"), None, p("/api"), None, HOST, false),
+            (e("/api"), None, p("/api"), None, HOST, false),
+            // A header match naming a method lends it to the copy, and two
+            // regexes naming the method go to the first held.
+            (p("/api/v2"), None, p("/api"), Some("POST"), HOST, false),
+            (
+                p("/api/v2"),
+                Some("POST"),
+                p("/api"),
+                Some("POST"),
+                HOST,
+                false,
+            ),
+            // A hostname-less list is first-match: no copy is safe.
+            (p("/foo"), None, p("/"), None, "*", false),
+            (e("/x"), Some("GET"), e("/x"), None, "*", false),
+        ];
+        for (u_path, u_method, p_path, p_method, hostname, expected) in cases {
+            let mut u = frontend(u_path, u_method);
+            u.hostname = hostname.to_string();
+            let mut p = frontend(p_path, p_method);
+            p.hostname = hostname.to_string();
+            p.header_matches = vec![ir::HeaderMatch {
+                name: "x".into(),
+                kind: ir::HeaderMatchKind::Exact("1".into()),
+            }];
+            let shown = format!(
+                "{:?} {u_method:?} over {:?} {p_method:?} on {hostname}",
+                u.path, p.path
+            );
+            assert!(outranks(&u, &p), "{shown}: the case needs a copy");
+            let copy = lifted_copy(&u, &p);
+            assert_eq!(copy.header_matches, p.header_matches, "{shown}");
+            assert_eq!(
+                copy.method,
+                u.method.clone().or(p.method.clone()),
+                "{shown}"
+            );
+            let settled = unsettled(hostname, tree_offer(&copy), tree_offer(&p)).is_none();
+            assert_eq!(settled, expected, "{shown}");
+        }
+    }
+
+    /// Two header matches compete only when one request can meet both:
+    /// paths with a common target, compatible methods, and on every header
+    /// they share values one request value can satisfy at once.
+    #[test]
+    fn two_frontends_meet_unless_path_method_or_a_shared_header_rules_it_out() {
+        use ir::HeaderMatchKind::{Exact as Is, Regex as Re};
+        use ir::PathMatch::{Exact, Prefix};
+        let with =
+            |path: ir::PathMatch, method: Option<&str>, headers: &[(&str, ir::HeaderMatchKind)]| {
+                let mut f = frontend(path, method);
+                f.header_matches = headers
+                    .iter()
+                    .map(|(name, kind)| ir::HeaderMatch {
+                        name: name.to_string(),
+                        kind: kind.clone(),
+                    })
+                    .collect();
+                f
+            };
+        let p = |s: &str| Prefix(s.to_string());
+        let e = |s: &str| Exact(s.to_string());
+        let is = |v: &str| Is(v.to_string());
+        let re = |v: &str| Re(v.to_string());
+        let cases = [
+            // Paths: a common target, element boundaries, a query string.
+            (with(p("/"), None, &[]), with(e("/x"), None, &[]), true),
+            (with(p("/a"), None, &[]), with(p("/a/b"), None, &[]), true),
+            (with(p("/a"), None, &[]), with(p("/ab"), None, &[]), false),
+            (with(e("/a"), None, &[]), with(p("/a"), None, &[]), true),
+            (with(e("/a"), None, &[]), with(p("/a/b"), None, &[]), false),
+            (with(e("/a"), None, &[]), with(e("/a/"), None, &[]), false),
+            (with(e("/a"), None, &[]), with(p("/a?x"), None, &[]), true),
+            (with(e("/a"), None, &[]), with(e("/a?x"), None, &[]), true),
+            // Methods.
+            (
+                with(p("/"), Some("GET"), &[]),
+                with(p("/"), None, &[]),
+                true,
+            ),
+            (
+                with(p("/"), Some("GET"), &[]),
+                with(p("/"), Some("POST"), &[]),
+                false,
+            ),
+            // Header values on a shared name; different names always meet.
+            (
+                with(p("/"), None, &[("a", is("1"))]),
+                with(p("/"), None, &[("b", is("1"))]),
+                true,
+            ),
+            (
+                with(p("/"), None, &[("a", is("1"))]),
+                with(p("/"), None, &[("a", is("1"))]),
+                true,
+            ),
+            (
+                with(p("/"), None, &[("a", is("1"))]),
+                with(p("/"), None, &[("a", is("2"))]),
+                false,
+            ),
+            (
+                with(p("/"), None, &[("a", is("13"))]),
+                with(p("/"), None, &[("a", re("1.*"))]),
+                true,
+            ),
+            (
+                with(p("/"), None, &[("a", is("2"))]),
+                with(p("/"), None, &[("a", re("1.*"))]),
+                false,
+            ),
+            // Anchored as Sōzu anchors it: `1` does not accept `21`.
+            (
+                with(p("/"), None, &[("a", is("21"))]),
+                with(p("/"), None, &[("a", re("1"))]),
+                false,
+            ),
+            (
+                with(p("/"), None, &[("a", re("1"))]),
+                with(p("/"), None, &[("a", re("2"))]),
+                true,
+            ),
+            (
+                with(p("/"), None, &[("a", is("1")), ("b", is("1"))]),
+                with(p("/"), None, &[("b", is("2"))]),
+                false,
+            ),
+        ];
+        let mut regexes = HeaderRegexes::default();
+        for (a, b, expected) in cases {
+            assert_eq!(can_meet(&a, &b, &mut regexes), expected, "{a:?} and {b:?}");
+            assert_eq!(can_meet(&b, &a, &mut regexes), expected, "{b:?} and {a:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod http_route_collisions {
     use super::*;
 
@@ -3184,6 +4625,7 @@ mod http_route_collisions {
                 tls: false,
                 listener: "0.0.0.0:8080".parse().unwrap(),
                 filters: Default::default(),
+                header_matches: vec![],
             },
             source: FrontendSource::HttpRoute {
                 namespace: "demo".into(),

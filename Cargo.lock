@@ -2540,12 +2540,14 @@ name = "sozu-gw-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "k8s-openapi",
  "mio",
  "rustls",
  "serde",
  "serde_json",
  "socket2",
  "sozu-command-lib",
+ "sozu-gw-builder",
  "sozu-gw-ir",
  "sozu-gw-translator",
  "thiserror 2.0.21",
@@ -2616,6 +2618,7 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
