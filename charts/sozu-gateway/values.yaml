@@ -377,6 +377,48 @@ sozu:
     # Time to receive a whole request since the connection opened (default 10).
     request: null
 
+  # Active health checks, the default for every Service that does not choose
+  # with the `sozu.io/health-check` annotation ("tcp" or "off"; the
+  # `sozu.io/health-check-*` annotations retune one Service). A TCP check only
+  # proves the port accepts a connection — the kernel completes the handshake
+  # without the application — so it ejects black-holed, refusing and vanished
+  # backends, but not a hung application until its accept queue fills. Each
+  # Sōzu worker probes on its own and leaves a backend that fails
+  # `unhealthyThreshold` probes in a row out of rotation, sticky clients
+  # included (they are re-pinned to another backend) — except when no backend
+  # passes normal selection (health or connect back-off): it then fails open,
+  # ignoring health for every backend it is not backing off from, so a down
+  # backend can take traffic while a healthy one is backing off.
+  #
+  # Why it matters: a TCPRoute session whose backend never answers the connect
+  # (a black-holed pod IP) is closed after the connect timeout with no
+  # failover, and that backend is never marked down, so while it is still
+  # listed about one connection in N fails. Measured on Sōzu 2.3.2 with one
+  # black-holed backend of two: 61 of 120 connections failed without a check,
+  # none once the check had taken it out; at the timing below, a backend that
+  # stopped answering was out of rotation 6.3 to 9.4 s later in the recorded
+  # runs. HTTP fails over instead, but each time the dead backend's retry
+  # back-off expires, the requests sent to it wait out the connect timeout
+  # again.
+  #
+  # Off by default. Probes cost about replicas × workerCount × backends /
+  # interval connections per second, and a backend speaking another protocol
+  # may log each one (MariaDB, for one, logs an `Aborted connection` warning).
+  # UDP clusters never get a check. Needs Sōzu 2.3.0 or later: an older one
+  # ignores the TCP mode and sends `GET /` instead, which marks any backend
+  # that does not answer HTTP 2xx down.
+  healthCheck:
+    # "off" or "tcp" — quote it: YAML reads a bare off as false.
+    mode: "off"
+    # Keep the timeout below the interval: Sōzu starts no probe of a backend
+    # while its previous one is in flight, so with the two equal a dead
+    # backend can miss a turn and take an interval longer to go down.
+    intervalSeconds: 3
+    timeoutSeconds: 2
+    # Probes in a row that bring a backend back, and that take one out.
+    healthyThreshold: 2
+    unhealthyThreshold: 2
+
 service:
   type: LoadBalancer
   externalTrafficPolicy: Local

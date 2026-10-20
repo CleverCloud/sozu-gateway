@@ -380,6 +380,89 @@ number the user never wrote.
 {{- end -}}
 
 {{/*
+The health-check keys the chart exposes, with their defaults, and the
+controller variable each one is rendered into.
+*/}}
+{{- define "sozu-gateway.healthCheckTimingKeys" -}}
+{{- toJson (dict
+  "intervalSeconds" (list 3 "SOZU_GW_HEALTH_CHECK_INTERVAL_SECS")
+  "timeoutSeconds" (list 2 "SOZU_GW_HEALTH_CHECK_TIMEOUT_SECS")
+  "healthyThreshold" (list 2 "SOZU_GW_HEALTH_CHECK_HEALTHY_THRESHOLD")
+  "unhealthyThreshold" (list 2 "SOZU_GW_HEALTH_CHECK_UNHEALTHY_THRESHOLD")) -}}
+{{- end -}}
+
+{{/*
+`sozu.healthCheck` as the controller's environment, every key defaulted here
+rather than read straight from values: `helm upgrade --reuse-values` from a
+release predating the block replays values without it, and the render must
+still succeed and leave checks off, as they were. Always rendered, so the
+container's settings never depend on the binary's own defaults agreeing with
+the chart's. An unquoted `off` in a values file reaches here as `false`.
+*/}}
+{{- define "sozu-gateway.healthCheckEnv" -}}
+{{- $hc := (.Values.sozu | default dict).healthCheck | default dict -}}
+{{- /* `get` on a missing key yields "", not nil: test presence. */ -}}
+{{- $mode := "off" -}}
+{{- if and (hasKey $hc "mode") (kindIs "string" $hc.mode) -}}
+{{- $mode = $hc.mode -}}
+{{- end -}}
+- name: SOZU_GW_DEFAULT_HEALTH_CHECK
+  value: {{ $mode | quote }}
+{{- range $key, $spec := fromJson (include "sozu-gateway.healthCheckTimingKeys" .) }}
+{{- $value := index $spec 0 }}
+{{- if and (hasKey $hc $key) (not (kindIs "invalid" (get $hc $key))) }}
+{{- $value = get $hc $key }}
+{{- end }}
+- name: {{ index $spec 1 }}
+  value: {{ $value | int64 | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Reject, while rendering, a health-check default the controller would refuse:
+it validates the timing with Sōzu's own rules at startup and exits, so a value
+let through here is a CrashLoopBackOff rather than a message. Validated on the
+raw values, not their coercion (`int64` turns "3s" into 0). An absent key is
+fine — the defaults above cover it — and so is an unquoted `off`, which YAML
+reads as `false`; an unquoted `on` is not, since nothing says it meant "tcp".
+*/}}
+{{- define "sozu-gateway.validateHealthCheck" -}}
+{{- $hc := (.Values.sozu | default dict).healthCheck | default dict -}}
+{{- if not (kindIs "map" $hc) -}}
+  {{- fail (printf "sozu.healthCheck must be a mapping, got %v" $hc) -}}
+{{- end -}}
+{{- $timing := fromJson (include "sozu-gateway.healthCheckTimingKeys" .) -}}
+{{- range $key, $value := $hc -}}
+  {{- if and (ne $key "mode") (not (hasKey $timing $key)) -}}
+    {{- fail (printf "sozu.healthCheck.%s is not a key this chart reads — it reads mode, %s" $key (join ", " (keys $timing | sortAlpha))) -}}
+  {{- end -}}
+{{- end -}}
+{{- if hasKey $hc "mode" -}}
+  {{- $mode := $hc.mode -}}
+  {{- if not (or (kindIs "invalid" $mode) (and (kindIs "bool" $mode) (not $mode)) (has $mode (list "off" "tcp"))) -}}
+    {{- fail (printf "sozu.healthCheck.mode must be \"off\" or \"tcp\", got %v" $mode) -}}
+  {{- end -}}
+{{- end -}}
+{{- range $key, $spec := $timing -}}
+  {{- $value := get $hc $key -}}
+  {{- if and (hasKey $hc $key) (not (kindIs "invalid" $value)) -}}
+    {{- if not (or (kindIs "int" $value) (kindIs "int64" $value) (kindIs "float64" $value)) -}}
+      {{- fail (printf "sozu.healthCheck.%s must be a whole number, got %v (%s)" $key $value (kindOf $value)) -}}
+    {{- end -}}
+    {{- if ne (float64 $value) (float64 (int64 $value)) -}}
+      {{- fail (printf "sozu.healthCheck.%s must be a whole number, got %v" $key $value) -}}
+    {{- end -}}
+    {{- if lt (int64 $value) 1 -}}
+      {{- fail (printf "sozu.healthCheck.%s must be at least 1, got %v — Sōzu refuses a zero interval, timeout or threshold" $key $value) -}}
+    {{- end -}}
+    {{- if gt (int64 $value) 4294967295 -}}
+      {{- fail (printf "sozu.healthCheck.%s is %v, past the u32 Sōzu reads it into" $key $value) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether `controller.watchTimeoutSecs` is set at all — presence, not truthiness.
 The binary defaults the watch bound to 60 and reads `0` as the opt-out, so an
 explicit `0` has to reach the container as `SOZU_GW_WATCH_TIMEOUT_SECS=0`; a

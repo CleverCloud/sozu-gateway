@@ -458,6 +458,19 @@ changes.
   with Sōzu; rustls, rustls-webpki, rustls-pki-types and ring are pinned but not ignored (they are
   the controller's own TLS stack too), so an update turns that test red and waits for the Sōzu
   release that ships it.
+- **Health checks are TCP-connect only, opt-in, and admitted by the builder.**
+  `ir::Cluster::health_check` comes from the `sozu.io/health-check*` Service annotations or the
+  controller default (`--default-health-check`, chart `sozu.healthCheck`, off). The builder
+  validates each with Sōzu's own `validate_health_check_config` (`health_check_refusal`), since
+  `ConfigState::add_cluster` refuses an invalid one and translation is all-or-nothing, and an
+  unusable one is reported (`InvalidHealthCheck`) and programs no check — never the default.
+  The translator spells out `mode: TCP` and `uri: "/"` (the proto default is HTTP with an empty
+  `uri`, which Sōzu refuses) and never attaches a check to a UDP cluster. The builder settles
+  checks only after route-key and L4 socket arbitration (`settle_health_checks`), since a cluster
+  is created the moment a backend resolves: a check stays only on a cluster a programmed HTTP(S)
+  frontend proxies to or a TCP frontend routes to, never on one a UDP frontend names, and a Service
+  port shared with a UDPRoute is reported (`HealthCheckNotApplied`) on every owner that loses it. A
+  check-only change is one `AddCluster` upsert (measured, `docs/probes/health-check_*`).
 - **Metrics are pulled, not pushed.** Sōzu has no native `/metrics`; the controller serves one
   (`--metrics-listen`, off when the flag is absent; the chart sets it by default via
   `metrics.enabled`) by issuing a `QueryMetrics` over the command

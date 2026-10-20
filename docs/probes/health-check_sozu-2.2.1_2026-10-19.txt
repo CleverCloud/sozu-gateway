@@ -1,0 +1,60 @@
+# health_check_probe (built against sozu-command-lib 2.3.2) against docker clevercloud/sozu:2.2.1
+# (deploy/sozu/config.toml, 2 workers, run as uid 1000), 2026-10-19 — what an older data plane does with
+# the TCP-mode check. Same setup as health-check_sozu-2.3.2_2026-10-19.txt, PROBE_HC=3/2/2/2
+# PROBE_CONNECTIONS=40 PROBE_DIES_AFTER_MS=10000.
+
+== health check probe ==
+cluster probe.health-check.9301 (Sōzu's interval jitter for it: 572 ms): live 172.31.91.1:9301 (echo), dead 10.255.255.1:9301 (black hole), dying 172.31.91.1:9302 (echo until phase 5 stops it); round robin; 40 connections per phase, one every 250 ms; check 3/2/2/2 (interval/timeout/healthy/unhealthy)
+[none] translator emitted 6 request(s):
+[none]   {"ADD_TCP_LISTENER":{"address":{"ip":{"inner":{"V4":0}},"port":9300},"public_address":null,"expect_proxy":false,"front_timeout":60,"back_timeout":30,"connect_ti
+[none]   {"ACTIVATE_LISTENER":{"address":{"ip":{"inner":{"V4":0}},"port":9300},"proxy":2,"from_scm":false,"interface":null}}
+[none]   AddCluster probe.health-check.9301 health_check=null
+[none]   {"ADD_BACKEND":{"cluster_id":"probe.health-check.9301","backend_id":"probe.health-check.9301#dead","address":{"ip":{"inner":{"V4":184549121}},"port":9301},"stic
+[none]   {"ADD_BACKEND":{"cluster_id":"probe.health-check.9301","backend_id":"probe.health-check.9301#live","address":{"ip":{"inner":{"V4":2887736065}},"port":9301},"sti
+[none]   {"ADD_TCP_FRONTEND":{"cluster_id":"probe.health-check.9301","address":{"ip":{"inner":{"V4":0}},"port":9300},"tags":{},"sni":null,"alpn":[]}}
+[none] 40 connections: 19 echoed, 21 failed [(Closed, 21)]
+[none]   failed per 10 s window: [21]
+[none]   each failure took 2.98-3.03 s; the last one started at +9.75 s
+[none]   health_check.down per worker: {"0": 0, "1": 0}
+[tcp] translator emitted 1 request(s):
+[tcp]   AddCluster probe.health-check.9301 health_check={"uri":"/","interval":3,"timeout":2,"healthy_threshold":2,"unhealthy_threshold":2,"expected_status":0,"mode":1,"accepted_statuses":[],"port":null,"headers":[]}
+[tcp] main process holds: {"probe.health-check.9301":{"uri":"/","interval":3,"timeout":2,"healthy_threshold":2,"unhealthy_threshold":2,"expected_status":0,"mode":0,"accepted_statuses":[],"port":null,"headers":[]}}
+[tcp]   worker 0: DOWN at +3.8 s (polled every 0.1 s), 2 DOWN(s) in the phase, where only dead should go down
+[tcp]   worker 1: DOWN at +3.8 s (polled every 0.1 s), 2 DOWN(s) in the phase, where only dead should go down
+[tcp] 40 connections: 15 echoed, 25 failed [(Closed, 25)]
+[tcp]   failed per 10 s window: [25]
+[tcp]   each failure took 2.96-3.04 s; the last one started at +9.75 s
+[steady] skipped: not every worker counted exactly one DOWN
+[removed] translator emitted 1 request(s):
+[removed]   AddCluster probe.health-check.9301 health_check=null
+[removed] main process holds: {}
+[removed] 40 connections: 19 echoed, 21 failed [(Closed, 21)]
+[removed]   failed per 10 s window: [21]
+[removed]   each failure took 2.97-3.02 s; the last one started at +9.75 s
+[dies] translator emitted 3 request(s):
+[dies]   AddCluster probe.health-check.9301 health_check={"uri":"/","interval":3,"timeout":2,"healthy_threshold":2,"unhealthy_threshold":2,"expected_status":0,"mode":1,"accepted_statuses":[],"port":null,"headers":[]}
+[dies]   {"ADD_BACKEND":{"cluster_id":"probe.health-check.9301","backend_id":"probe.health-check.9301#dying","address":{"ip":{"inner":{"V4":2887736065}},"port":9302},"st
+[dies]   {"REMOVE_BACKEND":{"cluster_id":"probe.health-check.9301","backend_id":"probe.health-check.9301#dead","address":{"ip":{"inner":{"V4":184549121}},"port":9301}}}
+[dies] after 10000 ms of checks, health_check.down per worker: {"0": 4, "1": 4}
+[dies] 172.31.91.1:9302 stopped answering: 129 connection(s) of the probe's own filled its accept queue and the next one timed out; times are from the last completed filler (+0.0 s), after which every SYN to it is dropped, and the connections start at +0.5 s
+[dies]   worker 0: no DOWN within the deadline
+[dies]   worker 1: no DOWN within the deadline
+[dies] 40 connections: 21 echoed, 19 failed [(Closed, 19)]
+[dies]   failed per 10 s window: [19]
+[dies]   each failure took 2.96-3.01 s; the last one started at +9.25 s
+
+## Sōzu's own log, the transition lines only (docker logs | grep -E "marked DOWN|marked UP|fail-open", cut at 260 columns)
+2026-10-19T21:22:57.048387Z 1792444977048387475 9 WARN  WRK-01	HEALTH-CHECK backend probe.health-check.9301#live at 172.31.91.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:22:57.048594Z 1792444977048594649 8 WARN  WRK-00	HEALTH-CHECK backend probe.health-check.9301#live at 172.31.91.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:22:59.136912Z 1792444979136912613 9 WARN  WRK-01	HEALTH-CHECK backend probe.health-check.9301#dead at 10.255.255.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:22:59.137097Z 1792444979137097482 9 WARN  WRK-01	fail-open: all backends unhealthy, routing to 2 normal backends with retry-policy OKAY
+2026-10-19T21:22:59.180117Z 1792444979180117769 8 WARN  WRK-00	HEALTH-CHECK backend probe.health-check.9301#dead at 10.255.255.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:22:59.386099Z 1792444979386099206 8 WARN  WRK-00	fail-open: all backends unhealthy, routing to 2 normal backends with retry-policy OKAY
+2026-10-19T21:23:06.214120Z 1792444986214120399 9 INFO  WRK-01	fail-open: cluster recovered, 2 backends now healthy
+2026-10-19T21:23:07.214329Z 1792444987214329504 8 INFO  WRK-00	fail-open: cluster recovered, 2 backends now healthy
+2026-10-19T21:23:22.991712Z 1792445002991712440 8 WARN  WRK-00	HEALTH-CHECK backend probe.health-check.9301#live at 172.31.91.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:23:22.991723Z 1792445002991723749 9 WARN  WRK-01	HEALTH-CHECK backend probe.health-check.9301#live at 172.31.91.1:9301 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:23:26.997525Z 1792445006997525584 8 WARN  WRK-00	HEALTH-CHECK backend probe.health-check.9301#dying at 172.31.91.1:9302 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:23:26.997607Z 1792445006997607788 9 WARN  WRK-01	HEALTH-CHECK backend probe.health-check.9301#dying at 172.31.91.1:9302 marked DOWN (health check failed 2 consecutive times) for cluster probe.health-check.9301
+2026-10-19T21:23:29.523858Z 1792445009523858357 8 WARN  WRK-00	fail-open: all backends unhealthy, routing to 2 normal backends with retry-policy OKAY
+2026-10-19T21:23:30.023662Z 1792445010023662691 9 WARN  WRK-01	fail-open: all backends unhealthy, routing to 2 normal backends with retry-policy OKAY

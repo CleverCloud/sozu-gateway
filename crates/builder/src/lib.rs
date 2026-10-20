@@ -37,6 +37,17 @@ const STICKY_ANNOTATION: &str = "sozu.io/sticky-sessions";
 const MAX_CONN_PER_IP_ANNOTATION: &str = "sozu.io/max-connections-per-ip";
 /// Service annotation setting the `Retry-After` seconds on the cap's `429` (u32).
 const RETRY_AFTER_ANNOTATION: &str = "sozu.io/retry-after";
+/// Service annotation turning the cluster's active health check on (`tcp`) or
+/// off (`off`). Absent, [`BuildConfig::health_check`] decides.
+const HEALTH_CHECK_ANNOTATION: &str = "sozu.io/health-check";
+/// Service annotations tuning a check that is on, one field each: seconds for
+/// the interval and timeout, probe counts for the thresholds, a port number for
+/// the port.
+const HEALTH_CHECK_INTERVAL_ANNOTATION: &str = "sozu.io/health-check-interval";
+const HEALTH_CHECK_TIMEOUT_ANNOTATION: &str = "sozu.io/health-check-timeout";
+const HEALTH_CHECK_HEALTHY_ANNOTATION: &str = "sozu.io/health-check-healthy-threshold";
+const HEALTH_CHECK_UNHEALTHY_ANNOTATION: &str = "sozu.io/health-check-unhealthy-threshold";
+const HEALTH_CHECK_PORT_ANNOTATION: &str = "sozu.io/health-check-port";
 /// Ingress annotation to opt out of the automatic HTTP→HTTPS redirect. The
 /// redirect is on by default for any host that has a loaded TLS cert; set this
 /// to `"false"` to keep serving plain HTTP.
@@ -108,6 +119,91 @@ pub struct BuildConfig {
     /// 80 or 443" to "your `(port, protocol)` must be one this gateway
     /// exposes", which is strictly more permissive.
     pub exposure: Vec<ExposedPort>,
+    /// The health check a Service gets when it does not choose one with
+    /// `sozu.io/health-check`, and the timing a check starts from.
+    pub health_check: HealthCheckDefault,
+}
+
+/// The controller-wide health-check default: the `--default-health-check` and
+/// `--health-check-*` flags, rendered by the chart from `sozu.healthCheck`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheckDefault {
+    /// Whether a Service without `sozu.io/health-check` gets a check.
+    pub enabled: bool,
+    /// The timing every check starts from, whether the default or the
+    /// Service's own annotation turned it on; each `sozu.io/health-check-*`
+    /// annotation overrides one field. Never carries a port: a probe port is
+    /// a property of one workload, not of the gateway.
+    pub check: ir::HealthCheck,
+}
+
+impl HealthCheckDefault {
+    /// The documented default timing. Measured on 2.3.2
+    /// (`docs/probes/health-check_sozu-2.3.2_2026-10-19.txt`): in the recorded
+    /// runs a backend that stopped answering under a running check was out of
+    /// rotation 6.3 to 9.4 s later, depending on where in the probe cycle it
+    /// stopped, and one already black-holed when the check was applied 5.2 to
+    /// 5.8 s later.
+    ///
+    /// `timeout < interval` on purpose. Sōzu starts no probe of a backend
+    /// while its previous one is in flight, and decides which probes are due
+    /// before it reaps the timed-out ones (v2.3.2 `lib/src/health_check.rs`,
+    /// `initiate_checks` before `progress_checks`). With the two equal, a dead
+    /// backend's timed-out probe is reaped after its next one was due unless
+    /// the cluster's interval jitter (a hash of its id, up to a fifth of the
+    /// interval) leaves room, and the backend then waits a whole extra
+    /// interval: on a cluster whose jitter is 3 ms, 2/2 took a dead backend
+    /// down at +4.2 s on one worker and +6.2 s on the other, twice, where 3/2
+    /// took it down at +5.2 s on both.
+    pub const DEFAULT_CHECK: ir::HealthCheck = ir::HealthCheck {
+        interval_secs: 3,
+        timeout_secs: 2,
+        healthy_threshold: 2,
+        unhealthy_threshold: 2,
+        port: None,
+    };
+}
+
+impl Default for HealthCheckDefault {
+    /// Off: every TCP probe is a connection each worker of each replica opens
+    /// to each backend per interval, and a backend speaking another protocol
+    /// may log one line for each (MariaDB logs `Aborted connection`), so the
+    /// operator opts in.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check: Self::DEFAULT_CHECK,
+        }
+    }
+}
+
+/// Why Sōzu would refuse `check` on an `AddCluster`, if it would.
+///
+/// Sōzu 2.3.2's `ConfigState::add_cluster` validates an inline check with
+/// `validate_health_check_config` and refuses the whole request on failure
+/// (`command/src/state.rs`), and the translator folds every `AddCluster` into a
+/// `ConfigState` before anything reaches the socket: one invalid check would
+/// fail every reconcile of the shared instance. So the check is validated
+/// here, by that same function on the config the translator emits for it
+/// (`sozu_gw_translator::health_check_config`, which this crate cannot call;
+/// `tests/health_checks.rs` checks that the two agree). Checks enter the IR
+/// only through here, and the controller refuses at startup a default this
+/// refuses.
+pub fn health_check_refusal(check: &ir::HealthCheck) -> Option<&'static str> {
+    use sozu_command_lib::proto::command::{HealthCheckConfig, HealthCheckMode};
+    let config = HealthCheckConfig {
+        uri: "/".to_string(),
+        interval: check.interval_secs,
+        timeout: check.timeout_secs,
+        healthy_threshold: check.healthy_threshold,
+        unhealthy_threshold: check.unhealthy_threshold,
+        expected_status: 0,
+        mode: HealthCheckMode::Tcp as i32,
+        accepted_statuses: vec![],
+        port: check.port.map(u32::from),
+        headers: vec![],
+    };
+    sozu_command_lib::config::validate_health_check_config(&config).err()
 }
 
 impl BuildConfig {
@@ -203,6 +299,7 @@ impl Default for BuildConfig {
                     owner: None,
                 },
             ],
+            health_check: HealthCheckDefault::default(),
         }
     }
 }
@@ -298,6 +395,30 @@ pub enum Problem {
     /// the same Service keep resolving.
     FqdnEndpointsUnsupported {
         service: String,
+    },
+    /// The Service's `sozu.io/health-check*` annotations do not describe a
+    /// check Sōzu accepts: a mode other than `tcp`/`off`, a value that is not
+    /// a whole number, or timing Sōzu refuses (a zero interval, timeout or
+    /// threshold, port 0). Its cluster gets **no** check — not the default,
+    /// which the Service set out to change — and every object routing to it
+    /// is told. The older `sozu.io/*` annotations ignore an unusable value in
+    /// silence; this one cannot, since the value never reaches Sōzu and the
+    /// author would otherwise believe the backends are being checked.
+    InvalidHealthCheck {
+        service: String,
+        reason: String,
+    },
+    /// The health check the Service asks for, or the default would give it,
+    /// is not applied because its cluster carries UDP. One Service port is one
+    /// cluster whatever the route kind, the translator marks a cluster with a
+    /// UDP frontend as UDP, and Sōzu's TCP health check is never attached to a
+    /// UDP cluster (it has a separate UDP health config). Reported on every
+    /// TCPRoute, Ingress and HTTPRoute that loses its check to a UDPRoute on
+    /// the same Service port, and on the UDPRoute when the cluster also
+    /// carries TCP or HTTP traffic or the Service asks for the check itself.
+    HealthCheckNotApplied {
+        service: String,
+        reason: String,
     },
     /// Another route already holds the key Sōzu would store this one under
     /// (listener + host + path + method, joined with `;`) with a different
@@ -458,6 +579,8 @@ impl Problem {
             Problem::ServicePortNotFound { .. } => "ServicePortNotFound",
             Problem::NoReadyEndpoints { .. } => "NoReadyEndpoints",
             Problem::FqdnEndpointsUnsupported { .. } => "FqdnEndpointsUnsupported",
+            Problem::InvalidHealthCheck { .. } => "InvalidHealthCheck",
+            Problem::HealthCheckNotApplied { .. } => "HealthCheckNotApplied",
             Problem::RouteCollision { .. } => "RouteCollision",
             Problem::InvalidPathRegex { .. } => "InvalidPathRegex",
             Problem::InvalidHostname { .. } => "InvalidHostname",
@@ -624,6 +747,15 @@ impl std::fmt::Display for Problem {
             Problem::FqdnEndpointsUnsupported { service } => write!(
                 f,
                 "Service {service:?} has an EndpointSlice of addressType \"FQDN\", which is not supported (backends must be pod IPs); the slice was ignored"
+            ),
+            Problem::InvalidHealthCheck { service, reason } => write!(
+                f,
+                "Service {service:?} asks for a health check Sōzu cannot run ({reason}); its \
+                 backends are not health-checked"
+            ),
+            Problem::HealthCheckNotApplied { service, reason } => write!(
+                f,
+                "Service {service:?} gets no health check: {reason}"
             ),
             Problem::RouteCollision {
                 hostname,
@@ -1195,10 +1327,13 @@ pub(crate) struct Index<'a> {
     pub(crate) secrets: BTreeMap<(String, String), &'a Secret>,
     /// (namespace, service-name) -> slices
     pub(crate) slices: BTreeMap<(String, String), Vec<&'a EndpointSlice>>,
+    /// The controller-wide health-check default, read wherever a Service's
+    /// cluster settings are ([`add_service_route`]).
+    pub(crate) health_check: &'a HealthCheckDefault,
 }
 
 impl<'a> Index<'a> {
-    pub(crate) fn build(inputs: &'a Inputs) -> Self {
+    pub(crate) fn build(inputs: &'a Inputs, health_check: &'a HealthCheckDefault) -> Self {
         let mut services = BTreeMap::new();
         for svc in &inputs.services {
             services.insert(
@@ -1230,6 +1365,7 @@ impl<'a> Index<'a> {
             namespace_labels,
             secrets,
             slices,
+            health_check,
         }
     }
 }
@@ -1517,16 +1653,23 @@ fn parse_lb_algorithm(value: &str) -> ir::LbAlgorithm {
 /// cluster is 1:1 with a Service, so these live on the Service (not the route) —
 /// both Ingress and Gateway refs to one Service then agree on one cluster
 /// config, with no cross-route conflict.
-#[derive(Default)]
 struct ClusterSettings {
     load_balancing: ir::LbAlgorithm,
     sticky_session: bool,
     max_connections_per_ip: Option<u64>,
     retry_after: Option<u32>,
+    /// `Err` when the Service's health-check annotations are unusable: the
+    /// cluster then runs no check and the problem is reported.
+    health_check: Result<Option<ir::HealthCheck>, Problem>,
 }
 
-fn cluster_settings(service: Option<&Service>) -> ClusterSettings {
-    let annotations = service.and_then(|s| s.metadata.annotations.as_ref());
+fn cluster_settings(
+    namespace: &str,
+    service: &str,
+    svc: Option<&Service>,
+    health_check: &HealthCheckDefault,
+) -> ClusterSettings {
+    let annotations = svc.and_then(|s| s.metadata.annotations.as_ref());
     let get = |key: &str| annotations.and_then(|a| a.get(key)).map(|v| v.trim());
     ClusterSettings {
         load_balancing: get(LB_ANNOTATION)
@@ -1537,6 +1680,84 @@ fn cluster_settings(service: Option<&Service>) -> ClusterSettings {
         // rather than failing the Service.
         max_connections_per_ip: get(MAX_CONN_PER_IP_ANNOTATION).and_then(|v| v.parse().ok()),
         retry_after: get(RETRY_AFTER_ANNOTATION).and_then(|v| v.parse().ok()),
+        health_check: service_health_check(&get, health_check).map_err(|reason| {
+            Problem::InvalidHealthCheck {
+                service: format!("{namespace}/{service}"),
+                reason,
+            }
+        }),
+    }
+}
+
+/// Whether the Service turns its health check on itself
+/// (`sozu.io/health-check: tcp`), as opposed to inheriting the default.
+pub(crate) fn service_asks_for_health_check(svc: Option<&Service>) -> bool {
+    svc.and_then(|s| s.metadata.annotations.as_ref())
+        .and_then(|a| a.get(HEALTH_CHECK_ANNOTATION))
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("tcp"))
+}
+
+/// The health check a Service's cluster runs, from its `sozu.io/health-check`
+/// annotation (`tcp` | `off`) or, absent, the controller-wide default. A check
+/// that is on starts from the default timing and each
+/// `sozu.io/health-check-*` annotation overrides one field; they are read
+/// only when it is on, so tuning a check that is off changes nothing.
+///
+/// `Err` carries why the result is unusable — an unknown mode, a value that
+/// is not a whole number, or one Sōzu refuses ([`health_check_refusal`]).
+/// The caller then programs **no** check rather than the default: the Service
+/// set out to change the default, and silently running something else would
+/// read as the change having taken.
+fn service_health_check<'v>(
+    get: &impl Fn(&str) -> Option<&'v str>,
+    default: &HealthCheckDefault,
+) -> Result<Option<ir::HealthCheck>, String> {
+    let enabled = match get(HEALTH_CHECK_ANNOTATION) {
+        None => default.enabled,
+        Some(mode) if mode.eq_ignore_ascii_case("tcp") => true,
+        Some(mode) if mode.eq_ignore_ascii_case("off") => false,
+        Some(mode) => {
+            return Err(format!(
+                "{HEALTH_CHECK_ANNOTATION} is {:?}; expected \"tcp\" or \"off\"",
+                display_path(mode)
+            ))
+        }
+    };
+    if !enabled {
+        return Ok(None);
+    }
+    let whole = |key: &str, field: &mut u32| -> Result<(), String> {
+        if let Some(value) = get(key) {
+            *field = value
+                .parse()
+                .map_err(|_| format!("{key} is {:?}, not a whole number", display_path(value)))?;
+        }
+        Ok(())
+    };
+    let mut check = default.check.clone();
+    whole(HEALTH_CHECK_INTERVAL_ANNOTATION, &mut check.interval_secs)?;
+    whole(HEALTH_CHECK_TIMEOUT_ANNOTATION, &mut check.timeout_secs)?;
+    whole(
+        HEALTH_CHECK_HEALTHY_ANNOTATION,
+        &mut check.healthy_threshold,
+    )?;
+    whole(
+        HEALTH_CHECK_UNHEALTHY_ANNOTATION,
+        &mut check.unhealthy_threshold,
+    )?;
+    if let Some(value) = get(HEALTH_CHECK_PORT_ANNOTATION) {
+        // A number only: the probe dials the backend's IP, and a named port
+        // would need the Pod spec, which the controller does not watch.
+        check.port = Some(value.parse().map_err(|_| {
+            format!(
+                "{HEALTH_CHECK_PORT_ANNOTATION} is {:?}, not a port number",
+                display_path(value)
+            )
+        })?);
+    }
+    match health_check_refusal(&check) {
+        None => Ok(Some(check)),
+        Some(reason) => Err(format!("Sōzu refuses it: {reason}")),
     }
 }
 
@@ -1566,7 +1787,15 @@ pub(crate) fn add_service_route(
         .services
         .get(&(namespace.to_string(), service.to_string()))
         .copied();
-    let s = cluster_settings(svc);
+    let s = cluster_settings(namespace, service, svc, index.health_check);
+    // Every object routing to the Service is told, not only the first: each
+    // of them reads as served by an unchecked cluster.
+    let health_check = s.health_check.unwrap_or_else(|problem| {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+        None
+    });
     clusters.entry(cluster_id.clone()).or_insert(ir::Cluster {
         id: cluster_id.clone(),
         load_balancing: s.load_balancing,
@@ -1577,6 +1806,7 @@ pub(crate) fn add_service_route(
         // Set by an HTTP route only (`HttpBackendProtocol::configure`): a
         // layer-4 route ignores `appProtocol`.
         http2: false,
+        health_check,
     });
     let backend_ids: Vec<String> = addrs
         .iter()
@@ -1811,10 +2041,21 @@ fn claim_for(ident: &OwnerIdent, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> O
 /// effect from another object. Anything else sharing the key is a collision
 /// on the losing object's own source and parentRef — including two different
 /// matches of one object that only Sōzu's key spelling merges.
+///
+/// The second list is the frontends folded into a kept one because they match
+/// the same requests with the same effect (cluster and filters) from another
+/// source — another object, or another parentRef of the same one. Sōzu holds
+/// one route for them, but its traffic is theirs too: whatever is said about
+/// the cluster it reaches (`settle_health_checks`) concerns their owners as
+/// much as the kept one's.
 fn resolve_frontend_collisions(
     frontends: Vec<SourcedFrontend>,
     claims: &BTreeMap<OwnerIdent, OwnerClaim>,
-) -> (Vec<ir::Frontend>, Vec<(FrontendSource, Problem)>) {
+) -> (
+    Vec<SourcedFrontend>,
+    Vec<SourcedFrontend>,
+    Vec<(FrontendSource, Problem)>,
+) {
     // Sort by the owner's claim, then by emission order so an object's own
     // frontends keep their rule order. The tuple comparator is transitive, so
     // one policy covers every Ingress/HTTPRoute pairing.
@@ -1825,35 +2066,43 @@ fn resolve_frontend_collisions(
             .then(a_order.cmp(b_order))
     });
 
-    let mut kept: Vec<ir::Frontend> = Vec::new();
-    let mut sources = Vec::new();
+    let mut kept: Vec<SourcedFrontend> = Vec::new();
     let mut winners: BTreeMap<RouteKey, usize> = BTreeMap::new();
     for (_, sf) in &frontends {
         let key = route_key(&sf.frontend);
         if let std::collections::btree_map::Entry::Vacant(entry) = winners.entry(key) {
             entry.insert(kept.len());
-            kept.push(sf.frontend.clone());
-            sources.push(sf.source.clone());
+            kept.push(SourcedFrontend {
+                frontend: sf.frontend.clone(),
+                source: sf.source.clone(),
+            });
         }
     }
 
     // Resolve all candidates against the final winner. Events must name the
     // actual winning backend.
     let mut collisions = Vec::new();
+    let mut folded = Vec::new();
     for (_, sf) in frontends {
         let index = winners[&route_key(&sf.frontend)];
-        let winner = &kept[index];
+        let winner = &kept[index].frontend;
         // A repeated match from the same object is its own rules/matches,
         // resolved by emission order — legal API input, never a collision. An
         // identical match with an identical effect is benign whoever owns it.
         // A *different* match that only shares Sōzu's key spelling is always
         // reported, even within one object: it is not served.
         let same_match = same_match(winner, &sf.frontend);
+        let same_effect =
+            winner.cluster_id == sf.frontend.cluster_id && winner.filters == sf.frontend.filters;
         if same_match
-            && (owner_ident(&sources[index]) == owner_ident(&sf.source)
-                || (winner.cluster_id == sf.frontend.cluster_id
-                    && winner.filters == sf.frontend.filters))
+            && (owner_ident(&kept[index].source) == owner_ident(&sf.source) || same_effect)
         {
+            // The kept frontend itself, and a repeat from its own source, add
+            // nothing; a same-object repeat with another effect is shadowed by
+            // emission order and serves nothing.
+            if same_effect && sf.source != kept[index].source {
+                folded.push(sf);
+            }
             continue;
         }
         collisions.push((
@@ -1869,7 +2118,178 @@ fn resolve_frontend_collisions(
             },
         ));
     }
-    (kept, collisions)
+    (kept, folded, collisions)
+}
+
+/// Leave a health check only on a cluster Sōzu would run it for: one that a
+/// programmed HTTP(S) frontend proxies to or a TCP layer-4 frontend routes
+/// to, and that no UDP frontend routes to.
+///
+/// [`add_service_route`] creates a cluster, check included, as soon as a
+/// route resolves its Service — before route-key arbitration and before a
+/// layer-4 socket is settled — and a cluster no frontend names is still sent
+/// to Sōzu, whose every worker on every replica would then probe backends
+/// nothing is routed to: the loser of a route-key collision, a UDPRoute that
+/// lost its socket (its datagram-only backends then get TCP probes), a rule
+/// whose every match was skipped. A redirect frontend sends nothing to its
+/// cluster, so it keeps none alive.
+///
+/// UDP: the translator marks a cluster UDP as soon as one UDP frontend names
+/// it and then leaves the check out (Sōzu does not refuse one there, and has
+/// a separate UDP health config for datagrams). One Service port is one
+/// cluster whatever the route kind, so a TCPRoute, an Ingress or an HTTPRoute
+/// to a Service port a UDPRoute also routes to — DNS on 53/TCP and 53/UDP —
+/// loses its check. Dropped here rather than left to the translator so the
+/// IR, and the shadow written from it, say what Sōzu runs.
+///
+/// A check lost to UDP is reported (`HealthCheckNotApplied`) on every
+/// TCPRoute parent, Ingress and HTTPRoute parent routing to the shared
+/// cluster, once each; and on the UDPRoute when the cluster also carries TCP
+/// or HTTP traffic, or when its Service turns the check on itself. "Every"
+/// includes the owners of benign duplicates: route-key arbitration keeps one
+/// of several identical HTTP(S) frontends (`folded` holds the others) and a
+/// layer-4 socket one of several identical claims (each still an
+/// [`gateway::L4Carrier`]), yet each of those owners is served through the
+/// shared cluster and reads as checked unless told. A UDP-only
+/// Service under the controller-wide default is not reported: excluding
+/// datagrams is how the default is documented. Nor is a cluster nothing
+/// routes to: no traffic goes unchecked, and its owner is already told why
+/// its route serves nothing.
+fn settle_health_checks(
+    clusters: &mut BTreeMap<String, ir::Cluster>,
+    frontends: &[SourcedFrontend],
+    folded: &[SourcedFrontend],
+    l4: &[gateway::L4Carrier],
+    results: &mut [IngressResult],
+    routes: &mut [RouteResult],
+) {
+    // Cluster id -> the first UDPRoute (in tie-break order) routing to it,
+    // and its Service: one cluster id is one Service port, so every route to
+    // that cluster names the same Service.
+    let mut udp: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+    let mut tcp: BTreeSet<&str> = BTreeSet::new();
+    for carrier in l4 {
+        match carrier.protocol {
+            ir::L4Protocol::Udp => {
+                udp.entry(carrier.cluster_id.as_str())
+                    .or_insert((carrier.route_name.as_str(), carrier.service.as_str()));
+            }
+            ir::L4Protocol::Tcp => {
+                tcp.insert(carrier.cluster_id.as_str());
+            }
+        }
+    }
+    // Every owner an HTTP(S) frontend proxies for: the kept frontends, and
+    // the identical ones arbitration folded into them, whose owners Sōzu
+    // serves through the same route.
+    let proxied: Vec<(&str, &FrontendSource)> = frontends
+        .iter()
+        .chain(folded)
+        .filter(|sf| sf.frontend.filters.redirect.is_none())
+        .filter_map(|sf| Some((sf.frontend.cluster_id.as_deref()?, &sf.source)))
+        .collect();
+    let http: BTreeSet<&str> = proxied.iter().map(|(cluster_id, _)| *cluster_id).collect();
+
+    let has_check = |cluster_id: &str| {
+        clusters
+            .get(cluster_id)
+            .is_some_and(|cluster| cluster.health_check.is_some())
+    };
+    let lost_to = |udp_route: &str| {
+        format!(
+            "UDPRoute {udp_route} routes the same Service port over UDP, so Sōzu holds one \
+             UDP cluster for both and runs no TCP health check on it"
+        )
+    };
+    let push_once = |problems: &mut Vec<Problem>, problem: Problem| {
+        if !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    };
+
+    for carrier in l4 {
+        let cluster_id = carrier.cluster_id.as_str();
+        let Some((udp_route, _)) = udp.get(cluster_id) else {
+            continue;
+        };
+        if !has_check(cluster_id) {
+            continue;
+        }
+        let reason = match carrier.protocol {
+            ir::L4Protocol::Tcp => lost_to(udp_route),
+            ir::L4Protocol::Udp if tcp.contains(cluster_id) || http.contains(cluster_id) => {
+                "this route makes the Service port's cluster a UDP one, which runs no TCP \
+                 health check, so its TCP or HTTP traffic goes unchecked too"
+                    .to_string()
+            }
+            ir::L4Protocol::Udp if carrier.asks_for_health_check => {
+                "Sōzu's TCP health check does not run on UDP traffic".to_string()
+            }
+            ir::L4Protocol::Udp => continue,
+        };
+        push_once(
+            &mut routes[carrier.route].parents[carrier.parent].problems,
+            Problem::HealthCheckNotApplied {
+                service: carrier.service.clone(),
+                reason,
+            },
+        );
+    }
+    for (cluster_id, source) in &proxied {
+        let Some((udp_route, service)) = udp.get(cluster_id) else {
+            continue;
+        };
+        if !has_check(cluster_id) {
+            continue;
+        }
+        let problem = Problem::HealthCheckNotApplied {
+            service: service.to_string(),
+            reason: lost_to(udp_route),
+        };
+        // Deduplicated per owner: an Ingress's HTTP and HTTPS frontends, its
+        // hosts and paths, all lose the same check.
+        match source {
+            FrontendSource::Ingress { namespace, name } => {
+                if let Some(result) = results
+                    .iter_mut()
+                    .find(|r| &r.namespace == namespace && &r.name == name)
+                {
+                    push_once(&mut result.problems, problem);
+                }
+            }
+            FrontendSource::HttpRoute {
+                namespace,
+                name,
+                gateway_namespace,
+                gateway_name,
+                section_name,
+                port,
+            } => {
+                if let Some(parent) = routes
+                    .iter_mut()
+                    .filter(|r| r.kind == RouteKind::HttpRoute)
+                    .find(|r| &r.namespace == namespace && &r.name == name)
+                    .and_then(|r| {
+                        r.parents.iter_mut().find(|p| {
+                            &p.gateway_namespace == gateway_namespace
+                                && &p.gateway_name == gateway_name
+                                && &p.section_name == section_name
+                                && &p.port == port
+                        })
+                    })
+                {
+                    push_once(&mut parent.problems, problem);
+                }
+            }
+        }
+    }
+
+    for (id, cluster) in clusters.iter_mut() {
+        let carries_tcp = http.contains(id.as_str()) || tcp.contains(id.as_str());
+        if !carries_tcp || udp.contains_key(id.as_str()) {
+            cluster.health_check = None;
+        }
+    }
 }
 
 /// An IR certificate paired with its leaf fingerprint (SHA-256 of the DER, as
@@ -2128,7 +2548,7 @@ fn served_first(candidate: &ir::Certificate, current: &ir::Certificate) -> bool 
 
 /// Compile all our-class Ingresses (+ resolved deps) into the IR.
 pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
-    let index = Index::build(inputs);
+    let index = Index::build(inputs, &cfg.health_check);
 
     let mut clusters: BTreeMap<String, ir::Cluster> = BTreeMap::new();
     let mut backends: BTreeMap<String, ir::Backend> = BTreeMap::new();
@@ -2411,7 +2831,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
         let claim = owner_claim(&ns, &name, &gateway.metadata);
         owner_claims.insert((GATEWAY_OWNER, ns, name), claim);
     }
-    let (frontends, collisions) = resolve_frontend_collisions(frontends, &owner_claims);
+    let (frontends, folded, collisions) = resolve_frontend_collisions(frontends, &owner_claims);
     for (source, problem) in collisions {
         // Dedup: the HTTP and HTTPS frontends of one host+path lose as a pair
         // to the same winner — one problem carries the same information.
@@ -2511,6 +2931,16 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
             g.problems.extend(lost);
         }
     }
+    // Only now is it known which clusters carry traffic, and of which kind.
+    settle_health_checks(
+        &mut clusters,
+        &frontends,
+        &folded,
+        &gw.l4_carriers,
+        &mut results,
+        &mut gw.routes,
+    );
+    let frontends: Vec<ir::Frontend> = frontends.into_iter().map(|sf| sf.frontend).collect();
 
     // Merge certs that share Sōzu's (listener, fingerprint) identity, unioning
     // their names, then order deterministically. This subsumes exact-duplicate
@@ -2797,9 +3227,9 @@ mod http_route_collisions {
                 (1, "demo", "older", "2020-01-01T00:00:00Z"),
                 (1, "demo", "newer", "2021-01-01T00:00:00Z"),
             ]);
-            let (kept, collisions) = resolve_frontend_collisions(vec![first, second], &claims);
+            let (kept, _, collisions) = resolve_frontend_collisions(vec![first, second], &claims);
             assert_eq!(kept.len(), 1);
-            assert_eq!(kept[0].cluster_id.as_deref(), Some(older));
+            assert_eq!(kept[0].frontend.cluster_id.as_deref(), Some(older));
             assert_eq!(collisions.len(), 1);
             assert_eq!(collisions[0].0, loser);
             assert!(
@@ -2822,12 +3252,12 @@ mod http_route_collisions {
             (1, "demo", "older", "2020-01-01T00:00:00Z"),
             (1, "demo", "newer", "2021-01-01T00:00:00Z"),
         ]);
-        let (kept, collisions) = resolve_frontend_collisions(
+        let (kept, _, collisions) = resolve_frontend_collisions(
             vec![ingress, route("older", "zzzz"), route("newer", "aaaa")],
             &claims,
         );
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].cluster_id.as_deref(), Some("middle"));
+        assert_eq!(kept[0].frontend.cluster_id.as_deref(), Some("middle"));
         assert_eq!(collisions.len(), 2);
         assert!(collisions.iter().all(|(source, problem)| {
             matches!(source, FrontendSource::HttpRoute { .. })
@@ -2852,7 +3282,7 @@ mod http_route_collisions {
         let mut exact = route("exact", "exact");
         exact.frontend.path = ir::PathMatch::Exact("/".into());
         frontends.push(exact);
-        let (kept, collisions) = resolve_frontend_collisions(frontends, &BTreeMap::new());
+        let (kept, _, collisions) = resolve_frontend_collisions(frontends, &BTreeMap::new());
         assert_eq!(kept.len(), 6);
         assert!(collisions.is_empty());
     }

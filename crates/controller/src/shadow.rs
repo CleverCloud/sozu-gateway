@@ -358,6 +358,7 @@ mod tests {
                 max_connections_per_ip: None,
                 retry_after: None,
                 http2: false,
+                health_check: None,
             }],
             ..Default::default()
         };
@@ -444,6 +445,7 @@ mod tests {
                 max_connections_per_ip: None,
                 retry_after: None,
                 http2: false,
+                health_check: None,
             }],
             ..Default::default()
         };
@@ -485,6 +487,7 @@ mod tests {
                 max_connections_per_ip: None,
                 retry_after: None,
                 http2: false,
+                health_check: None,
             }],
             ..Default::default()
         };
@@ -599,7 +602,40 @@ mod tests {
         assert!(ir.l4_frontends.is_empty());
         assert!(ir.clusters[0].max_connections_per_ip.is_none());
         assert!(!ir.clusters[0].http2);
+        assert!(ir.clusters[0].health_check.is_none());
         assert!(ir.frontends[0].filters.redirect.is_none());
+    }
+
+    /// A cluster without a health check is written exactly as before the
+    /// field existed, so turning the feature on is the only thing that
+    /// changes a persisted shadow; one with a check survives the round trip,
+    /// probe port or not.
+    #[test]
+    fn a_health_check_is_persisted_only_when_there_is_one() {
+        let json = serde_json::to_string(&applied_ir()).unwrap();
+        assert!(!json.contains("health_check"), "{json}");
+
+        let mut ir = applied_ir();
+        let check = sozu_gw_ir::HealthCheck {
+            interval_secs: 3,
+            timeout_secs: 2,
+            healthy_threshold: 2,
+            unhealthy_threshold: 2,
+            port: None,
+        };
+        ir.clusters[0].health_check = Some(check.clone());
+        let json = serde_json::to_string(&ir).unwrap();
+        assert!(
+            !json.contains("\"port\""),
+            "an unset probe port is skipped: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Ir>(&json).unwrap(), ir);
+        ir.clusters[0].health_check = Some(sozu_gw_ir::HealthCheck {
+            port: Some(9187),
+            ..check
+        });
+        let json = serde_json::to_string(&ir).unwrap();
+        assert_eq!(serde_json::from_str::<Ir>(&json).unwrap(), ir);
     }
 
     #[test]
@@ -615,6 +651,7 @@ mod tests {
                 max_connections_per_ip: Some(100),
                 retry_after: Some(5),
                 http2: true,
+                health_check: None,
             }],
             ..Default::default()
         };
@@ -658,6 +695,7 @@ mod tests {
                 max_connections_per_ip: None,
                 retry_after: None,
                 http2: false,
+                health_check: None,
             }],
             ..Default::default()
         }

@@ -1,0 +1,46 @@
+---
+source: crates/translator/tests/golden.rs
+expression: "tr::reconcile(&off, &on).unwrap()"
+---
+[
+  {
+    "request_type": {
+      "ADD_CLUSTER": {
+        "cluster_id": "pg",
+        "sticky_session": false,
+        "https_redirect": false,
+        "proxy_protocol": null,
+        "load_balancing": 0,
+        "answer_503": null,
+        "load_metric": null,
+        "http2": null,
+        "answers": {},
+        "https_redirect_port": null,
+        "authorized_hashes": [],
+        "www_authenticate": null,
+        "max_connections_per_ip": null,
+        "retry_after": null,
+        "health_check": {
+          "uri": "/",
+          "interval": 3,
+          "timeout": 2,
+          "healthy_threshold": 2,
+          "unhealthy_threshold": 2,
+          "expected_status": 0,
+          "mode": 1,
+          "accepted_statuses": [],
+          "port": null,
+          "headers": []
+        },
+        "udp": null,
+        "max_connections_per_subnet": null,
+        "affinity_header": null,
+        "affinity_cookie": null,
+        "shard_percent": null,
+        "shard_min_backends": null,
+        "shard_mode": null,
+        "max_connection_attempts": null
+      }
+    }
+  }
+]

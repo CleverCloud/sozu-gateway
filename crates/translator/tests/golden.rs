@@ -65,6 +65,7 @@ fn cluster(id: &str, lb: ir::LbAlgorithm, sticky: bool) -> ir::Cluster {
         max_connections_per_ip: None,
         retry_after: None,
         http2: false,
+        health_check: None,
     }
 }
 
@@ -1379,6 +1380,134 @@ fn a_udp_cluster_carries_no_per_ip_cap() {
         caps,
         [("dns".into(), None, true), ("pg".into(), Some(10), false)]
     );
+}
+
+fn tcp_check(interval_secs: u32) -> ir::HealthCheck {
+    ir::HealthCheck {
+        interval_secs,
+        timeout_secs: 2,
+        healthy_threshold: 2,
+        unhealthy_threshold: 2,
+        port: None,
+    }
+}
+
+/// `pg` behind a TCPRoute, with `check` on its cluster.
+fn checked_pg(check: Option<ir::HealthCheck>) -> ir::Ir {
+    let mut pg = cluster("pg", ir::LbAlgorithm::RoundRobin, false);
+    pg.health_check = check;
+    ir::Ir {
+        clusters: vec![pg],
+        backends: vec![backend("pg", "10.0.0.1:5432", None)],
+        l4_frontends: vec![ir::L4Frontend {
+            protocol: ir::L4Protocol::Tcp,
+            listener: addr("0.0.0.0:5432"),
+            cluster_id: "pg".into(),
+        }],
+        ..Default::default()
+    }
+}
+
+/// The health check of each `AddCluster` in `requests`.
+fn checks_of(
+    requests: &[Request],
+) -> Vec<(
+    String,
+    Option<sozu_command_lib::proto::command::HealthCheckConfig>,
+)> {
+    requests
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddCluster(c)) => {
+                Some((c.cluster_id.clone(), c.health_check.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn cluster_health_check_maps_to_a_tcp_mode_request() {
+    // Every field spelled out: the proto default is an HTTP probe with an
+    // empty uri, which Sōzu refuses — failing the whole reconcile.
+    let mut model = checked_pg(Some(tcp_check(3)));
+    model.clusters[0].health_check.as_mut().unwrap().port = Some(9187);
+    let requests = tr::ir_to_requests(&model);
+    let mut state = ConfigState::new();
+    for request in &requests {
+        state.dispatch(request).unwrap_or_else(|e| panic!("{e}"));
+    }
+    let held = state.clusters["pg"]
+        .health_check
+        .as_ref()
+        .expect("Sōzu holds the check");
+    assert_eq!(
+        held.mode,
+        sozu_command_lib::proto::command::HealthCheckMode::Tcp as i32
+    );
+    assert_eq!(
+        held.uri, "/",
+        "a pre-2.3 peer runs GET <uri> and refuses \"\""
+    );
+    assert_eq!(held.port, Some(9187));
+    insta::assert_json_snapshot!(checks_of(&requests));
+}
+
+#[test]
+fn a_health_check_change_is_one_add_cluster_upsert() {
+    // `ConfigState::diff` carries a check-only change as the cluster's own
+    // `AddCluster` — an upsert Sōzu applies in place; on, retimed and off
+    // alike, and nothing at all when the check is unchanged. No
+    // `SetHealthCheck`/`RemoveHealthCheck` verb is ever needed.
+    let off = checked_pg(None);
+    let on = checked_pg(Some(tcp_check(3)));
+    let retimed = checked_pg(Some(tcp_check(5)));
+    for (from, to, expected) in [
+        (&off, &on, Some(3)),
+        (&on, &retimed, Some(5)),
+        (&retimed, &off, None),
+    ] {
+        let requests = tr::reconcile(from, to).unwrap();
+        let checks = checks_of(&requests);
+        assert_eq!(requests.len(), 1, "{}", dump(&requests));
+        assert_eq!(checks.len(), 1, "{}", dump(&requests));
+        assert_eq!(checks[0].1.as_ref().map(|c| c.interval), expected);
+    }
+    assert!(tr::reconcile(&on, &on).unwrap().is_empty());
+    insta::assert_json_snapshot!(tr::reconcile(&off, &on).unwrap());
+}
+
+#[test]
+fn a_udp_cluster_never_carries_a_health_check() {
+    // Sōzu does not refuse a TCP check on a UDP cluster; it simply means
+    // nothing to datagrams, and the builder has dropped and reported it.
+    let mut model = checked_pg(Some(tcp_check(3)));
+    let mut dns = cluster("dns", ir::LbAlgorithm::RoundRobin, false);
+    dns.health_check = Some(tcp_check(3));
+    model.clusters.push(dns);
+    model.l4_frontends.push(ir::L4Frontend {
+        protocol: ir::L4Protocol::Udp,
+        listener: addr("0.0.0.0:5353"),
+        cluster_id: "dns".into(),
+    });
+    let checks: Vec<(String, bool)> = checks_of(&tr::ir_to_requests(&model))
+        .into_iter()
+        .map(|(id, check)| (id, check.is_some()))
+        .collect();
+    assert_eq!(checks, [("dns".into(), false), ("pg".into(), true)]);
+
+    // A TCP cluster that also takes a UDP frontend — one Service port over
+    // both — loses its check in place.
+    let mut shared = checked_pg(Some(tcp_check(3)));
+    shared.l4_frontends.push(ir::L4Frontend {
+        protocol: ir::L4Protocol::Udp,
+        listener: addr("0.0.0.0:5432"),
+        cluster_id: "pg".into(),
+    });
+    let requests = tr::reconcile(&checked_pg(Some(tcp_check(3))), &shared).unwrap();
+    let checks = checks_of(&requests);
+    assert_eq!(checks.len(), 1, "{}", dump(&requests));
+    assert_eq!(checks[0].1, None);
 }
 
 #[test]
