@@ -1,0 +1,27 @@
+# Flipping a cluster's http2 under an open keep-alive connection, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# A Python HTTP/1.1 client keeps one connection to the cleartext listener; between its requests,
+# `sozu cluster h2 enable|disable -i <cluster>` re-sends the cluster as an `AddCluster` carrying
+# `http2: Some(true)` / `Some(false)` (v2.3.2 bin/src/ctl/request_builder.rs:588-610), not the `None` the
+# translator emits for false. `echoh1` -> an h2c-only Go echo server; `misconf` -> an HTTP/1.1-only one.
+# Raw output, verbatim: the 2.3.2 half of flip.log (the 2.2.1 half is
+# grpc-http2-flip_sozu-2.2.1_2026-10-19.txt).
+
+# ---- flip.log, 2.3.2 half
+######## 2.3.2
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== A: h2c-only backend (echoh1). enable -> GET, disable -> GET on the SAME connection
+   sozu cluster h2 enable -i echoh1 -> No content
+ req1 (http2 on) : HTTP/1.1 200 FromH2 backend-proto=HTTP/2.0 connection=-
+   sozu cluster h2 disable -i echoh1 -> No content
+ req2 (http2 off, same conn): HTTP/1.1 502 Bad Gateway backend-proto=- connection=close
+ req3 (http2 off, new conn) : HTTP/1.1 502 Bad Gateway backend-proto=- connection=close
+== B: HTTP/1.1-only backend (misconf). disable -> GET, enable -> GET on the SAME connection
+   sozu cluster h2 disable -i misconf -> No content
+ req1 (http2 off): HTTP/1.1 200 OK backend-proto=HTTP/1.1 connection=-
+   sozu cluster h2 enable -i misconf -> No content
+ req2 (http2 on, same conn): HTTP/1.1 503 Service Unavailable backend-proto=- connection=close
+ req3 (http2 on, new conn) : HTTP/1.1 503 Service Unavailable backend-proto=- connection=close
+stopped

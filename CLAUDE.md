@@ -275,7 +275,9 @@ refs are gated on ReferenceGrant. Anything Sōzu can't represent (weighted multi
 query matches, TLS passthrough) is reported as a `Problem` and skipped, never approximated — and
 so are header matches. 2.3.2 has header predicates, but a frontend whose predicates hold
 outranks every unpredicated frontend on the same host, whatever its path or method (measured),
-so a direct mapping misroutes; wiring them needs its own design.
+so a direct mapping misroutes; wiring them needs its own design. The one backend kept as it was
+is a `kubernetes.io/wss` port: reported, but still programmed (see Conventions), because skipping
+it would hand its requests to another rule.
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
 `RequestRedirect` (scheme, status, and hostname/path/port targets since 52cf36e) compile into
@@ -360,7 +362,26 @@ changes.
   left to a raw apiserver rejection.
 - **Backends are pod IP:port resolved from EndpointSlices — never the Service ClusterIP.** When a
   Service has multiple ports, match the EndpointSlice port by name; only fall back to the sole port
-  when there is exactly one (don't guess `first()`).
+  when there is exactly one (don't guess `first()`), and only when it has no name and the Service
+  port's protocol (`slice_port`). The EndpointSlice controller writes an unnamed Service port as
+  `""`, so `""` and no name are one name; and it gives pods resolving only one port's named
+  `targetPort` a slice carrying that port alone, which a name-blind fallback would feed to every
+  port of the Service.
+- **A backend port's `appProtocol` is read on HTTP routes only** (GEP-1911), at the Ingress and
+  HTTPRoute call sites — never inside the shared `add_service_route`, which TCPRoute/UDPRoute use
+  (a layer-4 route to a TLS port is passthrough). An HTTP route's port *number* resolves to the
+  Service's TCP entry when the number is also exposed over UDP (`PortRef::HttpNumber`); a layer-4
+  route still takes the first entry. Each entry is its own cluster — the first carrying a number
+  keeps `namespace.service.port`, a later twin gets its protocol appended (`….53.tcp`) — so twins
+  never pool their pod ports. `kubernetes.io/h2c` turns `ir::Cluster::http2` on, and the
+  translator emits it as `Some(true)` or not at all: an `AddCluster` without it resets Sōzu to
+  HTTP/1.1, measured. `kubernetes.io/wss` is refused **in status only**: an HTTPRoute reads
+  `ResolvedRefs: False`/`UnsupportedProtocol`, it and an Ingress get a Warning Event, but the
+  rule is **still programmed as before** (cleartext HTTP/1.1) — dropping its match would let
+  another rule answer it (`/ws` falling to `/`). No empty-cluster `503` either: every other invalid
+  backendRef drops its match today, and #78 tracks a native error answer. Every other value keeps
+  HTTP/1.1.
+  Sōzu 2.2.1 cannot serve HTTP/1.1 clients of an h2c cluster (`504`).
 - **`pathType: Prefix` is element-boundary matching, not a string prefix.** `/foo` covers `/foo`,
   `/foo?q=1` and `/foo/bar` but never `/foobar`, so the translator compiles a non-root prefix to an
   regex — Sōzu's own `Prefix` rule is a raw `starts_with`. Two measured facts drive the

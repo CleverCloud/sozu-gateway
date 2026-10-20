@@ -1,0 +1,78 @@
+# h2c backend quick checks and the grpc-go interop suite through Sōzu, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# Clusters: `echo` (echoh2) and `foo` (grpc) carry http2 = true, to an h2c-only Go echo server and to grpc-go
+# 1.75.0's interop server; `noh2` (echoh1) leaves http2 unset, to the same echo; `misconf` carries http2 = true,
+# to an HTTP/1.1-only Go server. Clients: curl 8.5.0 (nghttp2 1.59.0), grpc-go 1.75.0's interop client.
+# Raw output, verbatim: quick-2.3.2.log (Q1-Q7b), then interop-2.3.2.log (the interop test cases over
+# HTTPS, then one over the cleartext listener).
+
+# ---- quick-2.3.2.log
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== Q1 h2c prior knowledge to the cleartext HTTP listener
+http_version=0 status=000
+curl exit=56
+== Q2 HTTPS ALPN h2 client -> http2 cluster -> h2c backend, trailers
+* ALPN: curl offers h2,http/1.1
+* ALPN: server accepted h2
+< HTTP/2 200 
+< x-backend-body: 0
+< x-backend-proto: HTTP/2.0
+< x-backend-te: trailers
+< content-type: text/plain; charset=utf-8
+< content-length: 51
+< date: Mon, 19 Oct 2026 17:35:28 GMT
+< sozu-id: 01M5AKQ3BF7Z0S9CW184MKFN87
+< 
+proto=HTTP/2.0 path=/trailers te="trailers" body=0
+== Q3 HTTP/1.1 keep-alive client (cleartext) -> http2 cluster: 3 GETs on one connection
+req: http_version=1.1 status=200 num_connects=1
+proto=HTTP/2.0 path=/b te="" body=0
+req: http_version=1.1 status=200 num_connects=0
+proto=HTTP/2.0 path=/c te="" body=0
+req: http_version=1.1 status=200 num_connects=0
+== Q3b HTTP/1.1 keep-alive: GET, two 600000-byte POSTs, GET on one connection
+proto=HTTP/2.0 path=/g1 te="" body=1200001
+req: status=200 num_connects=1
+proto=HTTP/2.0 path=/p1 te="" body=1200001
+req: status=200 num_connects=0
+proto=HTTP/2.0 path=/p2 te="" body=1200001
+req: status=200 num_connects=0
+== Q3c HTTP/1.1 over TLS keep-alive -> http2 cluster, 3 GETs
+req: http_version=1.1 status=200 num_connects=1
+proto=HTTP/2.0 path=/b te="" body=0
+req: http_version=1.1 status=200 num_connects=0
+proto=HTTP/2.0 path=/c te="" body=0
+req: http_version=1.1 status=200 num_connects=0
+== Q4 http2 UNSET cluster (today's controller) -> h2c-only backend
+status=502 time=0.003942s
+== Q5 http2=true cluster -> HTTP/1.1-only backend (appProtocol lies)
+status=503 time=0.004656s
+== Q6 TE header seen by backend (h2 client sends TE: trailers)
+proto=HTTP/2.0 path=/te te="trailers" body=0
+== Q6b TE header seen by backend (h1 client sends TE: trailers)
+proto=HTTP/2.0 path=/te te="trailers" body=0
+== Q7 HTTP/2 download 64 MiB through http2 cluster (flow control)
+status=200 size=67108864 time=0.122457s speed=548019827B/s
+== Q7b HTTP/2 upload 64 MiB through http2 cluster
+proto=HTTP/2.0 path=/up te="" body=67108864
+status=200 time=0.206678s
+
+# ---- interop-2.3.2.log
+empty_unary                    rc=0  
+large_unary                    rc=0  
+client_streaming               rc=0  
+server_streaming               rc=0  
+ping_pong                      rc=0  
+empty_stream                   rc=0  
+timeout_on_sleeping_server     rc=0  
+cancel_after_begin             rc=0  
+cancel_after_first_response    rc=0  
+status_code_and_message        rc=0  
+special_status_message         rc=0  
+custom_metadata                rc=0  
+unimplemented_method           rc=0  
+unimplemented_service          rc=0  
+== interop over cleartext HTTP listener (h2c prior knowledge to Sōzu)
+rc=1 2026/10/19 17:36:00 FATAL: [interop] /TestService/EmptyCall RPC failed:  rpc error: code = Unavailable desc = connection error: desc = "error reading server preface: http2: failed reading the frame payload: http2: frame 

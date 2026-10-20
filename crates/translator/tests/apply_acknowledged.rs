@@ -44,6 +44,7 @@ fn cluster(id: &str) -> ir::Cluster {
         https_redirect: false,
         max_connections_per_ip: None,
         retry_after: None,
+        http2: false,
     }
 }
 

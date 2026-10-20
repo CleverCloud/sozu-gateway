@@ -1,0 +1,172 @@
+# h2c backend quick checks and the grpc-go interop suite through Sōzu, docker clevercloud/sozu:2.2.1, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# Clusters: `echo` (echoh2) and `foo` (grpc) carry http2 = true, to an h2c-only Go echo server and to grpc-go
+# 1.75.0's interop server; `noh2` (echoh1) leaves http2 unset, to the same echo; `misconf` carries http2 = true,
+# to an HTTP/1.1-only Go server. Clients: curl 8.5.0 (nghttp2 1.59.0), grpc-go 1.75.0's interop client.
+# Raw output, verbatim: quick-interop-2.2.1.log (Q1-Q7b, then the interop test cases over HTTPS, then one
+# over the cleartext listener).
+
+# ---- quick-interop-2.2.1.log
+grpc-h2-backends-sozu221 clevercloud/sozu:2.2.1 Up 1 second
+== Q1 h2c prior knowledge to the cleartext HTTP listener
+http_version=0 status=000
+curl exit=56
+== Q2 HTTPS ALPN h2 client -> http2 cluster -> h2c backend, trailers
+* ALPN: curl offers h2,http/1.1
+* ALPN: server accepted h2
+< HTTP/2 200 
+< x-backend-body: 0
+< x-backend-proto: HTTP/2.0
+< x-backend-te: trailers
+< content-type: text/plain; charset=utf-8
+< content-length: 51
+< date: Mon, 19 Oct 2026 17:39:40 GMT
+< sozu-id: 01M5AKYRV9KV1BK2T89MKPZZYQ
+< 
+proto=HTTP/2.0 path=/trailers te="trailers" body=0
+== Q3 HTTP/1.1 keep-alive client (cleartext) -> http2 cluster: 3 GETs on one connection
+req: http_version=1.1 status=504 num_connects=1
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>504 Gateway Timeout</h1>
+<pre>
+{
+    "status_code": 504,
+    "route": "GET echo.test.google.fr/b",
+    "request_id": "01M5AKZP5A2JZBY17E9QETPNRM",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551"
+}
+</pre>
+<p>Response timed out after .</p>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>req: http_version=1.1 status=504 num_connects=1
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>504 Gateway Timeout</h1>
+<pre>
+{
+    "status_code": 504,
+    "route": "GET echo.test.google.fr/c",
+    "request_id": "01M5AM0KEVPE73MBCZDNHFJDN0",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551"
+}
+</pre>
+<p>Response timed out after .</p>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>req: http_version=1.1 status=504 num_connects=1
+== Q3b HTTP/1.1 keep-alive: GET, two 600000-byte POSTs, GET on one connection
+req: status=100 num_connects=1
+req: status=100 num_connects=1
+req: status=100 num_connects=1
+== Q3c HTTP/1.1 over TLS keep-alive -> http2 cluster, 3 GETs
+req: http_version=1.1 status=504 num_connects=1
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>504 Gateway Timeout</h1>
+<pre>
+{
+    "status_code": 504,
+    "route": "GET echo.test.google.fr:29443/b",
+    "request_id": "01M5AM7XTTYQTZ1V9YZDP48BHW",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551"
+}
+</pre>
+<p>Response timed out after .</p>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>req: http_version=1.1 status=504 num_connects=1
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>504 Gateway Timeout</h1>
+<pre>
+{
+    "status_code": 504,
+    "route": "GET echo.test.google.fr:29443/c",
+    "request_id": "01M5AM8V4CTB2MWCDGC1J0XF1N",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551"
+}
+</pre>
+<p>Response timed out after .</p>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>req: http_version=1.1 status=504 num_connects=1
+== Q4 http2 UNSET cluster (today's controller) -> h2c-only backend
+status=502 time=0.007594s
+== Q5 http2=true cluster -> HTTP/1.1-only backend (appProtocol lies)
+status=503 time=0.004575s
+== Q6 TE header seen by backend (h2 client sends TE: trailers)
+proto=HTTP/2.0 path=/te te="trailers" body=0
+== Q6b TE header seen by backend (h1 client sends TE: trailers)
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>504 Gateway Timeout</h1>
+<pre>
+{
+    "status_code": 504,
+    "route": "GET echo.test.google.fr:29443/te",
+    "request_id": "01M5AM9RF67C4H9190AHVMN5CX",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551"
+}
+</pre>
+<p>Response timed out after .</p>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>== Q7 HTTP/2 download 64 MiB through http2 cluster (flow control)
+curl: (18) Transferred a partial file
+status=200 size=8355823 time=0.066887s speed=124924469B/s
+== Q7b HTTP/2 upload 64 MiB through http2 cluster
+curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)
+<html><head><meta charset='utf-8'><head><body>
+<style>pre{background:#EEE;padding:10px;border:1px solid #AAA;border-radius: 5px;}</style>
+<h1>502 Bad Gateway</h1>
+<pre>
+{
+    "status_code": 502,
+    "route": "POST echo.test.google.fr:29443/up",
+    "request_id": "01M5AMANWQ5C0PS5R77B26GK3J",
+    "cluster_id": "echoh2",
+    "backend_id": "echoh2-0-127.0.0.1:29551",
+    "parsing_phase": "Error",
+    "successfully_parsed": null,
+    "partially_parsed": null,
+    "invalid": null
+}
+</pre>
+<p>Response could not be parsed. </p>
+<div id=details hidden=true>
+<p>While parsing Error, this was reported as invalid:</p>
+<pre>
+<span id=p1 style='background:rgba(0,255,0,0.2)'></span><span id=p2 style='background:rgba(255,255,0,0.2)'></span><span id=p3 style='background:rgba(255,0,0,0.2)'></span>
+</pre>
+</div>
+<script>
+function display(id, chunks) {
+    let [start, end] = chunks.split(' … ');
+    let dec = new TextDecoder('utf8');
+    let decode = chunk => dec.decode(new Uint8Array(chunk.split(' ').filter(e => e).map(e => parseInt(e, 16))));
+    document.getElementById(id).innerText = JSON.stringify(end ? `${decode(start)} […] ${decode(end)}` : `${decode(start)}`).slice(1,-1);
+}
+let p1 = null;
+let p2 = null;
+let p3 = null;
+if (p1 !== null) {
+    document.getElementById('details').hidden=false;
+    display('p1', p1);display('p2', p2);display('p3', p3);
+}
+</script>
+<footer>This is an automatic answer by Sōzu.</footer></body></html>status=502 time=60.030012s
+empty_unary                    rc=0  
+large_unary                    rc=0  
+client_streaming               rc=0  
+server_streaming               rc=0  
+ping_pong                      rc=0  
+empty_stream                   rc=0  
+timeout_on_sleeping_server     rc=0  
+cancel_after_begin             rc=0  
+cancel_after_first_response    rc=0  
+status_code_and_message        rc=0  
+special_status_message         rc=0  
+custom_metadata                rc=0  
+unimplemented_method           rc=0  
+unimplemented_service          rc=0  
+== interop over cleartext HTTP listener (h2c prior knowledge to Sōzu)
+rc=1 2026/10/19 17:47:10 FATAL: [interop] /TestService/EmptyCall RPC failed:  rpc error: code = Unavailable desc = connection error: desc = "error reading server preface: http2: failed reading the frame payload: http2: frame 

@@ -50,7 +50,8 @@ use sozu_gw_ir as ir;
 use crate::selector::NamespaceSelector;
 use crate::{
     add_service_route, admit_path, extract_cert, meta_nn, BuildConfig, CertificateSource,
-    ClaimedCert, ExposedProtocol, FrontendSource, Index, Inputs, PortRef, Problem, SourcedFrontend,
+    ClaimedCert, ExposedProtocol, FrontendSource, HttpBackendProtocol, Index, Inputs, PortRef,
+    Problem, SourcedFrontend,
 };
 
 const GW_GROUP: &str = "gateway.networking.k8s.io";
@@ -1092,6 +1093,13 @@ fn attach_rule(
             fail_ref(resolved_refs, resolved_refs_reason, "BackendNotFound");
             return;
         };
+        // The TCP entry when the Service also exposes this number over UDP:
+        // an HTTP route reaches its backend over TCP. TCPRoute/UDPRoute keep
+        // `PortRef::Number`, the first entry carrying it.
+        let port_ref = PortRef::HttpNumber(port);
+        // Read here and not in `add_service_route`, which TCPRoute/UDPRoute
+        // share: a layer-4 route to a TLS port is passthrough.
+        let protocol = HttpBackendProtocol::of(index, &backend_ns, &br.name, &port_ref);
         match add_service_route(
             index,
             clusters,
@@ -1099,7 +1107,7 @@ fn attach_rule(
             referenced,
             &backend_ns,
             &br.name,
-            &PortRef::Number(port),
+            &port_ref,
             problems,
         ) {
             Err(problem) => {
@@ -1108,6 +1116,19 @@ fn attach_rule(
                 return;
             }
             Ok((cid, has_endpoints)) => {
+                protocol.configure(clusters, &cid);
+                // GEP-1911: a backend the route cannot speak the declared
+                // protocol to reads `ResolvedRefs: False` /
+                // `UnsupportedProtocol`. Unlike every other refused backend,
+                // the rule stays programmed, as it was before this check
+                // existed: dropping its match would let another rule answer
+                // its requests (`HttpBackendProtocol::Unsupported`).
+                if let Some(problem) = protocol.problem(&br.name) {
+                    if !problems.contains(&problem) {
+                        problems.push(problem);
+                    }
+                    fail_ref(resolved_refs, resolved_refs_reason, "UnsupportedProtocol");
+                }
                 if !has_endpoints {
                     problems.push(Problem::NoReadyEndpoints {
                         service: br.name.clone(),

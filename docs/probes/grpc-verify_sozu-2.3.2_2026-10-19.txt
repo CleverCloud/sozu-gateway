@@ -1,0 +1,54 @@
+# Re-verification of the cleartext refusal, interop, error mapping, http2 None and WebSocket, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts, small Go servers and clients, Python; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml modelled on deploy/sozu/config.toml:
+# 2 workers, connect_timeout 2, Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:39080,
+# HTTPS 127.0.0.1:39443.
+# B1: `curl --http2-prior-knowledge` (curl 8.5.0) to the cleartext listener; B2: grpc-go 1.75.0 interop
+# cases over HTTPS to an http2 = true cluster; B3: error mapping (`dead`: backend refusing connections,
+# `nohost`: no frontend); N1-N3: `sozu cluster add -i echoh2` without, then with, `--http2` — an
+# `AddCluster` carrying `None`, then `Some(true)` — in front of an h2c-only Go echo server; W: a Python
+# HTTP/1.1 WebSocket handshake on the cleartext listener to `wsh1` (http2 unset) and `ws` (http2 = true),
+# both one Go server answering HTTP/1.1 (with WebSocket) and h2c on one port.
+# Raw output, verbatim: v1-2.3.2.log.
+
+# ---- v1-2.3.2.log
+verify-grpc-h2-backends-232 clevercloud/sozu:2.3.2 Up 1 second
+== B1 curl --http2-prior-knowledge to the cleartext listener
+http_version=0 status=000
+== B2 grpc-go interop over HTTPS (ALPN h2) -> http2 cluster
+empty_unary                rc=0 
+large_unary                rc=0 
+client_streaming           rc=0 
+server_streaming           rc=0 
+ping_pong                  rc=0 
+status_code_and_message    rc=0 
+special_status_message     rc=0 
+custom_metadata            rc=0 
+unimplemented_method       rc=0 
+unimplemented_service      rc=0 
+== B3 error mapping
+host=dead    t=  0.0s unary EmptyCall -> code=Unavailable msg="unexpected HTTP status code received from server: 503 (Service Unavailable); malformed header: missing HTTP content-type"
+host=nohost  t=  0.0s unary EmptyCall -> code=Unimplemented msg="unexpected HTTP status code received from server: 404 (Not Found); malformed header: missing HTTP content-type"
+== N1 echoh2 (config http2=true) via TLS h2 client
+x-backend-proto: HTTP/2.0
+status=200
+== N2 'cluster add' WITHOUT --http2 (AddCluster http2=None, what then_some(true) emits for false)
+No content
+│ echoh2 │ false          │ false          │ source_ip    │ off              │ global                  │ X │ X │ X    │
+│ echoh2 │ echo.test.google.fr │ prefix '' │ 0                 │ X │ X │ X    │
+│ echoh2 │ echo.test.google.fr │ prefix '' │ 0                 │ X │ X │ X    │
+│ echoh2-0-127.0.0.1:39551 │ 127.0.0.1:39551 │        │ X │ X │ X    │
+status=502
+== N3 'cluster add --http2' (back to Some(true))
+No content
+x-backend-proto: HTTP/2.0
+status=200
+== W cleartext HTTP/1.1 Upgrade: websocket -> cluster wsh1
+  status: HTTP/1.1 101 Switching Protocols
+    Upgrade: websocket
+    Connection: Upgrade
+  echo: b'ping-through-tunnel'
+== W cleartext HTTP/1.1 Upgrade: websocket -> cluster ws
+  status: HTTP/1.1 200 FromH2
+    content-length: 70
+  body: b'proto=HTTP/2.0 method=GET upgrade="" connection="" protocol-pseudo=""\n'

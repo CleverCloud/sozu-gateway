@@ -1,0 +1,55 @@
+# Which timeout bounds a silent gRPC stream, and raising it, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# with the file-level timeouts below; HTTPS listener 127.0.0.1:29443. Cluster, client and scenarios as in
+# grpc-streams_sozu-2.3.2_2026-10-19.txt.
+# Raw output, verbatim: tuned-2.3.2.log (back_timeout = 120, front left at its 60 s default), then
+# tuned2-2.3.2.log (back 120 / front 60 with 55 and 65 s gaps, then back_timeout = front_timeout = 300 with
+# 70 s gaps; its first three lines are the timeout lines of that config file). The harness filtered and
+# trimmed the Sōzu log lines at capture time.
+
+# ---- tuned-2.3.2.log
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== [back_timeout=120] grpcprobe -scenario idle -idle 35
+t=  0.0s msg 0 size 8
+t= 35.0s msg 1 size 8
+t= 35.1s msg 2 size 8
+t= 35.1s stream ended OK (grpc-status 0 trailer received)
+== [back_timeout=120] grpcprobe -scenario idle -idle 70
+t=  0.0s msg 0 size 8
+t= 70.1s recv err code: Unavailable msg: error reading from server: EOF
+== [back_timeout=120] grpcprobe -scenario keepalive-idle -idle 70
+t=  0.0s msg 0 size 8
+t= 70.0s recv err code: Unavailable msg: error reading from server: EOF
+2026-10-19T17:51:10.056290Z 1792432270056290502 7 INFO-ACCESS  WRK-00	[01M5AMJRDGBW2SE02WYH4EXH24 01M5AMJRDGBGEDN4QK840YSKHV grpc grpc-0-127.0.0.1:29550] 127.0.0.1:35024 127.0.0.1:29550 35s/1258μs/35s/6980μs/3943μs 278 295 [user-agent=grpc-go/1.75.0] None https foo.test.google.fr POST /grpc.testing.TestService/StreamingOutput
+2026-10-19T17:53:10.090370Z 1792432390090370849 7 INFO  WRK-00	[01M5AMKTQV0K8XXSC0ZDFXPYEB - - -]	MUX-H2	Session(peer=Some(127.0.0.1:35758), position=Server, state=Header, streams=1, last_peer_id=1, window=65535, draining=false, total_rst_streams_emitted_lifetime=0, total_rst_received_lifetime=0, readiness=I("--EH-")&R("RW-H-")=
+2026-10-19T17:53:10.090503Z 1792432390090503744 7 ERROR-ACCESS WRK-00	[01M5AMKTQV0K8XXSC0ZDFXPYEB 01M5AMKTQWHA8HEEEWN0QA5WXW grpc grpc-0-127.0.0.1:29550] 127.0.0.1:35758 127.0.0.1:29550 120s/955μs/120s/4463μs/- 246 187 [user-agent=grpc-go/1.75.0] None https foo.test.google.fr POST /grpc.testing.TestService/StreamingOutputCall 
+stopped
+
+# ---- tuned2-2.3.2.log
+11:connect_timeout = 2
+12:back_timeout = 300
+13:front_timeout = 300
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== [back=120 front=60] grpcprobe -scenario idle -idle 55
+t=  0.0s msg 0 size 8
+t= 55.1s msg 1 size 8
+t= 55.2s msg 2 size 8
+t= 55.2s stream ended OK (grpc-status 0 trailer received)
+== [back=120 front=60] grpcprobe -scenario idle -idle 65
+t=  0.0s msg 0 size 8
+t= 65.1s recv err code: Unavailable msg: error reading from server: EOF
+2026-10-19T17:55:09.808773Z 1792432509808773912 7 INFO-ACCESS  WRK-00	[01M5AMSEZVT0NN2W7M8W5FAB84 01M5AMSEZVYG8KMM5Y34KBing.TestService/StreamingOutputCall 200 | H2::Complete
+stopped
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== [back=300 front=300] grpcprobe -scenario idle -idle 70
+t=  0.0s msg 0 size 8
+t= 70.0s msg 1 size 8
+t= 70.1s msg 2 size 8
+t= 70.1s stream ended OK (grpc-status 0 trailer received)
+== [back=300 front=300] grpcprobe -scenario keepalive-idle -idle 70
+t=  0.0s msg 0 size 8
+t= 70.1s msg 1 size 8
+t= 70.2s msg 2 size 8
+t= 70.2s stream ended OK (grpc-status 0 trailer received)
+stopped

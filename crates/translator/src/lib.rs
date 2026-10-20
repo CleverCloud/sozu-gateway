@@ -115,6 +115,23 @@ fn cluster_request(c: &ir::Cluster, udp: bool) -> Request {
             affinity_key: Some(UdpAffinityKey::SourceIpPort as i32),
             ..Default::default()
         }),
+        // HTTP/2 with prior knowledge to the backends. `Some(true)` or nothing:
+        // the worker reads the field as `http2.unwrap_or(false)` (Sōzu 2.3.2
+        // lib/src/server.rs:3289, lib/src/protocol/mux/router.rs:746), and an
+        // `AddCluster` replaces the whole cluster (lib/src/http.rs:1270,
+        // lib/src/https.rs:2760), so an upsert carrying `None` turns HTTP/2
+        // back off: measured on new connections,
+        // docs/probes/h2c-backend_sozu-2.3.2_2026-10-19.txt ("http2 unset
+        // again"). An open keep-alive connection follows on its next request,
+        // measured with `sozu cluster h2 disable` — an `AddCluster` carrying
+        // `Some(false)`, not `None` —
+        // docs/probes/grpc-http2-flip_sozu-2.3.2_2026-10-19.txt. A cluster
+        // that never set it emits exactly the request it did before, and
+        // `ConfigState::diff` carries a flip either way as one `AddCluster`
+        // (command/src/state.rs, `DiffResult::Changed`). The field is ignored
+        // by the TCP and UDP proxies, so a cluster an L4 route shares is
+        // unaffected.
+        http2: c.http2.then_some(true),
         ..Default::default()
     })
     .into()

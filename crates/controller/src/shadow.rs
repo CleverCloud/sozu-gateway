@@ -357,6 +357,7 @@ mod tests {
                 https_redirect: false,
                 max_connections_per_ip: None,
                 retry_after: None,
+                http2: false,
             }],
             ..Default::default()
         };
@@ -442,6 +443,7 @@ mod tests {
                 https_redirect: false,
                 max_connections_per_ip: None,
                 retry_after: None,
+                http2: false,
             }],
             ..Default::default()
         };
@@ -482,6 +484,7 @@ mod tests {
                 https_redirect: true,
                 max_connections_per_ip: None,
                 retry_after: None,
+                http2: false,
             }],
             ..Default::default()
         };
@@ -595,6 +598,7 @@ mod tests {
         // cleanly rather than failing the parse.
         assert!(ir.l4_frontends.is_empty());
         assert!(ir.clusters[0].max_connections_per_ip.is_none());
+        assert!(!ir.clusters[0].http2);
         assert!(ir.frontends[0].filters.redirect.is_none());
     }
 
@@ -610,12 +614,26 @@ mod tests {
                 https_redirect: false,
                 max_connections_per_ip: Some(100),
                 retry_after: Some(5),
+                http2: true,
             }],
             ..Default::default()
         };
         let json = serde_json::to_string(&ir).unwrap();
         let back: Ir = serde_json::from_str(&json).unwrap();
         assert_eq!(ir, back);
+    }
+
+    /// `http2` is written only for a cluster that sets it, so a gateway with
+    /// no `kubernetes.io/h2c` backend persists exactly the file the previous
+    /// controller wrote, and a downgrade reads it unchanged.
+    #[test]
+    fn http2_is_persisted_only_when_set() {
+        let mut ir = applied_ir();
+        let plain = serde_json::to_value(&ir).unwrap();
+        assert!(plain["clusters"][0].get("http2").is_none(), "{plain}");
+        ir.clusters[0].http2 = true;
+        let h2c = serde_json::to_value(&ir).unwrap();
+        assert_eq!(h2c["clusters"][0]["http2"], true);
     }
 
     fn generation_fixture(pids: [i32; 2]) -> SozuGeneration {
@@ -639,6 +657,7 @@ mod tests {
                 https_redirect: false,
                 max_connections_per_ip: None,
                 retry_after: None,
+                http2: false,
             }],
             ..Default::default()
         }

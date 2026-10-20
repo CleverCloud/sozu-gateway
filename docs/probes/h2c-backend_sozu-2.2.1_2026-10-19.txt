@@ -1,0 +1,54 @@
+# h2c_backend_probe against docker clevercloud/sozu:2.2.1, 2026-10-19 (same probe binary, sozu-command-lib 2.3.2)
+# Sōzu: docker run --network host --user 1000:1000 clevercloud/sozu:2.2.1 with deploy/sozu/config.toml (2 workers, connect_timeout 2, default back timeout 30 s), listeners moved to 0.0.0.0:39180 (HTTP) and 0.0.0.0:39543 (HTTPS)
+# Probe: SOZU_SOCK=<run>/sozu.sock PROBE_HTTP=0.0.0.0:39180 PROBE_HTTPS=0.0.0.0:39543 PROBE_DIAL_HTTP=127.0.0.1:39180 PROBE_DIAL_HTTPS=127.0.0.1:39543 PROBE_BACKEND_H2C=127.0.0.1:39197 PROBE_BACKEND_DUAL=127.0.0.1:39198 PROBE_BACKEND_H1=127.0.0.1:39199 PROBE_MAX_TIME=40 cargo run -p sozu-gw-agent --example h2c_backend_probe
+# Client: curl 8.5.0 (nghttp2 1.59.0, OpenSSL 3.0.13)
+# With the default 10 s budget the two HTTP/1.1 curl clients got no answer at all; 40 s lets Sōzu's 30 s back timeout answer them. The WebSocket client always waits 5 s.
+
+== h2c backend probe ==
+
+## http2 unset: what every cluster got before appProtocol was read
+emitted: ADD_CLUSTER probe.app.80 http2=None, ADD_CLUSTER probe.h1.80 http2=None, ADD_CLUSTER probe.ws.80 http2=None, ADD_BACKEND, ADD_BACKEND, ADD_BACKEND, ADD_CERTIFICATE, ADD_HTTPS_FRONTEND, ADD_HTTP_FRONTEND, ADD_HTTP_FRONTEND, ADD_HTTP_FRONTEND
+  HTTPS listener, HTTP/1.1 client: http_version=1.1 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 1: not HTTP/2, closed: "GET /unset/https-h1 HTTP/1.1"
+  HTTPS listener, HTTP/2 client (ALPN h2): http_version=2 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 2: not HTTP/2, closed: "GET /unset/https-h2 HTTP/1.1"
+  HTTP listener, HTTP/1.1 client: http_version=1.1 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 3: not HTTP/2, closed: "GET /unset/http-h1 HTTP/1.1"
+  HTTP listener, HTTP/2 prior knowledge (h2c): http_version=0 status=000 curl_exit=56 (curl: (56) Remote peer returned unexpected data while we expected SETTINGS frame.  Perhaps, peer does not support HTTP/2 properly.)
+  HTTP listener, HTTP/1.1 client to an HTTP/1.1-only backend: http_version=1.1 status=200 | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 1: HTTP/1.1 "GET /unset/h1-only HTTP/1.1" -> 200
+  HTTP listener, WebSocket upgrade (ws.example.com): "HTTP/1.1 101 Switching Protocols", tunnel echoed "ping-through-tunnel"
+    backend: h2c+upgrade backend conn 1: HTTP/1.1 "GET /ws HTTP/1.1" with Upgrade: websocket -> 101, echo
+
+## http2 = true: a Service port declaring kubernetes.io/h2c
+emitted: ADD_CLUSTER probe.app.80 http2=Some(true), ADD_CLUSTER probe.h1.80 http2=Some(true), ADD_CLUSTER probe.ws.80 http2=Some(true)
+  HTTPS listener, HTTP/1.1 client: http_version=1.1 status=504 | 504 Gateway Timeout
+    backend: h2c-only backend conn 4: HTTP/2 connection preface
+  HTTPS listener, HTTP/2 client (ALPN h2): http_version=2 status=200 | h2c-only backend answered over HTTP/2.0: GET /set/https-h2
+    backend: h2c-only backend conn 5: HTTP/2 connection preface
+    backend: h2c-only backend conn 5 stream 1: HTTP/2.0 GET /set/https-h2 :scheme=https :authority=app.example.com:39543 upgrade/connection headers: none
+  HTTP listener, HTTP/1.1 client: http_version=1.1 status=504 | 504 Gateway Timeout
+    backend: h2c-only backend conn 6: HTTP/2 connection preface
+  HTTP listener, HTTP/2 prior knowledge (h2c): http_version=0 status=000 curl_exit=56 (curl: (56) Remote peer returned unexpected data while we expected SETTINGS frame.  Perhaps, peer does not support HTTP/2 properly.)
+  HTTP listener, HTTP/1.1 client to an HTTP/1.1-only backend: http_version=1.1 status=503 | 503 Service Unavailable
+    backend: http1-only backend conn 2: HTTP/2 preface, closed (speaks HTTP/1.1 only)
+    backend: http1-only backend conn 3: HTTP/2 preface, closed (speaks HTTP/1.1 only)
+    backend: http1-only backend conn 4: HTTP/2 preface, closed (speaks HTTP/1.1 only)
+  HTTP listener, WebSocket upgrade (ws.example.com): no response within 5 s
+    backend: h2c+upgrade backend conn 2: HTTP/2 connection preface
+
+## http2 unset again: the appProtocol removed from the Service port
+emitted: ADD_CLUSTER probe.app.80 http2=None, ADD_CLUSTER probe.h1.80 http2=None, ADD_CLUSTER probe.ws.80 http2=None
+  HTTPS listener, HTTP/1.1 client: http_version=1.1 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 7: not HTTP/2, closed: "GET /unset-again/https-h1 HTTP/1.1"
+  HTTPS listener, HTTP/2 client (ALPN h2): http_version=2 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 8: not HTTP/2, closed: "GET /unset-again/https-h2 HTTP/1.1"
+  HTTP listener, HTTP/1.1 client: http_version=1.1 status=502 | 502 Bad Gateway
+    backend: h2c-only backend conn 9: not HTTP/2, closed: "GET /unset-again/http-h1 HTTP/1.1"
+  HTTP listener, HTTP/2 prior knowledge (h2c): http_version=0 status=000 curl_exit=56 (curl: (56) Remote peer returned unexpected data while we expected SETTINGS frame.  Perhaps, peer does not support HTTP/2 properly.)
+  HTTP listener, HTTP/1.1 client to an HTTP/1.1-only backend: http_version=1.1 status=200 | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 5: HTTP/1.1 "GET /unset-again/h1-only HTTP/1.1" -> 200
+  HTTP listener, WebSocket upgrade (ws.example.com): "HTTP/1.1 101 Switching Protocols", tunnel echoed "ping-through-tunnel"
+    backend: h2c+upgrade backend conn 3: HTTP/1.1 "GET /ws HTTP/1.1" with Upgrade: websocket -> 101, echo
+
+cleanup: 11 requests applied

@@ -1,0 +1,54 @@
+# Long-lived, large and concurrent gRPC streams through an h2c cluster, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts and small Go servers and clients; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml: 1 worker, connect_timeout 2,
+# Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:29080, HTTPS 127.0.0.1:29443.
+# Cluster `foo` (http2 = true) -> grpc-go 1.75.0's interop server; client "grpcprobe" (grpc-go 1.75.0) on the
+# HTTPS listener (ALPN h2). Scenarios: `idle -idle N`: a server stream sends one message, the next after N s of
+# silence, then a last one; `keepalive-idle`: the same with client HTTP/2 PINGs every 10 s; `active -active 75`:
+# a bidirectional stream exchanging one message every 10 s; `bigmsg`: 3 MiB requests answered with 1/16/48 MiB,
+# then a 64 x 1 MiB client stream; `concurrency -n 300`: 300 calls at once on one channel (one HTTP/2
+# connection), each holding its stream about 1 s server-side.
+# Raw output, verbatim: long-2.3.2.log, then r3-idle-2.3.2.log (the two idle scenarios re-run later at the
+# same defaults, with the matching Sōzu access-log lines, which the harness trimmed at capture time).
+
+# ---- long-2.3.2.log
+== grpcprobe -scenario idle -idle 25
+t=  0.0s msg 0 size 8
+t= 25.0s msg 1 size 8
+t= 25.1s msg 2 size 8
+t= 25.1s stream ended OK (grpc-status 0 trailer received)
+== grpcprobe -scenario idle -idle 35
+t=  0.0s msg 0 size 8
+t= 30.1s recv err code: Internal msg: stream terminated by RST_STREAM with error code: INTERNAL_ERROR
+== grpcprobe -scenario keepalive-idle -idle 35
+t=  0.0s msg 0 size 8
+t= 30.0s recv err code: Canceled msg: stream terminated by RST_STREAM with error code: CANCEL
+== grpcprobe -scenario active -active 75
+t=  0.0s pong 0
+t= 10.0s pong 1
+t= 20.0s pong 2
+t= 30.0s pong 3
+t= 40.1s pong 4
+t= 50.1s pong 5
+t= 60.1s pong 6
+t= 70.1s pong 7
+t= 80.1s stream ended OK after 80 s
+== grpcprobe -scenario bigmsg
+unary req=3MiB resp=1MiB: got 1048576 bytes in 0.03s
+unary req=3MiB resp=16MiB: got 16777216 bytes in 0.05s
+unary req=3MiB resp=48MiB: got 50331648 bytes in 0.14s
+client-stream 64x1MiB: server aggregated 67108864 bytes in 0.30s
+== grpcprobe -scenario concurrency -n 300
+concurrency n=300: ok=300 failed=0 in 3.04s
+
+# ---- r3-idle-2.3.2.log
+grpc-h2-backends-sozu232 clevercloud/sozu:2.3.2 Up 1 second
+== [defaults] grpcprobe -scenario idle -idle 35
+t=  0.0s msg 0 size 8
+t= 30.1s recv err code=Internal msg="stream terminated by RST_STREAM with error code: INTERNAL_ERROR"
+== [defaults] grpcprobe -scenario keepalive-idle -idle 35
+t=  0.0s msg 0 size 8
+t= 30.0s recv err code=Canceled msg="stream terminated by RST_STREAM with error code: CANCEL"
+WRK-00	[01M5ASD29TTG1SR1WX4JF9ZSXY 01M5ASD29TA6J6H9NDRPDYYMYK grpc grpc-0-127.0.0.1:29550] 127.0.0.1:59126 127.0.0.1:29550 30s/282μs/30s/4467μs/- 248 200 [user-agent=grpc-go/1.75.0] None https foo.test.google.fr POST /grpc.testing.TestService/StreamingOutput
+WRK-00	[01M5ASDZPBG3N2TC6FCX570FEH 01M5ASDZPBVBM6JEJE090JT6BP grpc grpc-0-127.0.0.1:29550] 127.0.0.1:38338 127.0.0.1:29550 30s/3454μs/30s/3929μs/84μs 282 221 [user-agent=grpc-go/1.75.0] None https foo.test.google.fr POST /grpc.testing.TestService/StreamingO
+stopped

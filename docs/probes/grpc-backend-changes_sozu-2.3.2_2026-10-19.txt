@@ -1,0 +1,61 @@
+# gRPC streams across backend changes, and how RPCs spread, docker clevercloud/sozu:2.3.2, 2026-10-19
+# Harness: out of tree (shell scripts, small Go servers and clients, Python; not in this repo). Sōzu runs as
+# `docker run --network host --user 1000:1000` from a static config.toml modelled on deploy/sozu/config.toml:
+# 2 workers, connect_timeout 2, Sōzu's default timeouts (front 60 s, back 30 s); HTTP listener 127.0.0.1:39080,
+# HTTPS 127.0.0.1:39443.
+# Cluster `gs` (http2 = true) has two backends, gsA :39580 and gsB :39581: grpc-go 1.75.0 servers that answer
+# SIGTERM with GracefulStop (GOAWAY, then wait for open streams) and name themselves in an `x-backend`
+# header. Client "rollprobe" (grpc-go 1.75.0), one channel: 6 server streams of 10 messages, one per
+# second, plus a unary loop for 16 s, counting which backend answered.
+# Raw output, verbatim: v2-2.3.2.log (G: SIGTERM to gsA at ~4 s; RB: RemoveBackend gsB at ~4 s), then
+# v3-2.3.2.log (RA: RemoveBackend gsA, the backend the channel is on, at ~4 s; S: 4 separate channels,
+# 5 s of unary each).
+
+# ---- v2-2.3.2.log
+== G backend gsA (39580) GracefulStop (SIGTERM) at t~4s while 4 long streams + unary loop run (both backends in cluster)
+   [SIGTERM gsA at 19:28:24.246]
+t=10.07s stream 5 backend=[39580] OK after 10 msgs
+t=10.07s stream 2 backend=[39580] OK after 10 msgs
+t=10.07s stream 3 backend=[39580] OK after 10 msgs
+t=10.07s stream 1 backend=[39580] OK after 10 msgs
+t=10.07s stream 0 backend=[39580] OK after 10 msgs
+t=10.07s stream 4 backend=[39580] OK after 10 msgs
+unary OK backend=[39580]           181
+unary OK backend=[39581]           566
+2026/10/19 19:28:05 gsserver on 39580
+2026/10/19 19:28:24 SIGTERM: GracefulStop at 19:28:24.245
+2026/10/19 19:28:31 GracefulStop finished at 19:28:31.419
+== RB RemoveBackend gsB (39581) at t~4s while 6 long streams + unary loop run (backend process stays up)
+No content
+   [RemoveBackend gsB at 19:28:41.132]
+t=10.02s stream 2 backend=[39580] OK after 10 msgs
+t=10.02s stream 3 backend=[39580] OK after 10 msgs
+t=10.02s stream 1 backend=[39580] OK after 10 msgs
+t=10.02s stream 5 backend=[39580] OK after 10 msgs
+t=10.02s stream 0 backend=[39580] OK after 10 msgs
+t=10.02s stream 4 backend=[39580] OK after 10 msgs
+unary OK backend=[39580]           742
+
+# ---- v3-2.3.2.log
+== RA re-add gsB, then RemoveBackend gsA (39580, the one the first connection is pinned to) at t~4s; process stays up
+No content
+t=10.02s stream 1 backend=[39580] OK after 10 msgs
+t=10.02s stream 2 backend=[39580] OK after 10 msgs
+t=10.02s stream 4 backend=[39580] OK after 10 msgs
+t=10.02s stream 5 backend=[39580] OK after 10 msgs
+t=10.02s stream 3 backend=[39580] OK after 10 msgs
+t=10.02s stream 0 backend=[39580] OK after 10 msgs
+unary OK backend=[39580]           187
+unary OK backend=[39581]           559
+No content
+   [RemoveBackend gsA at 19:30:51.590]
+== S re-add gsA; 4 separate client connections, 5 s of unary each, in parallel: which backend does each connection use?
+No content
+-- connection 1
+unary OK backend=[39581]           239
+-- connection 2
+unary OK backend=[39580]           238
+-- connection 3
+unary OK backend=[39581]           238
+-- connection 4
+unary OK backend=[39580]           238
