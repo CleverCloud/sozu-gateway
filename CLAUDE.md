@@ -83,7 +83,12 @@ then a no-op that still counts as a successful reconcile.
   (frontend/listener `Add*` verbs reject duplicates with `StateError::Exists`), but because
   `AddCluster`/`AddBackend` upsert and the agent tolerates teardowns of objects Sōzu says it no
   longer holds (only those: a teardown refused for any other reason fails the batch) and *repairs*
-  duplicate frontend adds (remove + re-add on the same route key; see `sozu-agent`). A failed
+  duplicate frontend adds (evict whatever holds the key, then re-add; see `sozu-agent`). Both look
+  the key up in Sōzu's own frontend list first: the stored entry can belong to a cluster the shadow
+  never knew, and Sōzu honours only a removal that names the cluster holding the key (always for
+  TCP/UDP, for HTTP/HTTPS since 2.3.0), so the eviction is built from the stored entry, and a
+  teardown answered "not found" while the key still routes for another cluster removes that route
+  rather than being tolerated. A failed
   reconcile is **retried without waiting for a watch event**: the liveness tick re-runs pending
   work on its next successful probe, the resync rebuilds anyway, and with both disabled the loop
   nudges itself after a short delay — a quiet cluster must never keep a failed apply pending.

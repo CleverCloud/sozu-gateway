@@ -1,0 +1,23 @@
+# owner_eviction_probe against docker clevercloud/sozu:2.3.2 (deploy config, 2 workers), 2026-10-19
+
+## agent at master bdd6740 (before this change)
+== owner eviction probe ==
+before: http add.probe/ -> stale, http ghost.probe/ -> stale, http remove.probe/ -> stale, tcp :9101 -> stale, tcp :9103 -> stale, udp :9102 -> stale
+http add for another cluster: FAILED: sozu rejected the request: could not apply request on the main process state: HttpFrontend with id_bytes=25 already exists; remove it first, or apply the corresponding update if the object supports one, instead of re-adding it
+http removal naming the shadow's cluster: applied
+http removal naming a cluster sozu never held: applied
+tcp add for another cluster: FAILED: sozu rejected the request: could not apply request on the main process state: TcpFrontend with id_bytes=58 already exists; remove it first, or apply the corresponding update if the object supports one, instead of re-adding it: another cluster already routes this L4 address, and a frontend owned by another cluster cannot be evicted by this one (repair remove said: could not apply request on the main process state: Did not find TcpFrontend with address or id_bytes=151)
+udp add for another cluster: FAILED: sozu rejected the request: could not apply request on the main process state: UDP frontend address 0.0.0.0:9102 is already claimed by another frontend: cluster_id_bytes=6 current_cluster_id_bytes=5 current_tag_count=0
+tcp removal naming the shadow's cluster: applied
+after: http add.probe/ -> stale, http ghost.probe/ -> stale, http remove.probe/ -> stale, tcp :9101 -> stale, tcp :9103 -> stale, udp :9102 -> stale
+
+## agent with stale-owner eviction (this change)
+== owner eviction probe ==
+before: http add.probe/ -> stale, http ghost.probe/ -> stale, http remove.probe/ -> stale, tcp :9101 -> stale, tcp :9103 -> stale, udp :9102 -> stale
+http add for another cluster: applied
+http removal naming the shadow's cluster: applied
+http removal naming a cluster sozu never held: applied
+tcp add for another cluster: applied
+udp add for another cluster: applied
+tcp removal naming the shadow's cluster: applied
+after: http add.probe/ -> wanted, tcp :9101 -> wanted, udp :9102 -> wanted

@@ -6,7 +6,8 @@
 //! channel. The requests themselves are NOT all idempotent: convergence
 //! against a drifted Sōzu comes from the upsert semantics of
 //! `AddCluster`/`AddBackend` plus this crate's tolerance for already-gone
-//! teardowns and its remove + re-add repair of duplicate frontend adds
+//! teardowns and its repair of duplicate frontend adds, which evicts the
+//! entry Sōzu actually stores under the key and re-adds
 //! (see [`SozuAgent::apply`]).
 //!
 //! Two layers:
@@ -26,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use sozu_command_lib::channel::Channel;
 use sozu_command_lib::proto::command::{
-    request::RequestType, response_content::ContentType, Request, Response, ResponseContent,
-    ResponseStatus, RunState, Status,
+    request::RequestType, response_content::ContentType, FrontendFilters, ListedFrontends, Request,
+    RequestTcpFrontend, Response, ResponseContent, ResponseStatus, RunState, Status,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -89,9 +90,9 @@ fn is_teardown(request: &Request) -> bool {
 /// the read deadline, a partially applied batch, a controller restart
 /// mid-apply). Failing the batch would re-emit the same add every reconcile,
 /// forever. What happens instead depends on the verb (see
-/// [`SozuAgent::apply`]): frontend adds are *repaired* with a remove + re-add
-/// (see [`removal_for`] for why tolerance is not enough), listener adds are
-/// tolerated as already-applied.
+/// [`SozuAgent::apply`]): frontend adds are *repaired* by evicting whatever
+/// holds the key and re-adding (see [`stored_removal`] for why tolerance is
+/// not enough), listener adds are tolerated as already-applied.
 ///
 /// Scoped to the verbs where `Exists` is the expected duplicate outcome, and
 /// to failure messages that actually carry `StateError::Exists`'s Display,
@@ -100,69 +101,27 @@ fn is_teardown(request: &Request) -> bool {
 /// wording has kept across versions: Sōzu 2.2.0 says "{kind:?} '{id}' already
 /// exists", 2.2.1 says "{kind:?} with id_bytes={n} already exists; …". Both
 /// shapes are covered by the tests, because the proxy image and the linked
-/// library move independently. `ActivateListener` is *not*
-/// here: re-activation is idempotent in Sōzu (it only fails `NotFound`).
+/// library move independently. A UDP address held by *another* cluster's
+/// frontend is refused with its own wording since Sōzu 2.3.0 ("UDP frontend
+/// address … is already claimed by another frontend"), which is the same
+/// stale-state duplicate and takes the same repair. `ActivateListener` is
+/// *not* here: re-activation is idempotent in Sōzu (it only fails `NotFound`).
 fn is_duplicate_add(request: &Request, failure_message: &str) -> bool {
-    let exists_is_duplicate = matches!(
-        &request.request_type,
+    let message = failure_message.to_lowercase();
+    match &request.request_type {
+        Some(RequestType::AddUdpFrontend(_)) => {
+            message.contains("already exist")
+                || message.contains("is already claimed by another frontend")
+        }
         Some(
             RequestType::AddHttpFrontend(_)
-                | RequestType::AddHttpsFrontend(_)
-                | RequestType::AddTcpFrontend(_)
-                | RequestType::AddUdpFrontend(_)
-                | RequestType::AddTcpListener(_)
-                | RequestType::AddUdpListener(_)
-        )
-    );
-    exists_is_duplicate && failure_message.to_lowercase().contains("already exist")
-}
-
-/// The `Remove*` that evicts whatever Sōzu holds under the same key as this
-/// add — the repair for a duplicate *frontend* add.
-///
-/// An HTTP/HTTPS frontend `Exists` is keyed by the route key alone
-/// (`address;hostname;path[;method]` — `RequestHttpFrontend`'s `Display`):
-/// `cluster_id`, tags and the filter fields are NOT compared. So "already
-/// exists" can mean the stored route points at a *different* cluster than the
-/// one being added; merely tolerating it would advance the shadow to the
-/// desired cluster while Sōzu keeps routing to the stale one — permanent
-/// silent misrouting. The removes are keyed the same way (verified in
-/// `sozu-command-lib` 2.1.0's `state.rs`: `remove_http_frontend` /
-/// `remove_https_frontend` remove by `front.to_string()`, the route key, not
-/// by struct equality), so a remove built from the add's own payload evicts the
-/// stored entry even when it differs — then re-sending the add installs the
-/// desired one.
-///
-/// **L4 is asymmetric and the repair cannot always work.** In 2.2.0
-/// `add_tcp_frontend` raises `Exists` from a listener-wide scan across *every*
-/// cluster bucket (SNI/ALPN routing made one address shareable), while
-/// `remove_tcp_frontend` looks the entry up under `tcp_fronts[cluster_id]`
-/// first and returns `NotFound` when that bucket is absent. So when the
-/// occupying frontend belongs to a *different* cluster, a remove keyed on our
-/// own `cluster_id` cannot evict it — and re-sending the add would earn the
-/// same `Exists` forever. That case is a genuine conflict between two claims on
-/// one address, not a stale-state artefact, and is reported as such rather than
-/// retried.
-///
-/// `AddTcpListener`/`AddUdpListener` return `None` deliberately: a listener is
-/// keyed by its address alone, so a duplicate cannot mask a different routing
-/// target, and repairing one would need deactivate-before-remove ordering —
-/// out of scope. A duplicate listener add stays plainly tolerated.
-/// Is this an L4 (TCP/UDP) frontend add? Only those carry the cluster-bucketed
-/// remove that cannot evict another cluster's entry.
-fn is_l4_frontend(request: &Request) -> bool {
-    matches!(
-        request.request_type,
-        Some(RequestType::AddTcpFrontend(_)) | Some(RequestType::AddUdpFrontend(_))
-    )
-}
-
-/// Did the repair remove find nothing to evict? `NotFound` is the missing
-/// cluster bucket, `NoChange` the bucket that exists but holds no match — both
-/// mean our remove could not reach whatever raised the `Exists`.
-fn repair_found_nothing(failure_message: &str) -> bool {
-    let m = failure_message.to_ascii_lowercase();
-    m.contains("did not find") || m.contains("did not bring any change")
+            | RequestType::AddHttpsFrontend(_)
+            | RequestType::AddTcpFrontend(_)
+            | RequestType::AddTcpListener(_)
+            | RequestType::AddUdpListener(_),
+        ) => message.contains("already exist"),
+        _ => false,
+    }
 }
 
 /// The per-worker outcomes Sōzu's main process folds into one failure message:
@@ -259,6 +218,12 @@ fn is_already_gone(request: &Request, failure_message: &str) -> bool {
     all_benign && saw_gone
 }
 
+/// The `Remove*` built from a frontend add's own payload: the repair for a
+/// duplicate add when the stored entry cannot be looked up. It evicts an
+/// identical stale entry only — see [`stored_removal`]. `None` for listener
+/// adds, which are tolerated instead: a listener is keyed by its address
+/// alone, so a duplicate cannot mask a different routing target, and
+/// repairing one would need deactivate-before-remove ordering.
 fn removal_for(request: &Request) -> Option<Request> {
     match &request.request_type {
         Some(RequestType::AddHttpFrontend(front)) => {
@@ -275,6 +240,130 @@ fn removal_for(request: &Request) -> Option<Request> {
         }
         _ => None,
     }
+}
+
+/// The `ListFrontends` query that lists whatever Sōzu stores under the same
+/// key as this frontend add or remove: the route's hostname for HTTP/HTTPS
+/// (a substring filter, so [`stored_removal`] compares whole keys), every
+/// layer-4 frontend for TCP/UDP (the listing has no UDP flag, and a `domain`
+/// filter would drop them).
+fn owner_query(request: &Request) -> Option<Request> {
+    let filters = match &request.request_type {
+        Some(RequestType::AddHttpFrontend(front) | RequestType::RemoveHttpFrontend(front)) => {
+            FrontendFilters {
+                http: true,
+                https: false,
+                tcp: false,
+                domain: Some(front.hostname.clone()),
+            }
+        }
+        Some(RequestType::AddHttpsFrontend(front) | RequestType::RemoveHttpsFrontend(front)) => {
+            FrontendFilters {
+                http: false,
+                https: true,
+                tcp: false,
+                domain: Some(front.hostname.clone()),
+            }
+        }
+        Some(
+            RequestType::AddTcpFrontend(_)
+            | RequestType::RemoveTcpFrontend(_)
+            | RequestType::AddUdpFrontend(_)
+            | RequestType::RemoveUdpFrontend(_),
+        ) => FrontendFilters {
+            http: false,
+            https: false,
+            tcp: true,
+            domain: None,
+        },
+        _ => return None,
+    };
+    Some(RequestType::ListFrontends(filters).into())
+}
+
+/// The removal of the entry Sōzu stores under this frontend request's key,
+/// built from the stored entry itself so that it names the cluster which
+/// actually holds the key. `None` when the listing holds no such entry.
+///
+/// The key is the route key for HTTP/HTTPS (`address;hostname;path[;method]`,
+/// `RequestHttpFrontend`'s `Display`, which Sōzu 2.3 extends with a frontend's
+/// header predicates — none of ours carries any), the listen address — plus
+/// SNI and ALPN — for TCP, the address alone for UDP (Sōzu 2.2 admits a second
+/// UDP frontend on an address instead of refusing it, so there the first one
+/// listed is evicted). None of them includes the cluster, so
+/// when the shadow missed an applied batch, the stored entry can point at a
+/// cluster the shadow never knew. A removal built from the shadow's or the
+/// desired payload then names the wrong cluster, and Sōzu only honours a
+/// removal that names the stored one: always for TCP/UDP, whose frontends are
+/// filed per cluster, and for HTTP/HTTPS since 2.3.0 (`remove_frontend_from`:
+/// a key freed by one cluster may be taken by another, and a late removal for
+/// the first must not evict the second). Such an add would earn `Exists`
+/// forever, and such a removal `NotFound` while the route keeps serving.
+fn stored_removal(request: &Request, listed: ListedFrontends) -> Option<Request> {
+    match &request.request_type {
+        Some(RequestType::AddHttpFrontend(front) | RequestType::RemoveHttpFrontend(front)) => {
+            let key = front.to_string();
+            listed
+                .http_frontends
+                .into_iter()
+                .find(|stored| stored.to_string() == key)
+                .map(|stored| RequestType::RemoveHttpFrontend(stored).into())
+        }
+        Some(RequestType::AddHttpsFrontend(front) | RequestType::RemoveHttpsFrontend(front)) => {
+            let key = front.to_string();
+            listed
+                .https_frontends
+                .into_iter()
+                .find(|stored| stored.to_string() == key)
+                .map(|stored| RequestType::RemoveHttpsFrontend(stored).into())
+        }
+        Some(RequestType::AddTcpFrontend(front) | RequestType::RemoveTcpFrontend(front)) => listed
+            .tcp_frontends
+            .into_iter()
+            .find(|stored| stored.address == front.address && tcp_claim(stored) == tcp_claim(front))
+            .map(|stored| RequestType::RemoveTcpFrontend(stored).into()),
+        Some(RequestType::AddUdpFrontend(front) | RequestType::RemoveUdpFrontend(front)) => listed
+            .udp_frontends
+            .into_iter()
+            .find(|stored| stored.address == front.address)
+            .map(|stored| RequestType::RemoveUdpFrontend(stored).into()),
+        _ => None,
+    }
+}
+
+/// What a lookup of the entry holding a frontend key found.
+#[derive(Debug)]
+enum Holder {
+    /// The removal of the stored entry.
+    Stored(Box<Request>),
+    /// The listing holds nothing under the key.
+    Nothing,
+    /// The listing could not be read.
+    Unknown,
+}
+
+/// A TCP frontend's SNI and ALPN as Sōzu files them: SNI lowercased, ALPN
+/// sorted and deduplicated (`ConfigState::add_tcp_frontend`), so a stored
+/// entry compares equal to any spelling of the same claim.
+fn tcp_claim(front: &RequestTcpFrontend) -> (Option<String>, Vec<String>) {
+    let mut alpn = front.alpn.clone();
+    alpn.sort();
+    alpn.dedup();
+    (front.sni.as_deref().map(str::to_ascii_lowercase), alpn)
+}
+
+/// Is this the removal of a frontend? Only those can leave a route behind
+/// under another cluster when Sōzu answers that it holds nothing to remove.
+fn is_frontend_teardown(request: &Request) -> bool {
+    matches!(
+        request.request_type,
+        Some(
+            RequestType::RemoveHttpFrontend(_)
+                | RequestType::RemoveHttpsFrontend(_)
+                | RequestType::RemoveTcpFrontend(_)
+                | RequestType::RemoveUdpFrontend(_)
+        )
+    )
 }
 
 #[derive(Debug, Error)]
@@ -523,9 +612,10 @@ impl SozuAgent {
     /// Apply a batch of requests in order (the caller supplies a dependency-safe
     /// order, e.g. from the Translator). Stops at the first error — except a
     /// teardown of an object Sōzu says it no longer holds (see
-    /// [`is_already_gone`]), which is tolerated, and a *duplicate add* (see
-    /// [`is_duplicate_add`]): a duplicate frontend add is repaired with a
-    /// remove + re-add (see [`removal_for`]), a duplicate L4 listener add is
+    /// [`is_already_gone`]), which is tolerated unless the key still routes
+    /// for another cluster, and a *duplicate add* (see [`is_duplicate_add`]):
+    /// a duplicate frontend add is repaired by removing the stored entry and
+    /// re-adding (see [`stored_removal`]), a duplicate L4 listener add is
     /// tolerated.
     pub fn apply(&mut self, requests: &[Request]) -> Result<(), SozuError> {
         self.apply_unless(requests, || false)
@@ -553,8 +643,29 @@ impl SozuAgent {
                     total: requests.len(),
                 });
             }
-            match self.apply_one(request) {
-                Ok(()) => {}
+            match self.send_with_retry(request) {
+                // Since Sōzu 2.3.0 a frontend removal that names a cluster the
+                // main process no longer holds is answered `Ok` ("nothing to
+                // remove: cluster … does not exist"), and a route another
+                // cluster holds under that key is left in place: the same
+                // stale owner as the refusal below, and it is evicted alike.
+                Ok(response)
+                    if is_frontend_teardown(request)
+                        && response
+                            .message
+                            .to_ascii_lowercase()
+                            .contains("nothing to remove") =>
+                {
+                    if self.evict_stale_holder(
+                        request,
+                        &response.message,
+                        &abandoned,
+                        (applied, requests.len()),
+                    )? {
+                        warn!(message = %response.message, "sozu still routes this key for another cluster; removed the stored route");
+                    }
+                }
+                Ok(_) => {}
                 // Sōzu's teardown verbs are NOT idempotent: removing an object it
                 // no longer holds (state diverged from our shadow — a partially
                 // applied batch, or a worker-side drop) is a hard `Failure`. Such a
@@ -566,42 +677,54 @@ impl SozuAgent {
                 // teardown Sōzu refused for another reason — a bad request, a
                 // worker that could not act — leaves the object in place, and
                 // skipping it would advance the shadow over a route Sōzu still
-                // serves.
+                // serves. A frontend removal answered "nothing to remove" while
+                // the key may still route is the exception: the stored entry
+                // can belong to a cluster the shadow never knew (see
+                // [`stored_removal`]), so it is evicted as stored first.
                 Err(SozuError::Failure(msg)) if is_already_gone(request, &msg) => {
-                    warn!(error = %msg, "sozu no longer holds the object this teardown targets; treating it as already-gone so reconciliation converges");
+                    if is_frontend_teardown(request)
+                        && self.evict_stale_holder(
+                            request,
+                            &msg,
+                            &abandoned,
+                            (applied, requests.len()),
+                        )?
+                    {
+                        warn!(error = %msg, "sozu still routes this key for another cluster; removed the stored route");
+                    } else {
+                        warn!(error = %msg, "sozu no longer holds the object this teardown targets; treating it as already-gone so reconciliation converges");
+                    }
                 }
                 // The mirror image: an add Sōzu already holds (the shadow missed
                 // an applied batch) fails with `Exists` on every re-application,
                 // wedging reconciliation the same way. For a *frontend* this is
-                // NOT proof the desired object is there — the `Exists` key
-                // excludes `cluster_id`/tags/filters, so the stored route may
-                // point at a different cluster (see [`removal_for`]). Repair it:
-                // evict whatever occupies the key, then re-send our add.
+                // NOT proof the desired object is there — the key excludes
+                // `cluster_id`/tags/filters, so the stored route may point at a
+                // different cluster (see [`stored_removal`]). Repair it: evict
+                // whatever holds the key, as stored, then re-send our add.
                 Err(SozuError::Failure(msg)) if is_duplicate_add(request, &msg) => {
                     match removal_for(request) {
-                        Some(remove) => {
-                            warn!(error = %msg, "sozu already holds this frontend's route key; repairing with a remove + re-add");
+                        Some(own_payload) => {
+                            let remove = match self.key_holder(request)? {
+                                Holder::Stored(stored) => *stored,
+                                Holder::Nothing | Holder::Unknown => own_payload,
+                            };
+                            // The lookup took a round-trip: a caller that gave
+                            // up meanwhile must not see a route evicted. Nothing
+                            // has changed yet, so stopping here is clean.
+                            if abandoned() {
+                                return Err(SozuError::Abandoned {
+                                    applied,
+                                    total: requests.len(),
+                                });
+                            }
+                            warn!(error = %msg, "sozu already holds this frontend's key; repairing by removing the stored entry and re-adding");
                             match self.apply_one(&remove) {
                                 Ok(()) => {}
-                                // A remove that finds no entry to evict means
-                                // one of two things. For HTTP the stored entry
-                                // simply vanished between the `Exists` and our
-                                // remove — harmless, the re-add decides. For L4
-                                // it means the address is held by a *different*
-                                // cluster, which our cluster-keyed remove can
-                                // never reach: the re-add is guaranteed to earn
-                                // the same `Exists`, so say what is actually
-                                // wrong instead of burning a retry on it.
-                                Err(SozuError::Failure(remove_msg))
-                                    if is_l4_frontend(request)
-                                        && repair_found_nothing(&remove_msg) =>
-                                {
-                                    return Err(SozuError::Failure(format!(
-                                        "{msg}: another cluster already routes this L4 address, \
-                                         and a frontend owned by another cluster cannot be \
-                                         evicted by this one (repair remove said: {remove_msg})"
-                                    )));
-                                }
+                                // The stored entry vanished between the add and
+                                // the removal, or could not be listed and the
+                                // add's own payload did not reach it: the re-add
+                                // decides either way.
                                 Err(SozuError::Failure(remove_msg)) => {
                                     warn!(error = %remove_msg, "sozu rejected the repair remove; attempting the re-add anyway");
                                 }
@@ -626,6 +749,76 @@ impl SozuAgent {
             }
         }
         Ok(())
+    }
+
+    /// After a frontend removal Sōzu answered with "nothing to remove",
+    /// remove whatever still holds the key under another cluster (see
+    /// [`stored_removal`]). `true` when it removed one. A listing that cannot
+    /// be read fails: "could not tell" is not "nothing there", and tolerating
+    /// it would advance the shadow over a route that may still serve.
+    fn evict_stale_holder(
+        &mut self,
+        request: &Request,
+        answer: &str,
+        abandoned: &impl Fn() -> bool,
+        (applied, total): (usize, usize),
+    ) -> Result<bool, SozuError> {
+        match self.key_holder(request)? {
+            Holder::Stored(stored) if *stored != *request => {
+                // The lookup took a round-trip: a caller that gave up
+                // meanwhile must not see a route evicted.
+                if abandoned() {
+                    return Err(SozuError::Abandoned { applied, total });
+                }
+                match self.apply_one(&stored) {
+                    Ok(()) => Ok(true),
+                    // Every worker refuses the removal as not routing the key
+                    // either: the main process holds a route nothing serves.
+                    // Sōzu 2.3 leaves one behind when every worker stayed
+                    // silent past its timeout and the main process rolled
+                    // the order back, and then rolls this removal back too,
+                    // so retrying it can only fail the same way. Failing the
+                    // batch would fail every reconcile for a route no request
+                    // reaches; a Sōzu restart clears it.
+                    Err(SozuError::Failure(refusal)) if is_already_gone(&stored, &refusal) => {
+                        warn!(error = %refusal, "sozu's main process keeps a route for this key that no worker serves; leaving it until sozu restarts");
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Holder::Unknown => Err(SozuError::Failure(format!(
+                "{answer} (and the frontends holding this key could not be listed to tell \
+                 whether it still routes)"
+            ))),
+            Holder::Stored(_) | Holder::Nothing => Ok(false),
+        }
+    }
+
+    /// What Sōzu's main process stores under this frontend request's key, as
+    /// the removal of that stored entry (see [`stored_removal`]). `Unknown`
+    /// when the listing could not be read: an add falls back to its own
+    /// payload, since the re-add decides anyway, but a teardown must not take
+    /// it for "nothing there".
+    fn key_holder(&mut self, request: &Request) -> Result<Holder, SozuError> {
+        let Some(query) = owner_query(request) else {
+            return Ok(Holder::Unknown);
+        };
+        match self.send_with_retry(&query) {
+            Ok(Response {
+                content:
+                    Some(ResponseContent {
+                        content_type: Some(ContentType::FrontendList(listed)),
+                    }),
+                ..
+            }) => Ok(stored_removal(request, listed)
+                .map_or(Holder::Nothing, |stored| Holder::Stored(Box::new(stored)))),
+            Ok(_) | Err(SozuError::Failure(_)) => {
+                warn!("sozu did not list the frontends holding this key");
+                Ok(Holder::Unknown)
+            }
+            Err(channel_error) => Err(channel_error),
+        }
     }
 
     /// Liveness check: `Status` round-trip.
@@ -858,9 +1051,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use sozu_command_lib::proto::command::{
-        AddBackend, Cluster, DeactivateListener, ListenerType, RemoveBackend, RemoveCertificate,
-        RequestHttpFrontend, RequestTcpFrontend, SocketAddress, TcpListenerConfig, WorkerInfo,
-        WorkerInfos,
+        AddBackend, Cluster, DeactivateListener, ListenerType, PathRule, PathRuleKind,
+        RemoveBackend, RemoveCertificate, RequestHttpFrontend, RequestTcpFrontend,
+        RequestUdpFrontend, SocketAddress, TcpListenerConfig, WorkerInfo, WorkerInfos,
     };
 
     /// A failure message shaped like the real thing: the main process wraps
@@ -1399,28 +1592,36 @@ mod tests {
     }
 
     /// The stored frontend behind an `Exists` may point at a *different*
-    /// cluster (the route key excludes `cluster_id`/tags/filters), so the
-    /// agent must not merely tolerate the failure: it must evict the stored
-    /// entry and re-send its own add. Assert that exact wire sequence.
+    /// cluster (the route key excludes `cluster_id`/tags/filters), and only a
+    /// removal naming that cluster evicts it on Sōzu 2.3. The agent must look
+    /// the stored route up, remove it as stored, and re-send its own add.
+    /// Assert that exact wire sequence.
     #[test]
-    fn duplicate_frontend_add_is_repaired_with_a_remove_and_a_readd() {
+    fn duplicate_frontend_add_is_repaired_by_removing_the_stored_route() {
         let path = temp_socket_path("repair-add");
-        let server = spawn_scripted_fake_sozu(
-            &path,
-            vec![
-                failure_response(EXISTS_MESSAGE), // the add: duplicate route key
-                ok_response(),                    // the repair remove
-                ok_response(),                    // the re-sent add
-            ],
-        );
-
         let front = RequestHttpFrontend {
             cluster_id: Some("cluster-a".to_string()),
             hostname: "lb.example.com".to_string(),
             ..RequestHttpFrontend::default()
         };
-        let add: Request = RequestType::AddHttpFrontend(front.clone()).into();
+        let stored = RequestHttpFrontend {
+            cluster_id: Some("cluster-b".to_string()),
+            ..front.clone()
+        };
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(EXISTS_MESSAGE_2_2_1), // the add: duplicate route key
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![stored.clone()],
+                    ..ListedFrontends::default()
+                }), // the lookup
+                ok_response(),                          // the repair remove
+                ok_response(),                          // the re-sent add
+            ],
+        );
 
+        let add: Request = RequestType::AddHttpFrontend(front).into();
         let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
         agent
             .apply(std::slice::from_ref(&add))
@@ -1430,18 +1631,26 @@ mod tests {
         let received = server.join().expect("fake sozu thread");
         let expected = vec![
             add.clone(),
-            RequestType::RemoveHttpFrontend(front).into(),
+            RequestType::ListFrontends(FrontendFilters {
+                http: true,
+                https: false,
+                tcp: false,
+                domain: Some("lb.example.com".to_string()),
+            })
+            .into(),
+            RequestType::RemoveHttpFrontend(stored).into(),
             add,
         ];
         assert_eq!(
             received, expected,
-            "the repair must be a remove + re-add of the same payload"
+            "the repair must remove the route as stored, then re-send the add"
         );
         let _ = std::fs::remove_file(&path);
     }
 
     /// If the re-add after the repair fails hard, the batch must fail — the
     /// shadow stays put and the next reconcile retries; never a silent skip.
+    /// A lookup Sōzu cannot answer falls back to the add's own payload.
     #[test]
     fn failed_readd_after_repair_fails_the_batch() {
         let path = temp_socket_path("repair-fail");
@@ -1449,23 +1658,25 @@ mod tests {
             &path,
             vec![
                 failure_response(EXISTS_MESSAGE),   // the add: duplicate route key
-                ok_response(),                      // the repair remove
+                failure_response("could not list"), // the lookup
+                ok_response(),                      // the repair remove (own payload)
                 failure_response("wrong hostname"), // the re-sent add: hard failure
             ],
         );
 
         let add: Request = RequestType::AddHttpFrontend(RequestHttpFrontend::default()).into();
         let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
-        let err = agent.apply(&[add]).unwrap_err();
+        let err = agent.apply(std::slice::from_ref(&add)).unwrap_err();
         assert!(matches!(err, SozuError::Failure(_)), "got {err:?}");
         drop(agent);
 
         let received = server.join().expect("fake sozu thread");
         assert_eq!(
             received.len(),
-            3,
-            "the wire must show add, repair remove, failed re-add"
+            4,
+            "the wire must show add, lookup, repair remove, failed re-add"
         );
+        assert_eq!(received[2], removal_for(&add).expect("frontend add"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1956,41 +2167,403 @@ mod tests {
         assert!(matches!(err, SozuError::Channel(_)), "got {err:?}");
     }
 
-    #[test]
-    fn only_l4_frontend_adds_take_the_unrepairable_path() {
-        // HTTP removes are keyed by the route string, so they can evict an
-        // entry belonging to any cluster — their repair is never blocked this
-        // way and must keep its retry.
-        let tcp: Request = RequestType::AddTcpFrontend(RequestTcpFrontend {
-            cluster_id: "a".into(),
-            address: SocketAddress::new_v4(0, 0, 0, 0, 9000),
-            ..Default::default()
-        })
-        .into();
-        assert!(is_l4_frontend(&tcp));
-
-        let http: Request = RequestType::AddHttpFrontend(RequestHttpFrontend {
-            cluster_id: Some("a".into()),
+    fn http_front(cluster: &str, path: &str) -> RequestHttpFrontend {
+        RequestHttpFrontend {
+            cluster_id: Some(cluster.to_string()),
             address: SocketAddress::new_v4(0, 0, 0, 0, 80),
-            hostname: "h".into(),
-            ..Default::default()
-        })
-        .into();
-        assert!(!is_l4_frontend(&http));
+            hostname: "lb.example.com".to_string(),
+            path: PathRule {
+                kind: PathRuleKind::Prefix as i32,
+                value: path.to_string(),
+            },
+            ..RequestHttpFrontend::default()
+        }
     }
 
+    fn frontend_list_response(listed: ListedFrontends) -> Response {
+        Response {
+            status: ResponseStatus::Ok as i32,
+            message: String::new(),
+            content: Some(ContentType::FrontendList(listed).into()),
+        }
+    }
+
+    /// The stored entry is found by the whole key Sōzu files it under, on the
+    /// request's own protocol: another path on the same host, the same route
+    /// on the other protocol, or another SNI on the same TCP address is never
+    /// what the refusal was about.
     #[test]
-    fn both_empty_repair_outcomes_are_recognised() {
-        // The two ways `remove_tcp_frontend` reports "nothing evicted": a
-        // missing cluster bucket (NotFound) and a bucket holding no match
-        // (NoChange). Both mean the occupant is out of this remove's reach.
-        assert!(repair_found_nothing(
-            "Did not find TcpFrontend with address or id 'x'"
-        ));
-        assert!(repair_found_nothing(
-            "dispatching this request did not bring any change to the state"
-        ));
-        // An `Exists` is a different outcome and must not be folded in.
-        assert!(!repair_found_nothing("TcpFrontend 'x' already exists"));
+    fn the_stored_entry_is_matched_on_its_whole_key() {
+        let stale = http_front("stale", "/api");
+        let listed = ListedFrontends {
+            http_frontends: vec![http_front("other", "/"), stale.clone()],
+            https_frontends: vec![http_front("https-side", "/api")],
+            ..ListedFrontends::default()
+        };
+        let add: Request = RequestType::AddHttpFrontend(http_front("mine", "/api")).into();
+        assert_eq!(
+            stored_removal(&add, listed.clone()),
+            Some(RequestType::RemoveHttpFrontend(stale).into())
+        );
+        let https: Request = RequestType::AddHttpsFrontend(http_front("mine", "/api")).into();
+        assert_eq!(
+            stored_removal(&https, listed.clone()),
+            Some(RequestType::RemoveHttpsFrontend(http_front("https-side", "/api")).into())
+        );
+        let elsewhere: Request = RequestType::AddHttpFrontend(http_front("mine", "/v2")).into();
+        assert_eq!(
+            stored_removal(&elsewhere, listed),
+            None,
+            "the entry vanished"
+        );
+
+        let tcp = |cluster: &str, sni: Option<&str>| RequestTcpFrontend {
+            cluster_id: cluster.to_string(),
+            address: socket_address(9000),
+            sni: sni.map(str::to_string),
+            ..RequestTcpFrontend::default()
+        };
+        let listed = ListedFrontends {
+            tcp_frontends: vec![
+                tcp("sni-routed", Some("db.example.com")),
+                tcp("stale", None),
+            ],
+            udp_frontends: vec![RequestUdpFrontend {
+                cluster_id: "stale-udp".to_string(),
+                address: socket_address(9000),
+                ..RequestUdpFrontend::default()
+            }],
+            ..ListedFrontends::default()
+        };
+        let add_tcp: Request = RequestType::AddTcpFrontend(tcp("mine", None)).into();
+        assert_eq!(
+            stored_removal(&add_tcp, listed.clone()),
+            Some(RequestType::RemoveTcpFrontend(tcp("stale", None)).into())
+        );
+        let remove_udp: Request = RequestType::RemoveUdpFrontend(RequestUdpFrontend {
+            cluster_id: "mine".to_string(),
+            address: socket_address(9000),
+            ..RequestUdpFrontend::default()
+        })
+        .into();
+        assert_eq!(
+            stored_removal(&remove_udp, listed),
+            Some(
+                RequestType::RemoveUdpFrontend(RequestUdpFrontend {
+                    cluster_id: "stale-udp".to_string(),
+                    address: socket_address(9000),
+                    ..RequestUdpFrontend::default()
+                })
+                .into()
+            )
+        );
+    }
+
+    /// HTTP routes are listed by their hostname, layer-4 frontends all at once
+    /// (the listing has no UDP flag and a `domain` filter drops them).
+    #[test]
+    fn the_owner_query_lists_the_route_hostname_or_every_l4_frontend() {
+        let http: Request = RequestType::RemoveHttpFrontend(http_front("a", "/")).into();
+        assert_eq!(
+            owner_query(&http),
+            Some(
+                RequestType::ListFrontends(FrontendFilters {
+                    http: true,
+                    https: false,
+                    tcp: false,
+                    domain: Some("lb.example.com".to_string()),
+                })
+                .into()
+            )
+        );
+        let udp: Request = RequestType::AddUdpFrontend(RequestUdpFrontend::default()).into();
+        assert_eq!(
+            owner_query(&udp),
+            Some(
+                RequestType::ListFrontends(FrontendFilters {
+                    http: false,
+                    https: false,
+                    tcp: true,
+                    domain: None,
+                })
+                .into()
+            )
+        );
+        let listener: Request = RequestType::AddTcpListener(TcpListenerConfig::default()).into();
+        assert_eq!(owner_query(&listener), None);
+    }
+
+    /// Since Sōzu 2.3.0 a UDP address held by another cluster is refused with
+    /// its own wording rather than `Exists`; it is the same stale duplicate.
+    #[test]
+    fn a_udp_address_claimed_by_another_cluster_is_a_duplicate_add() {
+        const TAKEN: &str = "could not apply request on the main process state: UDP frontend \
+             address 0.0.0.0:5353 is already claimed by another frontend: cluster_id_bytes=4 \
+             current_cluster_id_bytes=5 current_tag_count=0";
+        let udp: Request = RequestType::AddUdpFrontend(RequestUdpFrontend::default()).into();
+        assert!(is_duplicate_add(&udp, TAKEN));
+        let tcp: Request = RequestType::AddTcpFrontend(RequestTcpFrontend::default()).into();
+        assert!(!is_duplicate_add(&tcp, TAKEN), "only UDP uses that wording");
+    }
+
+    /// A layer-4 address held by another cluster — a stale entry the shadow
+    /// never recorded — is evicted as stored, then our add is re-sent.
+    #[test]
+    fn a_duplicate_l4_add_evicts_the_frontend_another_cluster_holds() {
+        let path = temp_socket_path("repair-l4");
+        let ours = RequestTcpFrontend {
+            cluster_id: "ours".to_string(),
+            address: socket_address(9000),
+            ..RequestTcpFrontend::default()
+        };
+        let stale = RequestTcpFrontend {
+            cluster_id: "stale".to_string(),
+            ..ours.clone()
+        };
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response("TcpFrontend with id_bytes=12 already exists; remove it first"),
+                frontend_list_response(ListedFrontends {
+                    tcp_frontends: vec![stale.clone()],
+                    ..ListedFrontends::default()
+                }),
+                ok_response(),
+                ok_response(),
+            ],
+        );
+        let add: Request = RequestType::AddTcpFrontend(ours).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent
+            .apply(std::slice::from_ref(&add))
+            .expect("the stale owner is evicted and the add lands");
+        drop(agent);
+
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(received.len(), 4, "add, lookup, eviction, re-add");
+        assert_eq!(received[2], RequestType::RemoveTcpFrontend(stale).into());
+        assert_eq!(received[3], add);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A removal Sōzu answers with "nothing to remove" while the key still
+    /// routes for another cluster must not be tolerated as done: the shadow
+    /// would advance over a live route. The stored route is removed instead.
+    #[test]
+    fn a_teardown_that_finds_the_key_under_another_cluster_removes_it_as_stored() {
+        let path = temp_socket_path("orphan");
+        let stale = http_front("stale", "/");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(
+                    "could not apply request on the main process state: Did not find \
+                     HttpFrontend with address or id_bytes=36",
+                ),
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![stale.clone()],
+                    ..ListedFrontends::default()
+                }),
+                ok_response(),
+                // the second teardown finds nothing anywhere: tolerated
+                failure_response("Did not find HttpFrontend with address or id_bytes=36"),
+                frontend_list_response(ListedFrontends::default()),
+            ],
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(http_front("shadow", "/")).into();
+        let gone: Request = RequestType::RemoveHttpFrontend(http_front("shadow", "/v2")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent
+            .apply(&[remove, gone])
+            .expect("both teardowns converge");
+        drop(agent);
+
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(received.len(), 5);
+        assert_eq!(received[2], RequestType::RemoveHttpFrontend(stale).into());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A teardown whose lookup cannot be read must fail the batch: "could not
+    /// tell" is not "nothing there", and tolerating it would advance the
+    /// shadow over a route another cluster may still hold.
+    #[test]
+    fn a_teardown_whose_lookup_fails_fails_the_batch() {
+        let path = temp_socket_path("orphan-unknown");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response("Did not find HttpFrontend with address or id_bytes=36"),
+                failure_response("main process could not list frontends"),
+            ],
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(http_front("shadow", "/")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent.apply(&[remove]).unwrap_err();
+        assert!(
+            matches!(&err, SozuError::Failure(m) if m.contains("could not be listed")),
+            "{err:?}"
+        );
+        drop(agent);
+        assert_eq!(server.join().expect("fake sozu thread").len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A removal Sōzu refuses although its listing holds exactly that entry is
+    /// not a stale owner: evicting it would resend the same refused removal.
+    #[test]
+    fn a_teardown_whose_lookup_finds_the_same_entry_is_tolerated_once() {
+        let path = temp_socket_path("orphan-same");
+        let front = http_front("shadow", "/");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response("Did not find HttpFrontend with address or id_bytes=36"),
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![front.clone()],
+                    ..ListedFrontends::default()
+                }),
+            ],
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(front).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.apply(&[remove]).expect("tolerated as before");
+        drop(agent);
+        assert_eq!(server.join().expect("fake sozu thread").len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The lookup is a round-trip: a caller that gives up during it must not
+    /// see a route evicted afterwards.
+    #[test]
+    fn an_apply_abandoned_during_the_lookup_evicts_nothing() {
+        let path = temp_socket_path("repair-abandon");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response(EXISTS_MESSAGE_2_2_1),
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![http_front("stale", "/")],
+                    ..ListedFrontends::default()
+                }),
+            ],
+        );
+        let add: Request = RequestType::AddHttpFrontend(http_front("mine", "/")).into();
+        let checks = std::cell::Cell::new(0);
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        let err = agent
+            .apply_unless(&[add], || {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SozuError::Abandoned {
+                    applied: 0,
+                    total: 1
+                }
+            ),
+            "{err:?}"
+        );
+        drop(agent);
+        assert_eq!(
+            server.join().expect("fake sozu thread").len(),
+            2,
+            "the add and the lookup, no eviction"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Sōzu files a TCP claim with its SNI lowercased and its ALPN sorted and
+    /// deduplicated, so the stored entry matches any spelling of the claim.
+    #[test]
+    fn a_tcp_claim_matches_its_stored_spelling() {
+        let stored = RequestTcpFrontend {
+            cluster_id: "stale".to_string(),
+            address: socket_address(9443),
+            sni: Some("db.example.com".to_string()),
+            alpn: vec!["h2".to_string(), "http/1.1".to_string()],
+            ..RequestTcpFrontend::default()
+        };
+        let ours = RequestTcpFrontend {
+            cluster_id: "mine".to_string(),
+            sni: Some("DB.Example.com".to_string()),
+            alpn: vec!["http/1.1".to_string(), "h2".to_string(), "h2".to_string()],
+            ..stored.clone()
+        };
+        let listed = ListedFrontends {
+            tcp_frontends: vec![stored.clone()],
+            ..ListedFrontends::default()
+        };
+        let add: Request = RequestType::AddTcpFrontend(ours).into();
+        assert_eq!(
+            stored_removal(&add, listed),
+            Some(RequestType::RemoveTcpFrontend(stored).into())
+        );
+    }
+
+    /// Since Sōzu 2.3.0 a removal naming a cluster the main process does not
+    /// hold is answered `Ok`, leaving another cluster's route on the key in
+    /// place: that route is the same stale owner and is removed as stored.
+    #[test]
+    fn a_removal_answered_nothing_to_remove_still_evicts_another_clusters_route() {
+        let path = temp_socket_path("orphan-ok");
+        let stale = http_front("stale", "/");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                Response {
+                    status: ResponseStatus::Ok as i32,
+                    message: "nothing to remove: cluster ghost does not exist (removed, or never \
+                              added); this key belongs to cluster stale, left in place"
+                        .to_string(),
+                    content: None,
+                },
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![stale.clone()],
+                    ..ListedFrontends::default()
+                }),
+                ok_response(),
+            ],
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(http_front("ghost", "/")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.apply(&[remove]).expect("converges");
+        drop(agent);
+        let received = server.join().expect("fake sozu thread");
+        assert_eq!(received.len(), 3, "removal, lookup, eviction");
+        assert_eq!(received[2], RequestType::RemoveHttpFrontend(stale).into());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A route only the main process still holds — every worker refuses its
+    /// removal — cannot be evicted, and must not fail the batch over and over.
+    #[test]
+    fn a_stale_route_no_worker_serves_does_not_fail_the_batch() {
+        let path = temp_socket_path("orphan-ghost");
+        let stale = http_front("stale", "/");
+        let server = spawn_scripted_fake_sozu(
+            &path,
+            vec![
+                failure_response("Did not find HttpFrontend with address or id_bytes=36"),
+                frontend_list_response(ListedFrontends {
+                    http_frontends: vec![stale],
+                    ..ListedFrontends::default()
+                }),
+                failure_response(
+                    "0: Could not execute order on config state: Did not find HttpFrontend \
+                     with address or id_bytes=36, 1: Could not execute order on config state: \
+                     Did not find HttpFrontend with address or id_bytes=36",
+                ),
+            ],
+        );
+        let remove: Request = RequestType::RemoveHttpFrontend(http_front("shadow", "/")).into();
+        let mut agent = SozuAgent::new(path.to_str().expect("utf-8 path"));
+        agent.apply(&[remove]).expect("tolerated");
+        drop(agent);
+        assert_eq!(server.join().expect("fake sozu thread").len(), 3);
+        let _ = std::fs::remove_file(&path);
     }
 }
