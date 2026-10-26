@@ -31,7 +31,7 @@ license = "Apache-2.0"
 # the chart deploys without anyone deciding to, and the two are only
 # interchangeable for as long as the wire format agrees. Bumping this is a
 # deliberate act that re-checks PROTOCOL.md, not a lockfile refresh.
-sozu-command-lib = "=2.3.2"
+sozu-command-lib = "=2.3.3"
 # Same major as sozu-command-lib's own mio: sozu-agent builds the command
 # socket's `mio::net::UnixStream` itself (from a std stream) so it can bound
 # writes, and tests reuse `Channel` server-side to speak the real framing.
