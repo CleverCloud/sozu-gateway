@@ -11,8 +11,9 @@ intermediate representation (IR), diffs that IR against the last-applied state, 
 minimal set of mutations to a co-located Sōzu instance over its protobuf **command socket** —
 hot, with no proxy restarts. **Phase 1 (Ingress + TLS), Phase 2 (Gateway API) and Phase 3
 (HTTPRoute filters: header edits, redirect) are implemented** and validated
-end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md). The `URLRewrite` hostname is
-implemented too; its end-to-end check has no recorded run yet.
+end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md). The `URLRewrite` hostname and
+full-path rewrite, and path matching without the query string, are implemented too; their
+end-to-end checks have no recorded run yet.
 
 ## Commands
 
@@ -208,7 +209,9 @@ then a no-op that still counts as a successful reconcile.
   newer one wrote, serde fails the *whole* parse, and diffing from the resulting empty `Ir` emits
   only adds — so orphans in Sōzu are never pruned. **Downgrading therefore requires restarting
   Sōzu**, see [docs/UPGRADING.md](docs/UPGRADING.md). Adding an `ir` enum variant is a
-  downgrade-breaking change and should say so in its commit.
+  downgrade-breaking change and should say so in its commit; so is a field whose absence an
+  older build misreads (`header_matches`, `path_only`: it drops them and keys those frontends
+  as Sōzu does not hold them).
 
 ### Translator diff strategy — the subtle part
 
@@ -324,17 +327,36 @@ carries the predicates. See [PROTOCOL.md §14](PROTOCOL.md).
 
 **Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier`,
 `RequestRedirect` (scheme, status, and hostname/path/port targets since 52cf36e) and
-`URLRewrite.hostname` compile into
+`URLRewrite` (`hostname`, and `path.replaceFullPath`) compile into
 per-frontend `ir::FrontendFilters`, which the translator maps onto Sōzu's frontend fields. A
 non-empty header value appends; an empty value deletes. Gateway `set` therefore emits a deletion
 followed by an append on the same frontend,
 while `add` appends and `remove` deletes. Empty Gateway `set`/`add` values are refused with
-`Accepted=False`, `UnsupportedValue`, because they would otherwise become deletions. Unsupported
+`Accepted=False`, `UnsupportedValue`, because they would otherwise become deletions, and so are
+values holding a control character other than a tab, which Sōzu writes raw into the header (a
+CR/LF writes header lines of its own, measured for a request edit in
+[docs/probes/](docs/probes/) `rewrite-redirect_sozu-2.3.6_*`; `gateway::push_header_value`).
+Unsupported
 sub-fields (`RequestMirror`, for example) are reported, never half-applied. A `RequestRedirect`
 rule has no `backendRef` (the API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
-`Option<String>`. **`URLRewrite.hostname` is wired, its `path` is not** — a *choice* for the
-path: a rewrite carrying one is reported and its rule served without the rewrite, hostname
-included, never half-applied. The hostname becomes `rewrite_host`, which changes only the
+`Option<String>`. **`URLRewrite.hostname` and `path.replaceFullPath` are wired**, as
+`rewrite_host` and `rewrite_path`; `ReplacePrefixMatch` is not (it needs a capture the emitted
+rules lack, below): reported, and its rule served without the rewrite, hostname included, never
+half-applied. A path target, redirect or rewrite, keeps the request's query because every
+HTTPRoute match but the root prefix is path-only (`REGEX_PATH`, see the pathType bullet), on
+which Sōzu appends the original query to a rewritten path or redirect `Location` that has no `?`
+of its own (measured on 2.3.6, [docs/probes/](docs/probes/) `regex-path_*`). On the root `/`, Sōzu's own
+`Prefix "/"`, it drops the query: a redirect there is programmed as it always was and loses it, a
+`URLRewrite` path on a rule matching the root (`gateway::keeps_query_on_rewrite`, a rule without
+matches included) is reported and served without the rewrite. Path targets are admitted only as
+literal absolute paths with no `$`, `?` or `#`, within the Gateway API's path character set
+(`gateway::path_target_refusal` and `is_plain_path`, shared by both filters, on every rule, the
+root included; a redirect hostname gets the control, whitespace and `$` part): a `?` of its own
+makes Sōzu keep that query and drop the request's, a `#` would put the appended query in the
+fragment, and Sōzu writes the value unchecked into the request line or `Location`, where a CR/LF
+writes header lines (measured for a redirect, same record). A `URLRewrite` hostname is checked before its
+path, so an invalid one refuses the rule even beside a path the rule is served without. The
+hostname becomes `rewrite_host`, which changes only the
 forwarded host — the backend dialled stays the cluster's. Through 2.3.3 it sent **two** `Host:`
 lines to an HTTP/1 backend, which a Go backend answers `400`; since 2.3.4 (upstream 026a1fb8)
 one, `:authority` to an HTTP/2 backend, and the same Go backend answers `200`; it also wins over
@@ -352,24 +374,16 @@ match that differs from a plain route only by the rewrite can be skipped. The re
 were measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1, 2.3.2 and 2.3.6 but for `Host`
 ([PROTOCOL.md §13](PROTOCOL.md),
 [docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also retired an earlier `408` result
-taken against 2.1.0. Two measured conditions gate any path wiring: a literal `$` in a rewrite
-value makes Sōzu **reject the frontend** (`$$` is no escape, and translation is all-or-nothing,
-so one such route fails every reconcile), and a literal `rewrite_path` **drops the query
-string** that `ReplaceFullPath` keeps — on a redirect too, so the wired `path.replaceFullPath`
-redirect drops it today. That holds for the `Regex` rules emitted here; a `REGEX_PATH` rule
-(2.3.4, upstream 660ce27e) matches the path without its query and appends the original query to
-a rewritten path or redirect `Location` that has none of its own (measured on 2.3.6,
-[docs/probes/](docs/probes/) `regex-path_*`), but it needs a ≥ 2.3.4 data plane, changes every
-route key it replaces (`;Q` instead of `;R`), and a re-forked worker orders it against a `Regex`
-rule of the same hostname by key, not by insertion (#80: measured, a method-less `Regex` then
-wins), so it is not emitted. `$PATH[n]` indexes the path rule's capture groups, and today's
-`ir::PathMatch::sozu_rule` regexes have none, so `$PATH[1]` gets the frontend rejected. A
-capturing spelling of the non-root prefix regex,
+taken against 2.1.0. A literal `$` in a rewrite value makes Sōzu **reject the frontend** (`$$`
+is no escape, and translation is all-or-nothing, so one such route fails every reconcile), and a
+literal `rewrite_path` **drops the query string** on any rule but `REGEX_PATH`. `$PATH[n]`
+indexes the path rule's capture groups, and the emitted regexes have none, so `$PATH[1]` gets
+the frontend rejected. A capturing spelling of the non-root prefix regex,
 `^<esc>(?:(/)((?-u:[^?\n]*)))?((?:\?(?-u:.*))?)$` (the same language), yields boundary,
-remainder and query: it keeps the query and makes `ReplacePrefixMatch` expressible (measured),
-but is not wired. The root `/` must stay Sōzu's native `Prefix "/"`: a root regex competes with
-every other regex and the last added wins (measured). The translator already maps
-`ir::Rewrite::path`, so wiring the path is a builder change.
+remainder and query: it makes `ReplacePrefixMatch` expressible (measured), but is not wired — it
+changes the pattern strings, and with them the key order a re-forked worker replays a hostname
+in (#80). The root `/` must stay Sōzu's native `Prefix "/"`: a root regex competes with every
+other regex and the last added wins (measured).
 
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
 *required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no
@@ -466,14 +480,44 @@ changes.
   regex too** (`^<escaped>(?:\?(?-u:.*))?$`, trailing slash kept literal), never Sōzu's `Equals`: measured
   on 2.2.1, `Equals` misses a query-bearing target and cannot be removed once added (the worker's
   rule equality has no `Equals` arm), so a removed `Exact` route kept serving. 2.3.0 adds the arm
-  (795b95d) but `Equals` still misses `/p?x`, so `Exact` stays a regex. The compilation
-  lives in `ir::PathMatch::sozu_rule` and both the builder's collision key and the translator use
-  it, so two spellings of one Sōzu rule are one route everywhere. That collision key is
-  `ir::Frontend::sozu_route_key`, Sōzu's own unescaped `address;hostname;rule[;method]` string,
+  (795b95d) but `Equals` still misses `/p?x`, so `Exact` stays a regex. **Every compiled rule but
+  the root prefix and a literal holding `?` goes out as `REGEX_PATH`** (kind 3, Sōzu ≥
+  2.3.4), which matches the path up to its first `?`, with the same pattern: without a literal `?` it accepts the same requests
+  (`ir` test `a_compiled_path_accepts_the_same_targets_read_with_or_without_the_query`), and on
+  it Sōzu keeps the query of a rewritten path or redirect target. So does an HTTPRoute
+  `RegularExpression` (the Gateway API matches a path, never its query); an Ingress
+  `ImplementationSpecific` regex and a `Prefix`/`Exact` literal holding a `?` (an Ingress admits
+  one, the HTTPRoute CRD does not) stay `REGEX`, against the target with its query
+  (`builder::path_only`). The kind is **carried in the IR** (`ir::Frontend::path_only`,
+  `#[serde(default)]`, skipped when false), never derived from an unchanged IR: the shadow is
+  compiled by the current code, so a kind that changed without an IR difference would diff to
+  nothing while Sōzu holds the old keys, and every later removal would name a key Sōzu does not
+  hold. A shadow from before the field reads `false`, what Sōzu then held, and a controller
+  restarted alone onto it re-sends each compiled route as `Remove(R…)` then `Add(Q…)`, removals
+  first (a Pod rollout starts both afresh). The patterns are unchanged on purpose: a worker
+  forked again replays a hostname in key order, so keeping them keeps the compiled rules' order
+  among themselves (#80); only `REGEX` rules beside them now replay after them, so where an
+  `ImplementationSpecific` regex and a method-less compiled rule both match on a named host, a
+  re-forked worker now serves the regex (its `R/…` key used to sort before `R^…`, now after `Q^…`;
+  incremental workers keep their insertion order) — and on a hostname-less route, Sōzu's
+  first-match `POST` list, the reverse: the compiled rule, replayed first, now wins there. The compilation
+  lives in `ir::PathMatch::sozu_rule` (the pattern) and `ir::Frontend::sozu_rule` (the kind), and
+  both the builder's collision key and the translator use it, so two spellings of one Sōzu rule
+  are one route everywhere. That collision key is
+  `ir::Frontend::sozu_route_key`, Sōzu's own unescaped `address;hostname;rule[;method]` string
+  (`rule` is `P`, `R` or, for `REGEX_PATH`, `Q`, then the value),
   plus one `;H{kind}:{name:?}={value:?}` per header predicate since 2.3
   (pinned to `RequestHttpFrontend::to_string()` by a translator test), never a tuple: a regex
   `/x;GET` and `/x` + `GET` differ as tuples but are one key — so are a regex spelling a
   predicate suffix and the predicated route — and one unarbitrated clash fails every reconcile.
+  The builder arbitrates on that key with `Q` folded into `R`
+  (`ir::Frontend::contested_route_key`): a `REGEX` and a `REGEX_PATH` rule of one pattern are two
+  keys to Sōzu but rank in one class, the one held last winning, so they keep the single owner
+  they had as one key (the loser's `RouteCollision` says `kind_twin`, never "shares Sōzu's route
+  key"; in a cluster only an Ingress regex against an HTTPRoute `RegularExpression` reaches it, a
+  compiled rule starting with `^`); `same_match` and the copy-key checks of
+  `lift_header_matches` compare the exact rule, kind included (is this Sōzu's key, do these two
+  read a request alike).
 - A frontend becomes HTTPS-enabled only if a TLS host with a *successfully loaded* cert covers it.
   Wildcard TLS hosts (`*.example.com`) cover exactly one extra label.
 - **An SNI name at a listener belongs to one claimant, settled in the builder.** Sōzu serves a
@@ -575,17 +619,21 @@ changes.
 rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
 
 The library and data-plane image are aligned at 2.3.6 and move together (an `image.sozu.tag`
-below 2.3.4 is documented unsupported, not refused: 2.3.0–2.3.3 parse hostnames with Unicode 17
-data, so the builder would admit a name they refuse, measured in
-[docs/probes/](docs/probes/) `idna-hostnames_*`; the exception is `sozu.h2cPriorKnowledge` on,
-which the chart refuses below 2.3.4, see the HTTP/HTTPS listeners bullet). The ICU4X data (2.4.0, Unicode 18), rustls
-0.23.46, rustls-webpki 0.103.16 and rustls-pki-types 1.15.1 are held at Sōzu 2.3.6's versions by
-the lock (see the tenant-input bullet). The library redacts certificate and key material from
-`Debug`. The proto adds fields we leave unset (listener `interface`,
-`HttpListenerConfig.h2c_prior_knowledge` (2.3.4; its TOML key is chart-rendered, never sent over
-the socket), `AddBackend.unix_path`, `Cluster` fields 17–23), a path rule kind we never send
-(`REGEX_PATH`, 2.3.4) and verbs 60–75 we never send, but
-for frontend `header_predicates` and their verbs 66–69 (HTTPRoute header matches, above);
+below 2.3.4 is documented unsupported, not refused: 2.3.0–2.3.3 predate `REGEX_PATH` and
+refuse every frontend using it, so any non-root path fails every reconcile, and a fresh Pod
+never turns ready (refusal measured on 2.3.2, [docs/probes/](docs/probes/)
+`regex-path_sozu-2.3.2_*`); they also parse hostnames with Unicode 17 data, so the builder would
+admit a name they refuse (measured, `idna-hostnames_*`); the exception is
+`sozu.h2cPriorKnowledge` on, which the chart refuses below 2.3.4, see the HTTP/HTTPS listeners
+bullet). The ICU4X data (2.4.0, Unicode 18), rustls 0.23.46, rustls-webpki 0.103.16 and
+rustls-pki-types 1.15.1 are held at Sōzu 2.3.6's versions by the lock (see the tenant-input
+bullet). The library redacts certificate and key material from `Debug`. The proto adds fields we
+leave unset (listener `interface`, `HttpListenerConfig.h2c_prior_knowledge` (2.3.4; its TOML key
+is chart-rendered, never sent over the socket), `AddBackend.unix_path`, `Cluster` fields 17–23)
+and verbs 60–75 we never send, but for frontend `header_predicates` and their verbs 66–69
+(HTTPRoute header matches, above), and the `REGEX_PATH` path rule kind (2.3.4), which every rule
+but the root prefix, Ingress `ImplementationSpecific` regexes and literals holding `?` now uses
+(the pathType bullet);
 `tier()` places the predicate verbs with the plain ones, and the `silent_close` and unix-backend
 verbs defensively. If the versions diverge again, verify that the wire format still agrees before
 upgrading either side.
@@ -624,10 +672,11 @@ answered (same commit; not sent here); hostnames are parsed with ICU4X 2.4 / Uni
 above; `rewrite_host` and a request edit of `Host` reach an HTTP/1.1 backend as one `Host`, the
 edit replacing the authority (`:authority` on HTTP/2) unless `rewrite_host` is set, while
 deleting `Host` still removes nothing (026a1fb8, 2.3.4: what blocked `URLRewrite.hostname`); the
-`REGEX_PATH` rule kind and the `h2c_prior_knowledge` listener option (660ce27e, 2c3b43e3, 2.3.4,
-both measured; the first unused, the second the chart's opt-in `sozu.h2cPriorKnowledge`, never
-sent over the socket; a 2.3.2 data plane refuses the first per frontend and fails to boot with the
-second in its TOML); and data-plane fixes with no controller side — large transfers no
+`REGEX_PATH` rule kind (660ce27e, 2.3.4, used, see the pathType bullet) and the
+`h2c_prior_knowledge` listener option (2c3b43e3, 2.3.4, the chart's opt-in
+`sozu.h2cPriorKnowledge`, never sent over the socket), both measured (a 2.3.2 data plane refuses
+the first per frontend and fails to boot with the second in its TOML); and data-plane fixes with
+no controller side — large transfers no
 longer cut at the loop budget, per-peer timeouts (2.3.4), timed-out HTTP/2 backend connections
 and reset stream slots (2.3.5, security), the UDP PROXY v2 destination (2.3.6; never enabled
 here). Measured unchanged on 2.3.6 (records dated 2026-11-23): the per-cluster `QueryMetrics`

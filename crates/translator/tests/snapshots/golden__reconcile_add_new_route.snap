@@ -146,7 +146,7 @@ expression: "tr::reconcile(&small, &sample_ir()).expect(\"reconcile\")"
         },
         "hostname": "api.example.com",
         "path": {
-          "kind": 1,
+          "kind": 3,
           "value": "^/v1(?:\\?(?-u:.*))?$"
         },
         "method": null,

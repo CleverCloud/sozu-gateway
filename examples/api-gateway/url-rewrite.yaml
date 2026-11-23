@@ -1,16 +1,27 @@
-# HTTPRoute URLRewrite filter (Gateway API) — host rewrite.
+# HTTPRoute URLRewrite filter (Gateway API) — host and full-path rewrites, and
+# path matching without the query string.
 #
 #   urlRewrite.hostname -> the backend receives this Host instead of the one the
 #                          client sent; Sōzu still dials the route's own Service,
 #                          and adds X-Forwarded-Host with the original host.
+#   urlRewrite.path     -> ReplaceFullPath: the backend receives this path,
+#                          followed by the request's query string. Not on a rule
+#                          matching the root prefix `/`, where Sōzu would drop the
+#                          query: that rewrite is reported and not applied.
+#                          ReplacePrefixMatch is not wired (reported).
+#   RegularExpression   -> matched against the path alone, never its query.
 # Needs Sōzu >= 2.3.4 (2.3.2 sent the backend two Host lines, which a Go server
-# such as whoami answers 400). A `path` rewrite is not wired yet: a URLRewrite
-# carrying one is reported, and the rule is served without any rewrite.
+# such as whoami answers 400, and refuses the path-only rules a path match
+# becomes).
 #
 # Verify (whoami echoes the request it got):
 #   curl -s -H 'Host: rewrite.example.com' http://<lb-ip>/ | grep -i host
 #   # Host: internal.example.com
 #   # X-Forwarded-Host: rewrite.example.com
+#   curl -s -H 'Host: paths.example.com' 'http://<lb-ip>/old/page?q=1' | grep '^GET'
+#   # GET /new?q=1 HTTP/1.1
+#   curl -s -H 'Host: paths.example.com' 'http://<lb-ip>/api/v2?x=1' | grep '^GET'
+#   # GET /api/v2?x=1 HTTP/1.1
 #
 # Requires the Gateway API CRDs installed in the cluster.
 apiVersion: apps/v1
@@ -92,6 +103,37 @@ spec:
         - type: URLRewrite
           urlRewrite:
             hostname: internal.example.com
+      backendRefs:
+        - name: echo-rewrite
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rewrite-path
+  namespace: sozu-demo
+spec:
+  parentRefs:
+    - name: examples-gw
+  hostnames: ["paths.example.com"]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /old
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /new
+      backendRefs:
+        - name: echo-rewrite
+          port: 80
+    - matches:
+        - path:
+            type: RegularExpression
+            value: "^/api/v[0-9]+$"
       backendRefs:
         - name: echo-rewrite
           port: 80

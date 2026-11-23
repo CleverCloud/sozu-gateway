@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end test for the Gateway API: routing + the Phase 3 HTTPRoute filters
-# (header modifier, request redirect, URLRewrite hostname). Applies the shipped
+# (header modifier, request redirect, URLRewrite hostname and full path), and a
+# RegularExpression path read without the query string. Applies the shipped
 # examples under examples/api-gateway/, so it also validates those manifests.
 #
-# A URLRewrite path is not exercised: it is reported as unsupported and not
-# wired (a literal path rewrite drops the query string; see PROTOCOL.md §13).
+# The query string is checked across a path target, redirect and rewrite: Sōzu
+# keeps it only on the path-only rules every match but the root prefix becomes
+# (REGEX_PATH, Sōzu >= 2.3.4; see PROTOCOL.md §13).
 set -euo pipefail
 source "$(dirname "$0")/e2e-lib.sh"
 
@@ -14,7 +16,7 @@ ensure_gateway_api_crds
 ensure_addon
 ensure_demo_ns
 
-echo "==> apply Gateway API examples (header, redirect and host-rewrite filters)"
+echo "==> apply Gateway API examples (header, redirect and rewrite filters)"
 kubectl apply -f "$ROOT/examples/api-gateway/header-filter.yaml" >/dev/null
 kubectl apply -f "$ROOT/examples/api-gateway/redirect.yaml" >/dev/null
 kubectl apply -f "$ROOT/examples/api-gateway/url-rewrite.yaml" >/dev/null
@@ -60,5 +62,31 @@ rewrite_seen() {
 }
 wait_for "200 host=internal.example.com xfh=rewrite.example.com" \
   "host-rewrite status, backend Host and X-Forwarded-Host" rewrite_seen
+
+echo "==> RequestRedirect ReplaceFullPath: Location keeps the query string"
+# Each observation is polled with bounded requests, like the host rewrite above:
+# a Deployment reading Ready says nothing about the route being programmed.
+redirect_seen() {
+  curl -sS --max-time 5 -o /dev/null -D /tmp/gw-rp.out \
+    -H 'Host: moved.example.com' "$base/old/page?q=1" || return 1
+  printf '%s %s' "$(awk 'NR==1{print $2}' /tmp/gw-rp.out)" \
+    "$(grep -i '^location:' /tmp/gw-rp.out | head -1 | tr -d '\r' | awk '{print $2}')"
+}
+wait_for "302 http://moved.example.com/new?q=1" "path-redirect status and Location" redirect_seen
+
+echo "==> URLRewrite ReplaceFullPath: backend sees the new path with the query"
+# whoami echoes the request line it received.
+request_line_seen() {
+  local code
+  code="$(curl -sS --max-time 5 -o /tmp/gw-line.out -w '%{http_code}' \
+    -H 'Host: paths.example.com' "$base$1")" || return 1
+  printf '%s %s' "$code" "$(grep -m1 -E '^(GET|POST) ' /tmp/gw-line.out | tr -d '\r')"
+}
+wait_for "200 GET /new?q=1&r=2 HTTP/1.1" "path-rewrite status and backend request line" \
+  request_line_seen "/old/page?q=1&r=2"
+
+echo "==> HTTPRoute RegularExpression: matched against the path, not its query"
+wait_for "200 GET /api/v2?x=1 HTTP/1.1" "RegularExpression ^/api/v[0-9]+\$ on /api/v2?x=1" \
+  request_line_seen "/api/v2?x=1"
 
 echo "==> gateway e2e DONE"

@@ -1,7 +1,7 @@
 //! HTTPRoute header matches → Sōzu 2.3 header predicates: the mapping, the
 //! refusals, and the lifting that rebuilds Gateway API precedence.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::Service;
@@ -908,6 +908,77 @@ fn an_ingress_route_is_lifted_too() {
     );
 }
 
+/// A lifted copy reads its path the way the plain route it copies does:
+/// path-only for a compiled path, against the target with its query for an
+/// Ingress `Exact` path holding a literal `?` — so the copy takes exactly the
+/// requests of that route which meet the header match, query or not, in
+/// every order Sōzu may hold them in.
+#[test]
+fn a_lifted_copy_reads_the_path_as_the_route_it_copies() {
+    let ingress: Ingress = from_json(json!({
+        "metadata": { "name": "ing", "namespace": "demo" },
+        "spec": { "ingressClassName": "sozu", "rules": [{
+            "host": "app.example.com",
+            "http": { "paths": [
+                { "path": "/api", "pathType": "Prefix",
+                  "backend": { "service": { "name": "other", "port": { "number": 80 } } } },
+                { "path": "/a?b", "pathType": "Exact",
+                  "backend": { "service": { "name": "v2", "port": { "number": 80 } } } }
+            ] }
+        }]}
+    }));
+    let mut inputs = inputs(vec![route(
+        "r",
+        "2026-01-01T00:00:00Z",
+        json!([rule(
+            "v1",
+            json!([{ "headers": [{ "name": "version", "value": "one" }] }])
+        )]),
+    )]);
+    inputs.ingresses = vec![Arc::new(ingress)];
+    let out = build(&BuildConfig::default(), &inputs);
+    let copies: BTreeMap<String, bool> = out
+        .ir
+        .frontends
+        .iter()
+        .filter(|f| !f.header_matches.is_empty() && f.path != ir::PathMatch::Prefix("/".into()))
+        .map(|f| (show(f), f.path_only))
+        .collect();
+    assert_eq!(
+        copies,
+        BTreeMap::from([
+            (
+                "app.example.com P/api [version=one] -> demo.other.80".to_string(),
+                true
+            ),
+            (
+                "app.example.com E/a?b [version=one] -> demo.v2.80".to_string(),
+                false
+            ),
+        ])
+    );
+    let request = |target| Request {
+        method: "GET",
+        target,
+        headers: &[("version", "one")],
+    };
+    for (target, backend) in [
+        ("/api/x?q=1", "demo.other.80"),
+        ("/api?q=1", "demo.other.80"),
+        ("/a?b", "demo.v2.80"),
+        ("/a?b?c", "demo.v2.80"),
+        ("/a", "demo.v1.80"),
+        ("/x?api", "demo.v1.80"),
+    ] {
+        assert_eq!(
+            served(&out, "app.example.com", &request(target)),
+            only(backend),
+            "{target}"
+        );
+    }
+    assert_translates(&out);
+}
+
 /// `count` plain prefixes under the header-matched root, on one hostname.
 fn crowded(count: usize) -> BuildOutput {
     let mut rules: Vec<serde_json::Value> = (0..count)
@@ -1029,7 +1100,8 @@ fn a_regex_path_spelling_a_predicate_suffix_is_arbitrated_as_a_collision() {
 // re-forked worker's route-key replay all differ (#80).
 
 /// One request: method, target (the path with its query string, which is what
-/// Sōzu matches path rules against) and headers, first occurrence first.
+/// Sōzu matches a `REGEX` or prefix rule against; a `REGEX_PATH` rule reads
+/// the path before its first `?`) and headers, first occurrence first.
 struct Request<'a> {
     method: &'a str,
     target: &'a str,
@@ -1047,6 +1119,8 @@ struct Held<'a> {
 enum Rule {
     Prefix(String),
     Regex(regex::bytes::Regex),
+    /// `REGEX_PATH`: the regex tested against the target's path alone.
+    RegexPath(regex::bytes::Regex),
 }
 
 enum Value {
@@ -1061,9 +1135,10 @@ fn anchored(pattern: &str) -> regex::bytes::Regex {
 fn held(frontend: &ir::Frontend) -> Held<'_> {
     Held {
         frontend,
-        path: match frontend.path.sozu_rule() {
+        path: match frontend.sozu_rule() {
             ir::SozuPathRule::Prefix(prefix) => Rule::Prefix(prefix),
             ir::SozuPathRule::Regex(pattern) => Rule::Regex(anchored(&pattern)),
+            ir::SozuPathRule::RegexPath(pattern) => Rule::RegexPath(anchored(&pattern)),
         },
         headers: frontend
             .header_matches
@@ -1080,13 +1155,19 @@ fn held(frontend: &ir::Frontend) -> Held<'_> {
 }
 
 /// `PathRule::matches`: a prefix reports its length, a regex only that it
-/// matched (`None`).
+/// matched (`None`). A `REGEX_PATH` rule tests the path before the first `?`
+/// (`split_query`) and reports like any regex: the selection then raises the
+/// bar to the whole target's length, not the path's (`sozu_selects`).
 fn path_result(h: &Held, target: &str) -> Option<Option<usize>> {
     match &h.path {
         Rule::Prefix(prefix) => target
             .starts_with(prefix.as_str())
             .then_some(Some(prefix.len())),
         Rule::Regex(regex) => regex.is_match(target.as_bytes()).then_some(None),
+        Rule::RegexPath(regex) => {
+            let path = target.split('?').next().unwrap_or(target);
+            regex.is_match(path.as_bytes()).then_some(None)
+        }
     }
 }
 
@@ -1292,6 +1373,7 @@ fn the_model_reproduces_sozus_measured_precedence() {
     // method-less path regexes go to the one held last; a regex naming the
     // method decides wherever it stands.
     let host = "app.example.com";
+    // The rules were `REGEX` then.
     let frontend = |path: ir::PathMatch, method: Option<&str>, cluster: &str| ir::Frontend {
         hostname: host.into(),
         path,
@@ -1301,6 +1383,7 @@ fn the_model_reproduces_sozus_measured_precedence() {
         listener: "0.0.0.0:8080".parse().unwrap(),
         filters: Default::default(),
         header_matches: vec![],
+        path_only: false,
     };
     let canary = vec![ir::HeaderMatch {
         name: "x-canary".into(),
@@ -1333,6 +1416,58 @@ fn the_model_reproduces_sozus_measured_precedence() {
     assert_eq!(backend(sozu_selects(&[&api, &v2], &deep)), "v2");
     assert_eq!(backend(sozu_selects(&[&v2, &api_get], &deep)), "get");
     assert_eq!(backend(sozu_selects(&[&api_get, &v2], &deep)), "get");
+}
+
+#[test]
+fn the_model_reproduces_the_measured_precedence_of_a_path_only_rule() {
+    // Measured on 2.3.6 (`docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`,
+    // section f): a `REGEX_PATH` rule ranks in the regex class, so between it
+    // and a `REGEX` rule the one held last wins; it matches the path alone,
+    // yet raises the bar to the whole target's length, so the root prefix
+    // takes `/` from a path-only `^/$` only when held after it, and never
+    // `/?q=1`.
+    let host = "app.example.com";
+    let frontend = |path: ir::PathMatch, path_only: bool, cluster: &str| ir::Frontend {
+        hostname: host.into(),
+        path,
+        method: None,
+        cluster_id: Some(cluster.into()),
+        tls: false,
+        listener: "0.0.0.0:8080".parse().unwrap(),
+        filters: Default::default(),
+        header_matches: vec![],
+        path_only,
+    };
+    let regex = frontend(ir::PathMatch::Prefix("/p".into()), false, "regex");
+    let path_only = frontend(ir::PathMatch::Prefix("/p".into()), true, "path-only");
+    let (regex, path_only) = (held(&regex), held(&path_only));
+    for target in ["/p", "/p/x", "/p?q=1"] {
+        let get = Request {
+            method: "GET",
+            target,
+            headers: &[],
+        };
+        assert_eq!(
+            backend(sozu_selects(&[&regex, &path_only], &get)),
+            "path-only"
+        );
+        assert_eq!(backend(sozu_selects(&[&path_only, &regex], &get)), "regex");
+    }
+
+    let slash = frontend(ir::PathMatch::Regex("^/$".into()), true, "slash");
+    let root = frontend(ir::PathMatch::Prefix("/".into()), false, "root");
+    let (slash, root) = (held(&slash), held(&root));
+    let get = |target| Request {
+        method: "GET",
+        target,
+        headers: &[],
+    };
+    assert_eq!(backend(sozu_selects(&[&root, &slash], &get("/"))), "slash");
+    assert_eq!(backend(sozu_selects(&[&slash, &root], &get("/"))), "root");
+    for order in permutations(&[&slash, &root]) {
+        assert_eq!(backend(sozu_selects(&order, &get("/?q=1"))), "slash");
+        assert_eq!(backend(sozu_selects(&order, &get("/x"))), "root");
+    }
 }
 
 /// Review item 1(a): an Exact path outranks a prefix with a method, but both

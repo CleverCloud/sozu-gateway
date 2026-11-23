@@ -89,9 +89,15 @@ fn sticky_backend(cluster_id: &str, addr_s: &str, weight: Option<i32>, id: &str)
     }
 }
 
+/// A frontend as the builder spells it: a compiled path other than the root
+/// prefix is matched against the request path alone (`REGEX_PATH`), and a
+/// user regex keeps reading the target with its query, as an Ingress
+/// `ImplementationSpecific` path does. [`legacy`] spells it as a build
+/// before `path_only` did.
 fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir::Frontend {
     ir::Frontend {
         hostname: host.to_string(),
+        path_only: compiled(&path),
         path,
         method: None,
         cluster_id: Some(cluster_id.to_string()),
@@ -99,6 +105,21 @@ fn frontend(host: &str, path: ir::PathMatch, cluster_id: &str, tls: bool) -> ir:
         listener: addr(if tls { "0.0.0.0:443" } else { "0.0.0.0:80" }),
         filters: ir::FrontendFilters::default(),
         header_matches: vec![],
+    }
+}
+
+/// Whether `path` is a `Prefix` or `Exact` path compiled to a regex.
+fn compiled(path: &ir::PathMatch) -> bool {
+    !matches!(path, ir::PathMatch::Regex(_))
+        && matches!(path.sozu_rule(), ir::SozuPathRule::Regex(_))
+}
+
+/// `frontend` as a shadow written before `path_only` existed describes it:
+/// every regex rule sent as `REGEX`.
+fn legacy(frontend: ir::Frontend) -> ir::Frontend {
+    ir::Frontend {
+        path_only: false,
+        ..frontend
     }
 }
 
@@ -245,8 +266,22 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
     // Full-span on purpose: Sōzu 2.2.1 does not anchor regexes itself (an
     // unanchored rule would also match `/xx/foo`) and 2.3.0 and later anchor
     // every one, so the rule carries both anchors and consumes the remainder.
+    //
+    // Sent as `REGEX_PATH` (kind 3, Sōzu ≥ 2.3.4), which reads the path
+    // without its query: the pattern accepts the same requests either way,
+    // and Sōzu then keeps the query of a rewritten path or redirect target.
+    // A shadow from before keeps describing it as `REGEX`, the same pattern.
     assert_eq!(
         emitted_path(&one_prefix_route("/foo")),
+        (
+            PathRuleKind::RegexPath as i32,
+            r"^/foo(?:[/?](?-u:.*))?$".to_string()
+        )
+    );
+    let mut legacy_route = one_prefix_route("/foo");
+    legacy_route.frontends[0] = legacy(legacy_route.frontends[0].clone());
+    assert_eq!(
+        emitted_path(&legacy_route),
         (
             PathRuleKind::Regex as i32,
             r"^/foo(?:[/?](?-u:.*))?$".to_string()
@@ -265,24 +300,39 @@ fn prefix_path_compiles_to_an_anchored_boundary_regex() {
     assert_eq!(
         emitted_path(&one_prefix_route("/v1.0")),
         (
-            PathRuleKind::Regex as i32,
+            PathRuleKind::RegexPath as i32,
             r"^/v1\.0(?:[/?](?-u:.*))?$".to_string()
         )
     );
 
     // The root prefix stays a plain rule: every target starts with "/", so the
-    // regex would be pure overhead on the most common route in any cluster.
+    // regex would be pure overhead on the most common route in any cluster. It
+    // has no path-only kind, so the flag changes nothing there.
     assert_eq!(
         emitted_path(&one_prefix_route("/")),
         (PathRuleKind::Prefix as i32, "/".to_string())
     );
+    let mut root = one_prefix_route("/");
+    root.frontends[0].path_only = true;
+    assert_eq!(
+        emitted_path(&root),
+        (PathRuleKind::Prefix as i32, "/".to_string())
+    );
 
-    // ImplementationSpecific maps one-to-one.
+    // A user regex maps one-to-one: as `REGEX` for an Ingress
+    // `ImplementationSpecific` path, as `REGEX_PATH` for an HTTPRoute
+    // `RegularExpression` one.
     let mut regex = one_prefix_route("/foo");
     regex.frontends[0].path = ir::PathMatch::Regex("^/foo/[0-9]+$".into());
+    regex.frontends[0].path_only = false;
     assert_eq!(
         emitted_path(&regex),
         (PathRuleKind::Regex as i32, "^/foo/[0-9]+$".to_string())
+    );
+    regex.frontends[0].path_only = true;
+    assert_eq!(
+        emitted_path(&regex),
+        (PathRuleKind::RegexPath as i32, "^/foo/[0-9]+$".to_string())
     );
 
     // One rule per frontend, so the diff round-trips as it always did.
@@ -306,12 +356,15 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
     // removal (its rule equality has no `Equals` arm), so the route stayed
     // exposed as a zombie. A full-span regex has neither defect, and reads
     // the same under Sōzu's next, anchoring router.
+    // Sent as `REGEX_PATH` (kind 3) with the same pattern: on a path
+    // without its query the `\?` branch never matches, and the rule accepts
+    // the same requests.
     let mut exact = one_prefix_route("/foo");
     exact.frontends[0].path = ir::PathMatch::Exact("/foo".into());
     assert_eq!(
         emitted_path(&exact),
         (
-            PathRuleKind::Regex as i32,
+            PathRuleKind::RegexPath as i32,
             "^/foo(?:\\?(?-u:.*))?$".to_string()
         )
     );
@@ -321,15 +374,18 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
     assert_eq!(
         emitted_path(&exact),
         (
-            PathRuleKind::Regex as i32,
+            PathRuleKind::RegexPath as i32,
             "^/foo/(?:\\?(?-u:.*))?$".to_string()
         )
     );
+    // `Exact` `/` compiles to a regex like any other exact path, so it is
+    // path-only too: only the root *prefix* is Sōzu's own `Prefix`.
     exact.frontends[0].path = ir::PathMatch::Exact("/".into());
+    exact.frontends[0].path_only = true;
     assert_eq!(
         emitted_path(&exact),
         (
-            PathRuleKind::Regex as i32,
+            PathRuleKind::RegexPath as i32,
             "^/(?:\\?(?-u:.*))?$".to_string()
         )
     );
@@ -338,7 +394,7 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
     assert_eq!(
         emitted_path(&exact),
         (
-            PathRuleKind::Regex as i32,
+            PathRuleKind::RegexPath as i32,
             "^/a\\.b\\+c(?:\\?(?-u:.*))?$".to_string()
         )
     );
@@ -346,10 +402,11 @@ fn exact_path_compiles_to_an_anchored_whole_path_regex() {
 
 #[test]
 fn an_exact_route_and_an_identical_user_regex_are_one_route() {
-    // They compile to the same Sōzu rule, so Sōzu holds one route key: the
-    // translator must emit one add — and the builder, keying its collision
-    // report on the same compiled rule, is what names the loser.
-    let model = ir::Ir {
+    // Read the same way, they compile to the same Sōzu rule, so Sōzu holds
+    // one route key: the translator must emit one add — and the builder,
+    // keying its collision report on the same compiled rule, is what names
+    // the loser.
+    let mut model = ir::Ir {
         clusters: vec![
             cluster("exact", ir::LbAlgorithm::RoundRobin, false),
             cluster("regex", ir::LbAlgorithm::RoundRobin, false),
@@ -362,24 +419,39 @@ fn an_exact_route_and_an_identical_user_regex_are_one_route() {
                 "exact",
                 false,
             ),
-            frontend(
-                "h.example.com",
-                ir::PathMatch::Regex("^/foo(?:\\?(?-u:.*))?$".into()),
-                "regex",
-                false,
-            ),
+            ir::Frontend {
+                path_only: true,
+                ..frontend(
+                    "h.example.com",
+                    ir::PathMatch::Regex("^/foo(?:\\?(?-u:.*))?$".into()),
+                    "regex",
+                    false,
+                )
+            },
         ],
         ..Default::default()
     };
-    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("must not fail the translation");
-    assert_eq!(
+    let adds = |model: &ir::Ir| {
+        let reqs = tr::reconcile(&ir::Ir::default(), model).expect("must not fail the translation");
         reqs.iter()
             .filter(|r| matches!(r.request_type, Some(RequestType::AddHttpFrontend(_))))
-            .count(),
-        1,
-        "one Sōzu route key, one add: {dump}",
-        dump = dump(&reqs)
+            .count()
+    };
+    assert_eq!(adds(&model), 1, "one Sōzu route key, one add");
+
+    // A regex reading the target with its query is another Sōzu key (`R`
+    // against `Q`), so both go out; the builder folds the two kinds into one
+    // key when it arbitrates (`contested_route_key`), so its IR holds one.
+    model.frontends[1].path_only = false;
+    assert_ne!(
+        model.frontends[0].sozu_route_key(),
+        model.frontends[1].sozu_route_key()
     );
+    assert_eq!(
+        model.frontends[0].contested_route_key(),
+        model.frontends[1].contested_route_key()
+    );
+    assert_eq!(adds(&model), 2, "two Sōzu route keys, two adds");
 }
 
 #[test]
@@ -423,8 +495,10 @@ fn a_prefix_route_never_takes_an_exact_route_key() {
 
 /// Every rule kind the IR can compile to (a plain root prefix, the regexes a
 /// non-root prefix and an exact path become, a user regex — `;` included),
-/// with and without a method, on the HTTP and HTTPS maps, IPv4 and IPv6.
-/// The IR never emits Sōzu's `Equals` kind (see `ir::PathMatch::sozu_rule`).
+/// each read against the target (`REGEX`, key letter `R`) and the path alone
+/// (`REGEX_PATH`, `Q`), with and without a method, on the HTTP and HTTPS
+/// maps, IPv4 and IPv6. The IR never emits Sōzu's `Equals` kind (see
+/// `ir::PathMatch::sozu_rule`).
 fn route_key_matrix() -> Vec<ir::Frontend> {
     let paths = [
         ir::PathMatch::Prefix("/".into()),
@@ -440,15 +514,18 @@ fn route_key_matrix() -> Vec<ir::Frontend> {
     ));
     let mut out = Vec::new();
     for path in &paths {
-        for method in [None, Some("GET")] {
-            for tls in [false, true] {
-                for listener in [None, Some(addr("[::]:8080")), Some(v6_scoped)] {
-                    let mut f = frontend("h.example.com", path.clone(), "c", tls);
-                    f.method = method.map(str::to_string);
-                    if let Some(listener) = listener {
-                        f.listener = listener;
+        for path_only in [false, true] {
+            for method in [None, Some("GET")] {
+                for tls in [false, true] {
+                    for listener in [None, Some(addr("[::]:8080")), Some(v6_scoped)] {
+                        let mut f = frontend("h.example.com", path.clone(), "c", tls);
+                        f.path_only = path_only;
+                        f.method = method.map(str::to_string);
+                        if let Some(listener) = listener {
+                            f.listener = listener;
+                        }
+                        out.push(f);
                     }
-                    out.push(f);
                 }
             }
         }
@@ -470,13 +547,53 @@ fn route_key_matrix() -> Vec<ir::Frontend> {
     ];
     for path in &paths {
         for (i, predicates) in predicate_sets.iter().enumerate() {
-            let mut f = frontend("h.example.com", path.clone(), "c", i % 2 == 1);
-            f.method = (i == 2).then(|| "POST".to_string());
-            f.header_matches = predicates.clone();
-            out.push(f);
+            for path_only in [false, true] {
+                let mut f = frontend("h.example.com", path.clone(), "c", i % 2 == 1);
+                f.path_only = path_only;
+                f.method = (i == 2).then(|| "POST".to_string());
+                f.header_matches = predicates.clone();
+                out.push(f);
+            }
         }
     }
     out
+}
+
+/// The `Q` spelling, pinned: Sōzu files a path-only regex under its own key
+/// letter, so it never takes the key of the `REGEX` rule of the same
+/// pattern — the two are distinct routes to Sōzu (measured on 2.3.6,
+/// `docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`, section h).
+#[test]
+fn a_path_only_rule_is_keyed_with_its_own_letter() {
+    let mut f = frontend(
+        "h.example.com",
+        ir::PathMatch::Regex("^/m$".into()),
+        "c",
+        false,
+    );
+    f.method = Some("GET".into());
+    f.path_only = true;
+    let model = ir::Ir {
+        clusters: vec![cluster("c", ir::LbAlgorithm::RoundRobin, false)],
+        frontends: vec![f.clone(), legacy(f.clone())],
+        ..Default::default()
+    };
+    let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("two keys translate");
+    let keys: std::collections::BTreeSet<String> = reqs
+        .iter()
+        .filter_map(added_frontend)
+        .map(|(_, payload)| payload.to_string())
+        .collect();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from([
+            "0.0.0.0:80;h.example.com;Q^/m$;GET".to_string(),
+            "0.0.0.0:80;h.example.com;R^/m$;GET".to_string(),
+        ]),
+        "{dump}",
+        dump = dump(&reqs)
+    );
+    assert_eq!(f.sozu_route_key().key, "0.0.0.0:80;h.example.com;Q^/m$;GET");
 }
 
 #[test]
@@ -2001,5 +2118,179 @@ fn two_spellings_of_one_prefix_never_fail_the_translation() {
         1,
         "one route key, first frontend wins: {dump}",
         dump = dump(&reqs)
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Path-only rules (`REGEX_PATH`, Sōzu ≥ 2.3.4)
+// ----------------------------------------------------------------------------
+
+/// Every HTTP(S) frontend request of `reqs`, in order: its verb, the kind of
+/// its path rule and the key Sōzu files it under.
+fn frontend_requests(reqs: &[Request]) -> Vec<(&'static str, i32, String)> {
+    reqs.iter()
+        .filter_map(|r| {
+            let (verb, payload) = match &r.request_type {
+                Some(RequestType::AddHttpFrontend(p)) => ("add http", p),
+                Some(RequestType::AddHttpsFrontend(p)) => ("add https", p),
+                Some(RequestType::AddHttpFrontendWithHeaderPredicates(p)) => {
+                    ("add http predicates", p)
+                }
+                Some(RequestType::AddHttpsFrontendWithHeaderPredicates(p)) => {
+                    ("add https predicates", p)
+                }
+                Some(RequestType::RemoveHttpFrontend(p)) => ("remove http", p),
+                Some(RequestType::RemoveHttpsFrontend(p)) => ("remove https", p),
+                Some(RequestType::RemoveHttpFrontendWithHeaderPredicates(p)) => {
+                    ("remove http predicates", p)
+                }
+                Some(RequestType::RemoveHttpsFrontendWithHeaderPredicates(p)) => {
+                    ("remove https predicates", p)
+                }
+                _ => return None,
+            };
+            Some((verb, payload.path.kind, payload.to_string()))
+        })
+        .collect()
+}
+
+/// `ir` as a shadow written before `path_only` existed describes it: every
+/// regex rule sent as `REGEX`, which is what Sōzu then holds.
+fn legacy_ir(ir: &ir::Ir) -> ir::Ir {
+    let mut out = ir.clone();
+    out.frontends = out.frontends.into_iter().map(legacy).collect();
+    out
+}
+
+/// What the main process files under its HTTP and HTTPS maps once `reqs`
+/// have been applied on top of `ir`.
+fn filed_keys(ir: &ir::Ir, reqs: &[Request]) -> (Vec<String>, Vec<String>) {
+    let mut state = ConfigState::new();
+    for r in tr::ir_to_requests(ir).iter().chain(reqs) {
+        state.dispatch(r).expect("request folds into ConfigState");
+    }
+    (
+        state.http_fronts.keys().cloned().collect(),
+        state.https_fronts.keys().cloned().collect(),
+    )
+}
+
+/// Sōzu's helpers pick the verb from the payload, plain or with header
+/// predicates (66-69), and the rule kind rides along on each: a path-only
+/// route goes out as kind 3 on HTTP and HTTPS, with and without predicates,
+/// added and removed.
+#[test]
+fn a_path_only_rule_goes_out_as_kind_3_on_every_frontend_verb() {
+    let mut frontends = Vec::new();
+    for tls in [false, true] {
+        let plain = frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/api".into()),
+            "app",
+            tls,
+        );
+        assert!(plain.path_only);
+        frontends.push(ir::Frontend {
+            header_matches: vec![exact_header("x-canary", "always")],
+            ..plain.clone()
+        });
+        frontends.push(plain);
+    }
+    let model = ir::Ir {
+        clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
+        frontends,
+        ..Default::default()
+    };
+    let check = |reqs: &[Request], verbs: [&str; 4]| {
+        let sent = frontend_requests(reqs);
+        assert_eq!(
+            sent.iter()
+                .map(|(verb, _, _)| *verb)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(verbs),
+            "{dump}",
+            dump = dump(reqs)
+        );
+        for (verb, kind, key) in &sent {
+            assert_eq!(*kind, PathRuleKind::RegexPath as i32, "{verb} {key}");
+            assert!(
+                key.starts_with("0.0.0.0:80;app.example.com;Q^/api")
+                    || key.starts_with("0.0.0.0:443;app.example.com;Q^/api"),
+                "{verb} {key}"
+            );
+        }
+    };
+    check(
+        &tr::reconcile(&ir::Ir::default(), &model).expect("translate"),
+        [
+            "add http",
+            "add https",
+            "add http predicates",
+            "add https predicates",
+        ],
+    );
+    check(
+        &tr::reconcile(&model, &ir::Ir::default()).expect("translate"),
+        [
+            "remove http",
+            "remove https",
+            "remove http predicates",
+            "remove https predicates",
+        ],
+    );
+}
+
+/// A controller restarted alone onto this build, over a Sōzu and a shadow
+/// from before `path_only`: Sōzu holds every compiled route as `REGEX`, the
+/// shadow says so, and the desired IR wants `REGEX_PATH`. Each such route is
+/// removed under its `R` key, then added under its `Q` key, removals first,
+/// in one batch; the root prefix, which has no path-only kind, is left
+/// alone, and so is everything else. Once applied, the IR the shadow
+/// advances to deletes the route under its `Q` key, where the legacy shadow
+/// would have named the `R` key Sōzu held until then.
+#[test]
+fn a_legacy_shadow_moves_each_compiled_route_from_its_r_key_to_its_q_key() {
+    let desired = sample_ir();
+    let shadow = legacy_ir(&desired);
+    assert_ne!(shadow, desired);
+    let r_key = "0.0.0.0:80;api.example.com;R^/v1(?:\\?(?-u:.*))?$".to_string();
+    let q_key = "0.0.0.0:80;api.example.com;Q^/v1(?:\\?(?-u:.*))?$".to_string();
+
+    let reqs = tr::reconcile(&shadow, &desired).expect("reconcile");
+    assert_eq!(
+        frontend_requests(&reqs),
+        vec![
+            ("remove http", PathRuleKind::Regex as i32, r_key.clone()),
+            ("add http", PathRuleKind::RegexPath as i32, q_key.clone()),
+        ],
+        "{dump}",
+        dump = dump(&reqs)
+    );
+    assert_eq!(
+        reqs.len(),
+        2,
+        "nothing else moves: {dump}",
+        dump = dump(&reqs)
+    );
+    assert_eq!(
+        filed_keys(&shadow, &reqs),
+        filed_keys(&desired, &[]),
+        "the batch leaves the main process holding the desired keys"
+    );
+    assert!(tr::reconcile(&desired, &desired)
+        .expect("reconcile")
+        .is_empty());
+
+    let mut deleted = desired.clone();
+    deleted
+        .frontends
+        .retain(|f| f.hostname != "api.example.com");
+    assert_eq!(
+        frontend_requests(&tr::reconcile(&desired, &deleted).expect("reconcile")),
+        vec![("remove http", PathRuleKind::RegexPath as i32, q_key)]
+    );
+    assert_eq!(
+        frontend_requests(&tr::reconcile(&shadow, &deleted).expect("reconcile")),
+        vec![("remove http", PathRuleKind::Regex as i32, r_key)]
     );
 }

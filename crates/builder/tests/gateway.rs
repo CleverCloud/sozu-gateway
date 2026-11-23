@@ -390,10 +390,11 @@ fn http_route_filters_map_to_ir() {
         .header_mods
         .iter()
         .any(|m| matches!(m.on, ir::HeaderTarget::Response) && m.key == "X-Served-By"));
-    // A URLRewrite carrying a path is reported rather than mapped, and the rule
-    // is served without it, hostname included: a literal path rewrite drops
-    // the query string (measured on Sōzu 2.2.1, 2.3.2 and 2.3.6, PROTOCOL.md
-    // §13), and applying the hostname alone would half-apply the filter.
+    // A URLRewrite path on the root prefix is reported rather than mapped, and
+    // the rule is served without it, hostname included: on Sōzu's own
+    // `Prefix "/"` a literal path rewrite drops the query string (measured on
+    // Sōzu 2.2.1, 2.3.2 and 2.3.6, PROTOCOL.md §13), and applying the hostname
+    // alone would half-apply the filter.
     assert!(f.rewrite.is_none());
     assert!(out.routes[0].parents[0].problems.iter().any(
         |p| matches!(p, Problem::FilterUnsupported { kind } if kind.starts_with("URLRewrite path"))
@@ -677,6 +678,7 @@ fn ingress_colliding_with_redirect_only_route_reports_the_ingress() {
             path: "/".to_string(),
             winner: "<redirect>".to_string(),
             key_only: false,
+            kind_twin: false,
         }],
         "the losing Ingress carries the collision"
     );
@@ -731,6 +733,7 @@ fn losing_route_parent_is_not_accepted_with_route_collision_reason() {
         path: "/".to_string(),
         winner: "<redirect>".to_string(),
         key_only: false,
+        kind_twin: false,
     }));
     let winner = out
         .routes
@@ -812,6 +815,7 @@ fn collision_lands_on_the_parent_ref_that_produced_the_frontend() {
         path: "/".to_string(),
         winner: "<redirect>".to_string(),
         key_only: false,
+        kind_twin: false,
     }));
 }
 
@@ -2620,6 +2624,174 @@ fn a_redirect_carries_status_path_and_port_targets() {
     assert_eq!(redirect.port, Some(8443));
 }
 
+/// A path target is admitted only as a literal absolute path Sōzu can carry
+/// the request's query after: a template sigil, a query or a fragment of
+/// its own, and anything Sōzu would write unchecked into the `Location`
+/// header are refused, the rule with them, instead of being programmed with
+/// a broken `Location`. So is a hostname target carrying a control character
+/// or whitespace, which its CRD pattern already excludes.
+#[test]
+fn a_redirect_target_that_is_not_a_plain_literal_is_refused() {
+    for (target, needle) in [
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "" } }),
+            "absolute",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "moved" } }),
+            "absolute",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/moved?x=1" } }),
+            "'?'",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/moved#top" } }),
+            "'#'",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/new\r\nX-Smuggled: 1" } }),
+            "control character",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/a b" } }),
+            "whitespace",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/a\u{7f}" } }),
+            "control",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/caf\u{e9}" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/a|b" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/{id}" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/a\\b" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/100%" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/a%zz" } }),
+            "percent-encoded",
+        ),
+        (
+            json!({ "hostname": "example.org\r\nX-Smuggled: 1" }),
+            "control character",
+        ),
+        (json!({ "hostname": "example .org" }), "whitespace"),
+    ] {
+        let out = build_redirect(target.clone());
+        assert!(
+            out.ir.frontends.is_empty(),
+            "{target} must not be programmed"
+        );
+        assert!(!out.routes[0].parents[0].accepted, "{target}");
+        assert_eq!(out.routes[0].parents[0].accepted_reason, "UnsupportedValue");
+        assert!(
+            out.routes[0].parents[0].problems.iter().any(|p| matches!(
+                p,
+                Problem::FilterUnsupported { kind }
+                    if kind.starts_with("RequestRedirect") && kind.contains(needle)
+            )),
+            "{target}: {:?}",
+            out.routes[0].parents[0].problems
+        );
+    }
+}
+
+/// A path target holding only what the Gateway API admits in a path match —
+/// RFC 3986's path characters, percent-encodings included — is programmed as
+/// written: a `?` or `#` meant as path data goes through percent-encoded.
+#[test]
+fn a_redirect_path_target_in_the_path_character_set_is_programmed() {
+    let target = "/a%3Fb%23c/~user/-._!&'()*+,;=:@";
+    let out = build_redirect(json!({
+        "path": { "type": "ReplaceFullPath", "replaceFullPath": target }
+    }));
+    assert!(out.routes[0].parents[0].accepted);
+    assert!(
+        out.routes[0].parents[0].problems.is_empty(),
+        "{:?}",
+        out.routes[0].parents[0].problems
+    );
+    let redirect = out.ir.frontends[0].filters.redirect.as_ref().unwrap();
+    assert_eq!(redirect.path.as_deref(), Some(target));
+}
+
+/// A path target keeps the request's query wherever Sōzu can carry it: on a
+/// path-only (`REGEX_PATH`) frontend, every match but the root prefix. On the
+/// root, Sōzu's own `Prefix "/"`, it drops it (measured), and the redirect is
+/// programmed there as it always was.
+#[test]
+fn a_redirect_path_target_rides_on_a_path_only_rule_except_on_the_root() {
+    use sozu_command_lib::proto::command::{request::RequestType, PathRuleKind};
+    let route = |path: serde_json::Value| -> HttpRoute {
+        from_json(json!({
+            "metadata": { "name": "redir", "namespace": "demo" },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": ["app.example.com"],
+                "rules": [{
+                    "matches": [{ "path": path }],
+                    "filters": [{ "type": "RequestRedirect", "requestRedirect": {
+                        "path": { "type": "ReplaceFullPath", "replaceFullPath": "/new" } } }]
+                }]
+            }
+        }))
+    };
+    for (path, kind) in [
+        (
+            json!({ "type": "PathPrefix", "value": "/old" }),
+            PathRuleKind::RegexPath,
+        ),
+        (
+            json!({ "type": "Exact", "value": "/old" }),
+            PathRuleKind::RegexPath,
+        ),
+        (
+            json!({ "type": "Exact", "value": "/" }),
+            PathRuleKind::RegexPath,
+        ),
+        (
+            json!({ "type": "RegularExpression", "value": "^/old/[0-9]+$" }),
+            PathRuleKind::RegexPath,
+        ),
+        (
+            json!({ "type": "PathPrefix", "value": "/" }),
+            PathRuleKind::Prefix,
+        ),
+    ] {
+        let out = build(&BuildConfig::default(), &inputs_with(route(path.clone())));
+        assert!(out.routes[0].parents[0].accepted, "{path}");
+        assert!(out.routes[0].parents[0].problems.is_empty(), "{path}");
+        let front = &out.ir.frontends[0];
+        assert_eq!(front.cluster_id, None, "{path}");
+        assert_eq!(front.path_only, kind == PathRuleKind::RegexPath, "{path}");
+        let requests =
+            sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir).expect("translates");
+        let payload = requests
+            .iter()
+            .find_map(|r| match &r.request_type {
+                Some(RequestType::AddHttpFrontend(f)) => Some(f),
+                _ => None,
+            })
+            .expect("one frontend");
+        assert_eq!(payload.path.kind, kind as i32, "{path}");
+        assert_eq!(payload.rewrite_path.as_deref(), Some("/new"), "{path}");
+    }
+}
+
 /// `ReplacePrefixMatch` needs the matched prefix's remainder, and `$PATH[n]`
 /// indexes the path rule's regex captures — the regex a Kubernetes prefix
 /// compiles to has exactly one group, the element boundary. Measured, so this
@@ -2694,7 +2866,9 @@ fn a_redirect_combined_with_url_rewrite_is_refused() {
 }
 
 /// HTTPRoute `URLRewrite`: the `hostname` is wired onto Sōzu's `rewrite_host`
-/// (one `Host` line since Sōzu 2.3.4, measured); a `path` is not wired yet.
+/// (one `Host` line since Sōzu 2.3.4, measured), a `ReplaceFullPath` path onto
+/// `rewrite_path` wherever Sōzu keeps the request's query after it — every
+/// match but the root prefix (`REGEX_PATH`, 2.3.4, measured on 2.3.6).
 mod url_rewrite {
     use super::*;
     use sozu_command_lib::proto::command::request::RequestType;
@@ -2807,30 +2981,275 @@ mod url_rewrite {
         assert_eq!(f.redirect_scheme, None);
     }
 
-    /// A rewrite with a `path` is reported and the rule served without it —
-    /// unchanged from before the hostname was wired, and the hostname is not
-    /// applied on its own.
+    /// `ReplaceFullPath` becomes `rewrite_path`, beside the hostname when
+    /// the rewrite has one, on a path-only frontend: Sōzu then appends the
+    /// request's query to the rewritten path, as the Gateway API asks.
     #[test]
-    fn a_rewrite_with_a_path_is_reported_and_not_applied_at_all() {
-        for path in [
-            json!({ "type": "ReplaceFullPath", "replaceFullPath": "/v2" }),
-            json!({ "type": "ReplacePrefixMatch", "replacePrefixMatch": "/v2" }),
+    fn a_full_path_rewrite_is_programmed_as_rewrite_path() {
+        for with_hostname in [false, true] {
+            let mut rewrite =
+                json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2/api" } });
+            if with_hostname {
+                rewrite["hostname"] = json!("internal.example.com");
+            }
+            let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": rewrite }]));
+            let parent = &out.routes[0].parents[0];
+            assert!(parent.accepted, "{rewrite}");
+            assert!(
+                parent.problems.is_empty(),
+                "{rewrite}: {:?}",
+                parent.problems
+            );
+            let front = rewritten(&out).expect("the rule is programmed");
+            assert!(front.path_only, "the rewrite rides on a REGEX_PATH rule");
+            assert_eq!(
+                front.filters.rewrite,
+                Some(ir::Rewrite {
+                    hostname: with_hostname.then(|| "internal.example.com".to_string()),
+                    path: Some("/v2/api".to_string()),
+                })
+            );
+
+            let requests = reconcile(&ir::Ir::default(), &out.ir).expect("reconcile");
+            let f = requests
+                .iter()
+                .find_map(|r| match &r.request_type {
+                    Some(RequestType::AddHttpFrontend(f)) if f.rewrite_path.is_some() => Some(f),
+                    _ => None,
+                })
+                .expect("the rewritten rule");
+            assert_eq!(
+                f.path.kind,
+                sozu_command_lib::proto::command::PathRuleKind::RegexPath as i32
+            );
+            assert_eq!(f.rewrite_path.as_deref(), Some("/v2/api"));
+            assert_eq!(
+                f.rewrite_host.as_deref(),
+                with_hostname.then_some("internal.example.com")
+            );
+            assert_eq!(f.redirect, None);
+        }
+    }
+
+    /// One rule, `matches` and a `ReplaceFullPath` rewrite, beside the plain
+    /// sibling rule.
+    fn build_matches(matches: serde_json::Value, hostname: bool) -> sozu_gw_builder::BuildOutput {
+        let mut rewrite =
+            json!({ "path": { "type": "ReplaceFullPath", "replaceFullPath": "/v2" } });
+        if hostname {
+            rewrite["hostname"] = json!("internal.example.com");
+        }
+        let route: HttpRoute = from_json(json!({
+            "metadata": { "name": "route", "namespace": "demo" },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": ["app.example.com"],
+                "rules": [
+                    {
+                        "matches": matches,
+                        "filters": [{ "type": "URLRewrite", "urlRewrite": rewrite }],
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    },
+                    {
+                        "matches": [{ "path": { "type": "PathPrefix", "value": "/plain" } }],
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    }
+                ]
+            }
+        }));
+        build(&BuildConfig::default(), &inputs_with(route))
+    }
+
+    /// On the root prefix, Sōzu's own `Prefix "/"`, a rewritten path loses the
+    /// request's query (measured, PROTOCOL.md §13). A rule with such a match
+    /// — a rule without matches included — is served without the rewrite on
+    /// every match, its hostname too, and reported; `Exact` `/` compiles to
+    /// a path-only regex and keeps it, and a query match, never programmed,
+    /// does not count.
+    #[test]
+    fn a_path_rewrite_on_a_rule_matching_the_root_prefix_is_not_applied() {
+        for matches in [
+            json!(null),
+            json!([]),
+            json!([{ "path": { "type": "PathPrefix", "value": "/" } }]),
+            json!([{}]),
+            json!([
+                { "path": { "type": "Exact", "value": "/v1" } },
+                { "path": { "type": "PathPrefix", "value": "/" } }
+            ]),
         ] {
-            for with_hostname in [true, false] {
-                let mut rewrite = json!({ "path": path.clone() });
-                if with_hostname {
-                    rewrite["hostname"] = json!("internal.example.com");
-                }
-                let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": rewrite }]));
-                let front = rewritten(&out).expect("the rule is still served");
-                assert_eq!(front.filters.rewrite, None, "{rewrite}");
-                assert!(out.routes[0].parents[0].accepted, "{rewrite}");
-                assert!(reported(&out, "URLRewrite path"), "{rewrite}");
-                // The report names the hostname only when the route set one.
+            for hostname in [false, true] {
+                let out = build_matches(matches.clone(), hostname);
+                let parent = &out.routes[0].parents[0];
+                assert!(parent.accepted, "{matches}");
+                assert!(
+                    reported(&out, "root prefix"),
+                    "{matches}: {:?}",
+                    parent.problems
+                );
                 assert_eq!(
                     reported(&out, "its hostname included"),
-                    with_hostname,
-                    "{rewrite}"
+                    hostname,
+                    "{matches}"
+                );
+                let served: Vec<_> = out
+                    .ir
+                    .frontends
+                    .iter()
+                    .filter(|f| f.path != ir::PathMatch::Prefix("/plain".into()))
+                    .collect();
+                assert!(!served.is_empty(), "{matches}: the rule is still served");
+                assert!(
+                    served.iter().all(|f| f.filters.rewrite.is_none()),
+                    "{matches}: {served:?}"
+                );
+            }
+        }
+        for matches in [
+            json!([{ "path": { "type": "Exact", "value": "/" } }]),
+            json!([
+                { "path": { "type": "PathPrefix", "value": "/" },
+                  "queryParams": [{ "name": "q", "value": "1" }] },
+                { "path": { "type": "PathPrefix", "value": "/api" } }
+            ]),
+        ] {
+            let out = build_matches(matches.clone(), true);
+            assert!(!reported(&out, "root prefix"), "{matches}");
+            let front = out
+                .ir
+                .frontends
+                .iter()
+                .find(|f| f.path != ir::PathMatch::Prefix("/plain".into()))
+                .expect("the rule is programmed");
+            assert!(front.path_only, "{matches}");
+            assert_eq!(
+                front
+                    .filters
+                    .rewrite
+                    .as_ref()
+                    .and_then(|r| r.path.as_deref()),
+                Some("/v2"),
+                "{matches}"
+            );
+        }
+    }
+
+    /// `ReplacePrefixMatch` needs the matched prefix's remainder, which the
+    /// path rules emitted here do not capture: reported, and the rule served
+    /// without the rewrite, the hostname not applied on its own.
+    #[test]
+    fn a_prefix_rewrite_is_reported_and_not_applied_at_all() {
+        let path = json!({ "type": "ReplacePrefixMatch", "replacePrefixMatch": "/v2" });
+        for with_hostname in [true, false] {
+            let mut rewrite = json!({ "path": path.clone() });
+            if with_hostname {
+                rewrite["hostname"] = json!("internal.example.com");
+            }
+            let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": rewrite }]));
+            let front = rewritten(&out).expect("the rule is still served");
+            assert_eq!(front.filters.rewrite, None, "{rewrite}");
+            assert!(out.routes[0].parents[0].accepted, "{rewrite}");
+            assert!(
+                reported(&out, "URLRewrite path ReplacePrefixMatch"),
+                "{rewrite}"
+            );
+            // The report names the hostname only when the route set one.
+            assert_eq!(
+                reported(&out, "its hostname included"),
+                with_hostname,
+                "{rewrite}"
+            );
+        }
+    }
+
+    /// The same literal-path admission as a redirect target: anything but a
+    /// plain absolute path Sōzu can append the query to is refused, the rule
+    /// with it, rather than programmed. A path type this build does not know
+    /// reads `UnsupportedValue`, as the CRD asks.
+    #[test]
+    fn a_path_rewrite_that_is_not_a_plain_literal_is_refused() {
+        for (value, needle) in [
+            ("", "absolute"),
+            ("v2", "absolute"),
+            ("/price$100", "'$'"),
+            ("/v2?x=1", "'?'"),
+            ("/v2#top", "'#'"),
+            ("/v2\r\nX-Injected: 1", "control character"),
+            ("/v 2", "whitespace"),
+            ("/caf\u{e9}", "percent-encoded"),
+            ("/a<b>", "percent-encoded"),
+            ("/a%2", "percent-encoded"),
+        ] {
+            let rewrite = json!({
+                "hostname": "internal.example.com",
+                "path": { "type": "ReplaceFullPath", "replaceFullPath": value }
+            });
+            let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": rewrite }]));
+            assert_refused(&out, needle);
+        }
+        let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": {
+            "path": { "type": "ReplaceSomethingElse", "replaceFullPath": "/v2" } } }]));
+        assert_refused(&out, "path.type");
+    }
+
+    /// A hostname that could never be programmed refuses the rule whatever
+    /// its path: also beside a path the rule is served without (on the root
+    /// prefix, or `ReplacePrefixMatch`), where it used to go unchecked.
+    #[test]
+    fn an_invalid_hostname_refuses_the_rule_whatever_its_path() {
+        let full = json!({ "type": "ReplaceFullPath", "replaceFullPath": "/v2" });
+        let prefix = json!({ "type": "ReplacePrefixMatch", "replacePrefixMatch": "/v2" });
+        for (hostname, needle) in [
+            ("internal$.example.com", "'$'"),
+            ("Internal.example.com", "hostname grammar"),
+            ("internal.example.com:8080", "hostname grammar"),
+        ] {
+            for (matches, path) in [
+                (
+                    json!([{ "path": { "type": "PathPrefix", "value": "/" } }]),
+                    full.clone(),
+                ),
+                (json!(null), full.clone()),
+                (
+                    json!([{ "path": { "type": "PathPrefix", "value": "/api" } }]),
+                    prefix.clone(),
+                ),
+                (
+                    json!([{ "path": { "type": "PathPrefix", "value": "/api" } }]),
+                    full.clone(),
+                ),
+            ] {
+                let route: HttpRoute = from_json(json!({
+                    "metadata": { "name": "route", "namespace": "demo" },
+                    "spec": {
+                        "parentRefs": [{ "name": "gw" }],
+                        "hostnames": ["app.example.com"],
+                        "rules": [
+                            {
+                                "matches": matches,
+                                "filters": [{ "type": "URLRewrite", "urlRewrite": {
+                                    "hostname": hostname, "path": path } }],
+                                "backendRefs": [{ "name": "web", "port": 80 }]
+                            },
+                            {
+                                "matches": [{ "path": { "type": "PathPrefix", "value": "/plain" } }],
+                                "backendRefs": [{ "name": "web", "port": 80 }]
+                            }
+                        ]
+                    }
+                }));
+                let out = build(&BuildConfig::default(), &inputs_with(route));
+                let parent = &out.routes[0].parents[0];
+                assert!(!parent.accepted, "{hostname} {matches} {path}");
+                assert_eq!(parent.accepted_reason, "UnsupportedValue");
+                assert!(reported(&out, needle), "{hostname}: {:?}", parent.problems);
+                assert!(
+                    out.ir
+                        .frontends
+                        .iter()
+                        .all(|f| f.path == ir::PathMatch::Prefix("/plain".into())),
+                    "{hostname} {matches} {path}: {:?}",
+                    out.ir.frontends
                 );
             }
         }
@@ -3136,6 +3555,64 @@ mod header_modifiers {
         }
     }
 
+    /// Sōzu writes a header edit's value unchecked into the request or the
+    /// response, where a CR/LF writes header lines of its own (measured for a
+    /// request edit on 2.3.6), and the CRD sets no pattern on it: a value
+    /// holding a control character RFC 9110 keeps out of a field value is
+    /// refused, the rule with it. A tab is a field value's own whitespace.
+    #[test]
+    fn a_header_value_with_a_control_character_refuses_the_rule() {
+        for (filter, field) in [
+            ("RequestHeaderModifier", "requestHeaderModifier"),
+            ("ResponseHeaderModifier", "responseHeaderModifier"),
+        ] {
+            for operation in ["set", "add"] {
+                for value in ["a\r\nX-Smuggled: 1", "a\nb", "a\u{0}b", "a\u{7f}"] {
+                    let out = build(
+                        &BuildConfig::default(),
+                        &inputs(json!([
+                            { "type": filter, (field): {
+                                (operation): [{ "name": "X-Env", "value": value }]
+                            } }
+                        ])),
+                    );
+                    let parent = &out.routes[0].parents[0];
+                    assert!(!parent.accepted, "{filter}.{operation} {value:?}");
+                    assert_eq!(parent.accepted_reason, "UnsupportedValue");
+                    assert!(
+                        parent.problems.iter().any(|p| matches!(p,
+                            Problem::FilterUnsupported { kind }
+                                if kind.starts_with(&format!("{filter}.{operation} X-Env"))
+                                    && kind.contains("control character"))),
+                        "{:?}",
+                        parent.problems
+                    );
+                    assert!(
+                        out.ir
+                            .frontends
+                            .iter()
+                            .all(|f| f.filters.header_mods.is_empty()),
+                        "{filter}.{operation} {value:?} must not be programmed"
+                    );
+                }
+            }
+        }
+        let out = build(
+            &BuildConfig::default(),
+            &inputs(json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                    "set": [{ "name": "X-Env", "value": "a\tb" }]
+                } }
+            ])),
+        );
+        assert!(out.routes[0].parents[0].accepted);
+        assert!(out.ir.frontends.iter().any(|f| f
+            .filters
+            .header_mods
+            .iter()
+            .any(|m| m.value.as_deref() == Some("a\tb"))));
+    }
+
     #[test]
     fn replacing_a_legacy_append_filter_updates_the_frontend_once() {
         let desired = build(
@@ -3265,6 +3742,7 @@ fn oldest_http_route_wins_regardless_of_backend_and_cache_order() {
                     path: "/".into(),
                     winner: expected,
                     key_only: false,
+                    kind_twin: false,
                 }));
         }
     }
@@ -3336,6 +3814,7 @@ fn equivalent_prefix_spellings_obey_route_precedence() {
                 path: "/api".into(),
                 winner: "demo.z.80".into(),
                 key_only: false,
+                kind_twin: false,
             }));
     }
     // Exact paths retain their significant trailing slash and do not collide.
@@ -3395,6 +3874,7 @@ fn a_semicolon_regex_and_a_method_match_on_one_sozu_key_are_arbitrated() {
                 path: "/x;GET".into(),
                 winner: "demo.z.80".into(),
                 key_only: true,
+                kind_twin: false,
             }));
         let winner = out.routes.iter().find(|r| r.name == "z-old").unwrap();
         assert!(winner.parents[0].problems.is_empty());
@@ -3425,6 +3905,7 @@ fn one_routes_matches_on_one_sozu_key_report_the_dropped_match() {
             path: "/x".into(),
             winner: "demo.z.80".into(),
             key_only: true,
+            kind_twin: false,
         }));
     // The dropped match covers other requests than the kept one, so the
     // message must not claim they are served.
@@ -3459,7 +3940,10 @@ fn one_routes_matches_on_one_sozu_key_report_the_dropped_match() {
 fn an_ingress_regex_and_a_method_route_on_one_sozu_key_are_arbitrated() {
     // An Ingress `ImplementationSpecific` path is a user regex too, so an
     // Ingress can spell the key of an HTTPRoute method match. The older
-    // claimant wins whichever kind it is.
+    // claimant wins whichever kind it is. The HTTPRoute regex reads the path
+    // alone, so to Sōzu the two keys now differ by their kind letter
+    // (`R/x;GET`, `Q/x;GET`); they are still arbitrated as one, as when both
+    // were `REGEX` (`kind_twin`).
     let ingress: Ingress = from_json(json!({
         "metadata": { "name": "legacy", "namespace": "demo",
             "creationTimestamp": "2025-01-01T00:00:00Z" },
@@ -3488,9 +3972,138 @@ fn an_ingress_regex_and_a_method_route_on_one_sozu_key_are_arbitrated() {
             path: "/x".into(),
             winner: "demo.a.80".into(),
             key_only: true,
+            kind_twin: true,
         }));
     sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir)
         .expect("the arbitrated IR translates");
+}
+
+/// Every HTTPRoute path but the root prefix is matched against the request
+/// path alone (`REGEX_PATH`): the Gateway API matches a path, never its
+/// query, and a `RegularExpression` `^/api/v2$` must take `/api/v2?x=1`. The
+/// root prefix stays Sōzu's own `Prefix "/"`; an `Exact` `/` is a regex like
+/// any other exact path.
+#[test]
+fn http_route_paths_are_read_without_the_query_but_the_root_prefix() {
+    use sozu_command_lib::proto::command::{request::RequestType, PathRuleKind};
+    let route = with_matches(
+        collision_route("demo", "r", Some("2026-01-01T00:00:00Z"), Some("z")),
+        json!([
+            { "path": { "type": "PathPrefix", "value": "/" } },
+            { "path": { "type": "PathPrefix", "value": "/api/" } },
+            { "path": { "type": "Exact", "value": "/" } },
+            { "path": { "type": "Exact", "value": "/v1" } },
+            { "path": { "type": "RegularExpression", "value": "^/api/v2$" } }
+        ]),
+    );
+    let out = build(&BuildConfig::default(), &colliding_routes(vec![route]));
+    assert!(out.routes[0].parents[0].problems.is_empty());
+    let kinds: BTreeMap<String, (bool, i32)> = out
+        .ir
+        .frontends
+        .iter()
+        .map(|f| {
+            let requests = sozu_gw_translator::reconcile(
+                &ir::Ir::default(),
+                &ir::Ir {
+                    clusters: out.ir.clusters.clone(),
+                    frontends: vec![f.clone()],
+                    ..Default::default()
+                },
+            )
+            .expect("translates");
+            let kind = requests
+                .iter()
+                .find_map(|r| match &r.request_type {
+                    Some(RequestType::AddHttpFrontend(p)) => Some(p.path.kind),
+                    _ => None,
+                })
+                .expect("one frontend");
+            (format!("{:?}", f.path), (f.path_only, kind))
+        })
+        .collect();
+    let path_only = (true, PathRuleKind::RegexPath as i32);
+    assert_eq!(
+        kinds,
+        BTreeMap::from([
+            (
+                "Prefix(\"/\")".to_string(),
+                (false, PathRuleKind::Prefix as i32)
+            ),
+            ("Prefix(\"/api\")".to_string(), path_only),
+            ("Exact(\"/\")".to_string(), path_only),
+            ("Exact(\"/v1\")".to_string(), path_only),
+            ("Regex(\"^/api/v2$\")".to_string(), path_only),
+        ])
+    );
+}
+
+/// An Ingress `ImplementationSpecific` regex keeps reading the target with
+/// its query (`REGEX`), an HTTPRoute `RegularExpression` reads the path alone
+/// (`REGEX_PATH`): one pattern, two Sōzu keys (`R…` and `Q…`). Programmed side
+/// by side they would rank in one class where the one Sōzu holds last wins,
+/// so they still contend for one route, as they did when both were `REGEX`:
+/// the older claimant keeps it, the other is reported, whichever kind is
+/// older — as a twin in the other kind, not as a shared key. The pattern
+/// starts with `/`, as the apiserver requires of an Ingress path.
+#[test]
+fn an_ingress_regex_and_an_http_route_regex_of_one_pattern_have_one_owner() {
+    let ingress = |created: &str| -> Ingress {
+        from_json(json!({
+            "metadata": { "name": "legacy", "namespace": "demo", "creationTimestamp": created },
+            "spec": { "ingressClassName": "sozu", "rules": [{
+                "host": "app.example.com",
+                "http": { "paths": [{ "path": "/api", "pathType": "ImplementationSpecific",
+                    "backend": { "service": { "name": "a", "port": { "number": 80 } } } }] }
+            }]}
+        }))
+    };
+    let route = |created: &str| {
+        with_matches(
+            collision_route("demo", "r", Some(created), Some("z")),
+            json!([{ "path": { "type": "RegularExpression", "value": "/api" } }]),
+        )
+    };
+    for ingress_is_older in [true, false] {
+        let (ingress_at, route_at) = if ingress_is_older {
+            ("2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        } else {
+            ("2026-01-01T00:00:00Z", "2025-01-01T00:00:00Z")
+        };
+        let mut inputs = colliding_routes(vec![route(route_at)]);
+        inputs.ingresses = arcs(vec![ingress(ingress_at)]);
+        let out = build(&BuildConfig::default(), &inputs);
+        assert_eq!(out.ir.frontends.len(), 1, "{:?}", out.ir.frontends);
+        let kept = &out.ir.frontends[0];
+        assert_eq!(kept.path_only, !ingress_is_older);
+        let (winner, loser_problems) = if ingress_is_older {
+            assert!(out.results[0].problems.is_empty());
+            assert!(!out.routes[0].parents[0].accepted);
+            ("demo.a.80", out.routes[0].parents[0].problems.clone())
+        } else {
+            assert!(out.routes[0].parents[0].problems.is_empty());
+            ("demo.z.80", out.results[0].problems.clone())
+        };
+        assert_eq!(kept.cluster_id.as_deref(), Some(winner));
+        assert_eq!(
+            loser_problems,
+            vec![Problem::RouteCollision {
+                hostname: "app.example.com".into(),
+                path: "/api".into(),
+                winner: winner.into(),
+                key_only: true,
+                kind_twin: true,
+            }]
+        );
+        // The two are not one Sōzu key, and the message does not say so.
+        let message = loser_problems[0].to_string();
+        assert!(
+            message.contains("in the other regex kind") && !message.contains("shares"),
+            "{message}"
+        );
+        sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir)
+            .expect("the arbitrated IR translates");
+    }
 }
 
 #[test]

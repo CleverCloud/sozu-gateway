@@ -604,6 +604,7 @@ mod tests {
         assert!(!ir.clusters[0].http2);
         assert!(ir.clusters[0].health_check.is_none());
         assert!(ir.frontends[0].filters.redirect.is_none());
+        assert!(!ir.frontends[0].path_only);
     }
 
     /// A cluster without a health check is written exactly as before the
@@ -839,6 +840,66 @@ mod tests {
         let mut shadow = fresh();
         assert!(replay_acknowledged(&path, &mut shadow, &desired, &batch, 2));
         assert_eq!(shadow.ir, desired);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A path-only route is persisted with its flag and reloaded as it was,
+    /// so a restarted controller diffs from the rule kind Sōzu holds; one
+    /// that is not is written without it, as a shadow from before the flag
+    /// was, and reads back as the `REGEX` Sōzu held then. A controller
+    /// restarted alone onto this build moves such a route from its `R` key
+    /// to its `Q` key in one batch; a failure between the two persists the
+    /// state Sōzu was left in, the route under neither key.
+    #[test]
+    fn a_path_only_route_is_persisted_with_its_kind_and_a_legacy_one_reads_as_regex() {
+        let path = temp_shadow_path("path-only");
+        let _ = std::fs::remove_file(&path);
+        let route = |path_only| sozu_gw_ir::Frontend {
+            hostname: "app.example.com".into(),
+            path: sozu_gw_ir::PathMatch::Exact("/v1".into()),
+            method: None,
+            cluster_id: Some("demo.web.80".into()),
+            tls: false,
+            listener: "0.0.0.0:8080".parse().expect("listener"),
+            filters: Default::default(),
+            header_matches: vec![],
+            path_only,
+        };
+        let mut legacy = applied_ir();
+        legacy.frontends.push(route(false));
+        let mut desired = applied_ir();
+        desired.frontends.push(route(true));
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(!json.contains("path_only"), "{json}");
+        assert_eq!(serde_json::from_str::<Ir>(&json).unwrap(), legacy);
+
+        let batch = sozu_gw_translator::reconcile(&legacy, &desired).expect("translate");
+        assert_eq!(batch.len(), 2, "the R key out, then the Q key in");
+        let generation = Some(generation_fixture([7, 8]));
+        let fresh = || Shadow {
+            generation: generation.clone(),
+            ir: legacy.clone(),
+        };
+        let reload = || -> Shadow {
+            let raw = std::fs::read_to_string(&path).expect("shadow file present");
+            serde_json::from_str(&raw).expect("persisted shadow parses")
+        };
+
+        let mut shadow = fresh();
+        assert!(replay_acknowledged(&path, &mut shadow, &desired, &batch, 1));
+        assert_eq!(shadow.ir, applied_ir(), "under neither key");
+        assert_eq!(reload(), shadow);
+
+        let mut shadow = fresh();
+        assert!(replay_acknowledged(&path, &mut shadow, &desired, &batch, 2));
+        assert_eq!(shadow.ir, desired);
+        let raw = std::fs::read_to_string(&path).expect("shadow file present");
+        assert!(raw.contains("\"path_only\":true"), "{raw}");
+        let reloaded = reload();
+        assert_eq!(reloaded, shadow);
+        assert!(sozu_gw_translator::reconcile(&reloaded.ir, &desired)
+            .expect("translate")
+            .is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

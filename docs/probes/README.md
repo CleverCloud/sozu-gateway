@@ -42,8 +42,9 @@ Each file's header says how it was run and what each host or cluster name in it
 stands for; the raw output follows it verbatim.
 
 So are the records marked *ad hoc* in the table below (`rewrite-host-go`, `regex-path`,
-`h2c-prior-knowledge`): Rust examples built on the repository at the commit their header names,
-whose source is not in this repository, for features this controller does not use yet. The
+`h2c-prior-knowledge`, `regex-path-live`): Rust examples built on the repository at the commit their header names,
+whose source is not in this repository — the first three measured features this controller did not use yet, the
+last the change that put one to use. The
 `idna-hostnames` record drives Sōzu's own CLI; its header holds the method.
 
 | Probe | Question |
@@ -88,3 +89,4 @@ run.
 | `rewrite_host` and `Host` edits to a Go `net/http` backend over HTTP/1.1 and h2c (ad hoc) | 2.3.2, 2.3.6 | [rewrite-host-go_sozu-2.3.2_2026-11-23.txt](rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [rewrite-host-go_sozu-2.3.6_2026-11-23.txt](rewrite-host-go_sozu-2.3.6_2026-11-23.txt) |
 | The 2.3.4 `REGEX_PATH` rule kind: matching, rewrites, redirects, precedence, re-fork replay, refusals, route key (ad hoc) | 2.3.2, 2.3.6 | [regex-path_sozu-2.3.2_2026-11-23.txt](regex-path_sozu-2.3.2_2026-11-23.txt), [regex-path_sozu-2.3.6_2026-11-23.txt](regex-path_sozu-2.3.6_2026-11-23.txt) |
 | The 2.3.4 `h2c_prior_knowledge` HTTP listener option (ad hoc) | 2.3.2, 2.3.6 | [h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt](h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt), [h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt](h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt) |
+| The path-only rule kind as this controller emits it: the real builder, translator and agent against Sōzu 2.3.6, compiled paths before and after, query kept on redirects and rewrites, a migration from the previous controller's shadow, worker re-forks (ad hoc) | 2.3.6 | [regex-path-live_sozu-2.3.6_2026-11-23.txt](regex-path-live_sozu-2.3.6_2026-11-23.txt) |

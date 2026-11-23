@@ -2999,6 +2999,50 @@ mod tests {
         );
     }
 
+    /// A `REGEX` and a `REGEX_PATH` route of one pattern are two keys to Sōzu
+    /// (`R…` and `Q…`, measured on 2.3.6: a removal naming the other kind
+    /// is refused "Did not find HttpFrontend"). Holding both, the eviction
+    /// built for a request removes the stored route under that request's own
+    /// key, whichever cluster it names, and never its twin.
+    #[test]
+    fn the_stored_route_is_looked_up_under_its_own_rule_kind() {
+        let stored = |kind: PathRuleKind, cluster: &str| RequestHttpFrontend {
+            cluster_id: Some(cluster.to_string()),
+            hostname: "lb.example.com".to_string(),
+            path: PathRule {
+                kind: kind as i32,
+                value: "^/v1(?:\\?(?-u:.*))?$".to_string(),
+            },
+            ..RequestHttpFrontend::default()
+        };
+        let regex = stored(PathRuleKind::Regex, "cluster-r");
+        let path_only = stored(PathRuleKind::RegexPath, "cluster-q");
+        assert_ne!(regex.to_string(), path_only.to_string());
+        let listed = || ListedFrontends {
+            http_frontends: vec![regex.clone(), path_only.clone()],
+            https_frontends: vec![regex.clone(), path_only.clone()],
+            ..ListedFrontends::default()
+        };
+
+        let add: Request =
+            RequestType::AddHttpFrontend(stored(PathRuleKind::RegexPath, "new")).into();
+        assert_eq!(
+            stored_removal(&add, listed()),
+            Some(RequestType::remove_http_frontend(path_only.clone()).into())
+        );
+        let remove: Request =
+            RequestType::RemoveHttpsFrontend(stored(PathRuleKind::Regex, "new")).into();
+        assert_eq!(
+            stored_removal(&remove, listed()),
+            Some(RequestType::remove_https_frontend(regex.clone()).into())
+        );
+        let only_regex = ListedFrontends {
+            http_frontends: vec![regex],
+            ..ListedFrontends::default()
+        };
+        assert_eq!(stored_removal(&add, only_regex), None);
+    }
+
     /// HTTP routes are listed by their hostname, layer-4 frontends all at once
     /// (the listing has no UDP flag and a `domain` filter drops them).
     #[test]

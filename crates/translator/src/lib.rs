@@ -82,15 +82,17 @@ fn rule(kind: PathRuleKind, value: String) -> PathRule {
     }
 }
 
-/// The Sōzu path rule one IR path match compiles to — [`ir::PathMatch::sozu_rule`]
+/// The Sōzu path rule one IR frontend compiles to — [`ir::Frontend::sozu_rule`]
 /// mapped onto the wire type. The compilation itself lives in the IR so the
 /// builder keys its collision arbitration on exactly what is emitted here: two
 /// matches that compile to one rule are one route to Sōzu, whatever their IR
-/// spelling.
-fn path_rule(path: &ir::PathMatch) -> PathRule {
-    match path.sozu_rule() {
+/// spelling. A path-only frontend goes out as `REGEX_PATH` (kind 3, Sōzu
+/// ≥ 2.3.4) on the same verbs as any other rule, plain or with predicates.
+fn path_rule(frontend: &ir::Frontend) -> PathRule {
+    match frontend.sozu_rule() {
         ir::SozuPathRule::Prefix(v) => rule(PathRuleKind::Prefix, v),
         ir::SozuPathRule::Regex(v) => rule(PathRuleKind::Regex, v),
+        ir::SozuPathRule::RegexPath(v) => rule(PathRuleKind::RegexPath, v),
     }
 }
 
@@ -217,7 +219,7 @@ fn frontend_payload(f: &ir::Frontend) -> RequestHttpFrontend {
         cluster_id: f.cluster_id.clone(),
         address: f.listener.into(),
         hostname: f.hostname.clone(),
-        path: path_rule(&f.path),
+        path: path_rule(f),
         method: f.method.clone(),
         position,
         header_predicates: header_predicates(&f.header_matches),
@@ -320,8 +322,11 @@ fn apply_filters(payload: &mut RequestHttpFrontend, filters: &ir::FrontendFilter
 /// compiled rule makes `Exact("/foo")` and a user regex that spells the same
 /// anchored pattern one route here; comparing the joined string makes a regex
 /// `/x;GET` and a regex `/x` with `method: GET` one route, exactly as they are
-/// to Sōzu. It is the key the builder arbitrates on, so the loser is the one it
-/// named. First occurrence wins, as everywhere else.
+/// to Sōzu, while a `REGEX` and a `REGEX_PATH` rule of one pattern are two
+/// keys. The builder arbitrates on that key with the two regex kinds folded
+/// into one ([`ir::Frontend::contested_route_key`]), which leaves at most one
+/// frontend per key here, so the loser is the one it named. First occurrence
+/// wins, as everywhere else.
 fn unique_frontends(ir: &ir::Ir) -> Vec<&ir::Frontend> {
     let mut seen: BTreeSet<ir::SozuRouteKey> = BTreeSet::new();
     ir.frontends

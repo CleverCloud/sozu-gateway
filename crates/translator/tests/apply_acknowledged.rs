@@ -59,9 +59,14 @@ fn backend(cluster_id: &str, address: &str) -> ir::Backend {
     }
 }
 
+/// A route as the builder spells it: a compiled path other than the root
+/// prefix is matched against the request path alone (`REGEX_PATH`), and a
+/// user regex keeps reading the target with its query.
 fn route(host: &str, path: ir::PathMatch, cluster_id: Option<&str>, tls: bool) -> ir::Frontend {
     ir::Frontend {
         hostname: host.to_string(),
+        path_only: !matches!(path, ir::PathMatch::Regex(_))
+            && matches!(path.sozu_rule(), ir::SozuPathRule::Regex(_)),
         path,
         method: None,
         cluster_id: cluster_id.map(str::to_string),
@@ -663,6 +668,46 @@ fn header_matches() -> Case {
     }
 }
 
+/// A shadow written before `path_only`, over the Sōzu it describes: every
+/// compiled route held as `REGEX`. The desired IR, as this build spells it,
+/// holds them as `REGEX_PATH` (a `Q` key each, the same pattern), on both
+/// listeners and under a header match, beside the root prefixes, which have
+/// no such kind and do not move. `third` deletes the moved routes.
+fn path_only_migration() -> Case {
+    let mut desired = applied();
+    desired.frontends.extend([
+        route(
+            "x.example.com",
+            ir::PathMatch::Prefix("/api".into()),
+            Some("x"),
+            true,
+        ),
+        header_matched(
+            route(
+                "x.example.com",
+                ir::PathMatch::Exact("/v2".into()),
+                Some("y"),
+                false,
+            ),
+            "x-canary",
+            ir::HeaderMatchKind::Exact("always".into()),
+        ),
+    ]);
+    assert_eq!(desired.frontends.iter().filter(|f| f.path_only).count(), 3);
+    let mut previous = desired.clone();
+    for f in &mut previous.frontends {
+        f.path_only = false;
+    }
+    let mut third = desired.clone();
+    third.frontends.retain(|f| !f.path_only);
+    Case {
+        name: "path-only migration",
+        previous,
+        desired,
+        third,
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Single requests
 // ----------------------------------------------------------------------------
@@ -927,6 +972,47 @@ fn a_header_matched_route_is_replayed_under_its_own_key() {
         verbs,
         BTreeSet::from(["add http", "add https", "remove http", "remove https"]),
         "{batch:?}"
+    );
+}
+
+/// The move from a legacy shadow ([`path_only_migration`]) is a removal of
+/// each `R` key then an add of its `Q` key, and a replay keeps the two
+/// apart: a head that ends between them leaves the route under neither key,
+/// as it leaves Sōzu, and the retry adds it under its `Q` key alone.
+#[test]
+fn a_route_moving_to_path_only_is_replayed_key_by_key() {
+    let case = path_only_migration();
+    let batch = tr::reconcile(&case.previous, &case.desired).expect("translate");
+    let removals = batch
+        .iter()
+        .take_while(|r| {
+            matches!(
+                r.request_type,
+                Some(
+                    RequestType::RemoveHttpFrontend(_)
+                        | RequestType::RemoveHttpsFrontend(_)
+                        | RequestType::RemoveHttpFrontendWithHeaderPredicates(_)
+                        | RequestType::RemoveHttpsFrontendWithHeaderPredicates(_)
+                )
+            )
+        })
+        .count();
+    assert_eq!((removals, batch.len()), (3, 6), "{batch:?}");
+
+    let head = &batch[..removals];
+    let replayed = tr::replay_if_exact(&case.previous, &case.desired, head)
+        .expect("the removals alone leave a state the IR spells");
+    let mut expected = case.previous.clone();
+    expected
+        .frontends
+        .retain(|f| f.path.sozu_rule() == root().sozu_rule());
+    assert_eq!(sorted(&replayed), sorted(&expected));
+
+    let retry = tr::reconcile(&replayed, &case.desired).expect("translate");
+    assert_eq!(retry, batch[removals..].to_vec());
+    assert_eq!(
+        sorted(&tr::apply_acknowledged(&replayed, &case.desired, &retry)),
+        sorted(&case.desired)
     );
 }
 
@@ -1558,6 +1644,7 @@ fn wherever_a_batch_stops_the_adopted_baseline_converges() {
         mixed(),
         udp_affinity(),
         header_matches(),
+        path_only_migration(),
     ] {
         let batch = tr::reconcile(&case.previous, &case.desired).expect("translate");
         assert!(batch.iter().any(is_teardown), "{}: {batch:?}", case.name);
