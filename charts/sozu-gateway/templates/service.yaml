@@ -7,6 +7,7 @@
      renders this same define per instance and must not re-assert it. */ -}}
 {{- include "sozu-gateway.validateTimeouts" . }}
 {{- include "sozu-gateway.validateConnectionLimits" . }}
+{{- include "sozu-gateway.validateH2cPriorKnowledge" . }}
 apiVersion: v1
 kind: Service
 metadata:

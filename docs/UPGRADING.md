@@ -4,6 +4,84 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Cleartext HTTP/2 by prior knowledge, opt-in
+
+New and off by default, so nothing changes until you ask: the rendered Sōzu
+config is the same as before. `sozu.h2cPriorKnowledge: true` makes every HTTP
+entry of `exposure` serve HTTP/2 to a client that opens its connection with
+the HTTP/2 preface ("prior knowledge"), which is how a gRPC client without TLS
+speaks. HTTPS listeners are not touched: they serve HTTP/2 through ALPN
+already. A `helm upgrade --reuse-values` from an older release renders it off.
+
+What it does, measured on Sōzu 2.3.6
+([record](probes/h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt)):
+
+- **A connection opening with the preface is served HTTP/2**; every other one
+  stays HTTP/1.x on the same port. `curl --http2-prior-knowledge` got
+  `HTTP/2 200` where it got a protocol error without the option, which answers
+  the preface with an HTTP/1.1 `400`.
+- **The request stays `http`.** The backend gets `:scheme` (to an HTTP/2
+  backend) and `X-Forwarded-Proto` set to `http`.
+- **What Sōzu speaks to the pods does not change**: HTTP/2 to a Service port
+  declaring `appProtocol: kubernetes.io/h2c`, HTTP/1.1 to any other, both
+  measured behind the option on clusters set up as that mapping sets them up
+  (`http2` on, and unset). Cleartext gRPC needs the two together, the value
+  on the gateway and `kubernetes.io/h2c` on the backend port, routed by an
+  Ingress or an HTTPRoute; GRPCRoute is not implemented. A gRPC client was not
+  part of the measurement: curl's HTTP/2 `GET` was.
+- **`Upgrade: h2c` is still not honoured**: an HTTP/1.1 request offering it is
+  answered over HTTP/1.1.
+- Sōzu counts the connections it serves this way (`http.h2c.prior_knowledge`).
+  `/metrics` should show it, merged across workers, as
+  `sozu_http_h2c_prior_knowledge` — the renderer's naming rule, not yet seen on
+  a scrape.
+
+What it costs:
+
+- **A client that says nothing gets no answer.** A connection that sends
+  nothing, or stops partway through the 24-byte preface, is closed at the
+  request timeout (`sozu.timeouts.request`, Sōzu's 10 s when unset) with
+  nothing sent back and no access log line. Without the option, nothing sent
+  gets a `408`, and the preface's first 16 bytes (an HTTP/1 request line with a
+  bad version) an immediate `400`, both logged; those two cases are the ones
+  measured, and a shorter piece of the preface is an incomplete HTTP/1 request
+  that waits for its `408`. A partial HTTP/1.1 request still
+  gets its `408`, so an alert counting `408`s sees fewer of them.
+- **A Sōzu older than 2.3.4 cannot boot with it.** The option is a key in
+  Sōzu's config file, and Sōzu 2.3.2 exits at startup on a key it does not
+  know ([measured](probes/h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt));
+  2.3.3 refuses unknown listener keys the same way (read in the upstream
+  source). The new gateway Pods would crash-loop: a rolling upgrade stalls on
+  the first one while the old ones keep serving (one whose Sōzu restarts reads
+  the same ConfigMap and fails too), and a fresh install never gets one Ready.
+  The render fails when the value is on and `image.sozu.tag` is a version below
+  2.3.4, one pinned by digest (`2.3.2@sha256:…`) included. A tag without a
+  plain `MAJOR.MINOR.PATCH` (`latest`, a pre-release) is not checked: do not
+  combine one that may point below 2.3.4 with this value.
+- Sōzu wants a `buffer_size` of at least 16 393 bytes on such a listener (read
+  in the upstream source); the chart always renders that.
+
+To turn it on, or off again with `false`:
+
+```sh
+helm upgrade sozu-gateway oci://ghcr.io/clevercloud/sozu-gateway -n sozu-system \
+  --version <chart version> --reset-then-reuse-values --set sozu.h2cPriorKnowledge=true
+```
+
+`--version` names the chart you run, or one you move to that has this value:
+without it Helm pulls the newest chart, so a toggle becomes a chart upgrade.
+`--reset-then-reuse-values` rather than `--reuse-values`, as in the
+[installation guide](getting-started/installation.md#upgrade): the latter
+replays the previous release's values instead of the chart's, so any other key
+a newer chart adds never takes effect.
+
+The value changes Sōzu's ConfigMap, so the gateway Pods roll; keep at least two
+replicas. (A running Sōzu 2.3.6 also takes the option over its command socket,
+measured in the same record, but the controller never sends it: the listeners
+are the chart's.)
+
+---
+
 ## Sōzu 2.3.6
 
 The controller now links `sozu-command-lib` 2.3.6 and the chart defaults to
@@ -273,14 +351,15 @@ image is 2.3.6; do not run this controller against a data plane older than
 2.3.4 (see [Sōzu 2.3.6](#sōzu-236)).
 
 **gRPC** reaches an h2c port through an HTTPRoute or an Ingress on the
-**HTTPS** listener only. Sōzu's cleartext listener, as the chart configures it, refuses HTTP/2
-with prior knowledge, which is how gRPC clients speak without TLS
+**HTTPS** listener. Sōzu's cleartext listener, as the chart configures it by default, refuses
+HTTP/2 with prior knowledge, which is how gRPC clients speak without TLS
 ([measured](probes/grpc-quick-interop_sozu-2.3.2_2026-10-19.txt) on 2.3.2, where it was
 deliberate upstream: `lib/src/http.rs:764-782`), so gRPC over `http://` fails before routing.
-Sōzu 2.3.4 made it an opt-in listener option (`h2c_prior_knowledge`, upstream 2c3b43e3) that the
-chart does not set. A TCPRoute, which forwards bytes, could still
-carry it without L7 routing; that was not measured. What else to expect,
-measured on 2.3.2 with grpc-go 1.75.0 unless marked otherwise:
+Sōzu 2.3.4 made it an opt-in listener option (`h2c_prior_knowledge`, upstream 2c3b43e3), which
+the chart now renders with `sozu.h2cPriorKnowledge`, see
+[Cleartext HTTP/2 by prior knowledge](#cleartext-http2-by-prior-knowledge-opt-in). A TCPRoute,
+which forwards bytes, could still carry it without L7 routing; that was not measured. What else
+to expect, measured on 2.3.2 with grpc-go 1.75.0 unless marked otherwise:
 
 - A stream with no DATA or HEADERS for **30 s** is reset; HTTP/2 PINGs do not
   count as activity ([measured](probes/grpc-streams_sozu-2.3.2_2026-10-19.txt)).

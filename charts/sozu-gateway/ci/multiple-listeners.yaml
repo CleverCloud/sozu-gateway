@@ -4,6 +4,7 @@ exposure:
   - {name: web-extra, port: 5300, bind: 5300, protocol: HTTP, transport: TCP}
   - {name: tls-extra, port: 9443, bind: 9443, protocol: HTTPS, transport: TCP}
 sozu:
+  h2cPriorKnowledge: true
   timeouts:
     front: 45
   hardening:

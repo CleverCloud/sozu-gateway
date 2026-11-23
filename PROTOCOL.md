@@ -172,9 +172,11 @@ health-check verbs (73–75). `RequestType::add_http_frontend` and siblings pick
 translator tiers those verbs with the plain ones, the `silent_close` ones even though our IR
 never produces them. A 2.2.x data plane does not answer verbs it does not know.
 
-Added in 2.3.4, not used either: `HttpListenerConfig.h2c_prior_knowledge` (field 38;
+Added in 2.3.4, not sent either: `HttpListenerConfig.h2c_prior_knowledge` (field 38;
 `UpdateHttpListenerConfig` field 44), cleartext HTTP/2 by prior knowledge on an HTTP listener, off
-by default; and `PathRuleKind::REGEX_PATH = 3`, a full-span regex matched against the path without
+by default, which the chart sets as the HTTP listeners' TOML key instead (`sozu.h2cPriorKnowledge`;
+those listeners are declared at boot); and `PathRuleKind::REGEX_PATH = 3`, a full-span regex
+matched against the path without
 its query, whose route key carries its own letter (`…;Q<value>` in `RequestHttpFrontend::to_string()`),
 so `ir::Frontend::sozu_route_key` would have to follow it before one is emitted. A worker older than
 2.3.4 refuses a `REGEX_PATH` frontend as an invalid path rule.

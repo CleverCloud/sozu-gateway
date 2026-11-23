@@ -327,6 +327,55 @@ turn "20k" into 0 and 1.5 into 1 and hide the mistake.
 {{- end -}}
 
 {{/*
+Whether the HTTP listeners serve cleartext HTTP/2 by prior knowledge
+(`sozu.h2cPriorKnowledge`). Presence, then value: an absent or null key, which
+is what `helm upgrade --reuse-values` from a release predating it replays, is
+off, as every release before the key was. `get` on a missing key yields "", not
+nil, hence the `hasKey`; anything but a boolean `true` is off here and refused
+by the validator below.
+*/}}
+{{- define "sozu-gateway.h2cPriorKnowledge" -}}
+{{- $sozu := .Values.sozu | default dict -}}
+{{- if and (hasKey $sozu "h2cPriorKnowledge") (kindIs "bool" (get $sozu "h2cPriorKnowledge")) (get $sozu "h2cPriorKnowledge") -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/*
+Reject, while rendering, an `h2cPriorKnowledge` the data plane cannot boot with.
+
+The key lands in Sōzu's config file, whose listener table denies unknown
+fields: a Sōzu older than 2.3.4 does not know it and exits at startup ("failed
+to load config: toml decoding error", measured on 2.3.2 in
+docs/probes/h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt; 2.3.3 has the same
+listener table, read in the upstream source), so the new gateway Pods would
+crash-loop. Only a tag that reads as a plain MAJOR.MINOR.PATCH version is
+compared, after dropping an `@sha256:…` suffix: the image renders as
+`repository:tag`, so a tag carrying a digest is the only way to pin Sōzu by
+digest here, and the version in front of it is the operator's own statement of
+what the digest holds. `latest`, a floating `2.3` or a pre-release are taken on
+trust. A string "true" is refused rather than read as on: `--set-string` or a
+quoted value in a values file is a mistake worth a message, as for
+`gatewayProvisioning.enabled`.
+*/}}
+{{- define "sozu-gateway.validateH2cPriorKnowledge" -}}
+{{- $sozu := .Values.sozu | default dict -}}
+{{- $value := get $sozu "h2cPriorKnowledge" -}}
+{{- if and (hasKey $sozu "h2cPriorKnowledge") (not (kindIs "invalid" $value)) (not (kindIs "bool" $value)) -}}
+  {{- fail (printf "sozu.h2cPriorKnowledge must be true or false, got %v (%s)" $value (kindOf $value)) -}}
+{{- end -}}
+{{- if eq (include "sozu-gateway.h2cPriorKnowledge" .) "true" -}}
+  {{- $tag := toString ((.Values.image | default dict).sozu | default dict).tag -}}
+  {{- $version := regexReplaceAll "@.*$" $tag "" -}}
+  {{- /* Nested, not `and`: semverCompare fails the render on a tag that is
+       not a version, so it must not be reached for one. */ -}}
+  {{- if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+$" $version -}}
+    {{- if semverCompare "<2.3.4" $version -}}
+      {{- fail (printf "sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later, and image.sozu.tag is %s: an older Sōzu does not know the h2c_prior_knowledge listener key and refuses to start with it in its config, so the new gateway Pods would crash-loop. Move image.sozu.tag to 2.3.4 or later, or leave sozu.h2cPriorKnowledge off" $tag) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The drain's effective settings, defaulted here rather than read straight from
 values: `helm upgrade --reuse-values` replays the previous release's values over
 the new chart and does not pick up keys the chart has since added, so an existing
