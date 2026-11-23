@@ -1024,7 +1024,7 @@ fn a_regex_path_spelling_a_predicate_suffix_is_arbitrated_as_a_collision() {
 }
 
 // ---------------------------------------------------------------------------
-// A model of Sōzu 2.3.2's route selection, to check what the built IR routes
+// A model of Sōzu 2.3.6's route selection, to check what the built IR routes
 // in every order Sōzu may hold it in: a fresh batch, incremental adds and a
 // re-forked worker's route-key replay all differ (#80).
 

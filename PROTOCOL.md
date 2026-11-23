@@ -5,12 +5,12 @@ verbatim from the real crate source and **confirmed against a live Sōzu 2.1.0**
 with the probe in [`crates/sozu-agent/examples/probe.rs`](crates/sozu-agent/examples/probe.rs).
 If this document and the scoping prompt disagree, this document wins.
 
-- **Crate**: `sozu-command-lib` **2.3.2** (pinned). License **LGPL-3.0**.
+- **Crate**: `sozu-command-lib` **2.3.6** (pinned). License **LGPL-3.0**.
   Edition 2024, `rust-version = 1.93.1`. protobuf via **prost 0.14**. It redacts sensitive
   `Debug` and error output (since 2.2.1). Its `command.proto` only *adds* to 2.2.1's — new
-  fields and verbs we leave unset, §4, but for the header predicates of §14 — so every message
+  fields, verbs and a path rule kind we leave unset, §4, but for the header predicates of §14 — so every message
   without a header match is encoded as before.
-- **Data plane**: Sōzu **2.3.2** (`clevercloud/sozu:2.3.2`; binary is **musl** → run via Docker).
+- **Data plane**: Sōzu **2.3.6** (`clevercloud/sozu:2.3.6`; binary is **musl** → run via Docker).
   The dated 2.1.0/2.2.0/2.2.1 observations below retain their original versions; what 2.3
   changed in the state semantics we rely on is in §3, §6, §7 and §9, and
   [the 2.2.1 validation](docs/E2E-RESULTS.md#sozu-221-upgrade-validation-2026-09-10)
@@ -172,6 +172,13 @@ health-check verbs (73–75). `RequestType::add_http_frontend` and siblings pick
 translator tiers those verbs with the plain ones, the `silent_close` ones even though our IR
 never produces them. A 2.2.x data plane does not answer verbs it does not know.
 
+Added in 2.3.4, not used either: `HttpListenerConfig.h2c_prior_knowledge` (field 38;
+`UpdateHttpListenerConfig` field 44), cleartext HTTP/2 by prior knowledge on an HTTP listener, off
+by default; and `PathRuleKind::REGEX_PATH = 3`, a full-span regex matched against the path without
+its query, whose route key carries its own letter (`…;Q<value>` in `RequestHttpFrontend::to_string()`),
+so `ir::Frontend::sozu_route_key` would have to follow it before one is emitted. A worker older than
+2.3.4 refuses a `REGEX_PATH` frontend as an invalid path rule.
+
 ### `AddBackend` / `RemoveBackend`
 ```rust
 // AddBackend
@@ -205,7 +212,7 @@ batches remove the frontends and backends explicitly before the cluster either w
 
 ### `PathRule`
 ```rust
-kind:  i32      // PathRuleKind: Prefix=0, Regex=1, Equals=2
+kind:  i32      // PathRuleKind: Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, unused)
 value: String   // the prefix / regex / exact value
 ```
 
@@ -242,7 +249,7 @@ cert under SNI (`openssl s_client -servername app.example.com` returned our CN/S
 
 ```text
 ResponseStatus:           Ok=0, Processing=1, Failure=2
-PathRuleKind:             Prefix=0, Regex=1, Equals=2
+PathRuleKind:             Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, unused)
 RulePosition:             Pre=0, Post=1, Tree=2
 LoadBalancingAlgorithms:  RoundRobin=0, Random=1, LeastLoaded=2, PowerOfTwo=3, Hrw=4, Maglev=5
 TlsVersion:               SslV2=0, SslV3=1, TlsV10=2, TlsV11=3, TlsV12=4, TlsV13=5
@@ -342,7 +349,8 @@ Build `CertificateAndKey` straight from the Kubernetes Secret bytes (`tls.crt` /
   (2.3.0 deletes an emptied address bucket, upstream 6dd569ee); with another certificate present
   but the old fingerprint missing, it inserts the new one and answers `Ok`. `sozu-agent` answers
   that refusal with an `AddCertificate` of the replacement
-  ([record](docs/probes/replace-certificate-fallback_sozu-2.3.2_2026-10-19.txt)).
+  ([record](docs/probes/replace-certificate-fallback_sozu-2.3.2_2026-10-19.txt); unchanged on
+  [2.3.6](docs/probes/replace-certificate-fallback_sozu-2.3.6_2026-11-23.txt)).
 
 ---
 
@@ -383,12 +391,14 @@ the key. The translator therefore appends `shadow.cluster_removal_requests(X)` f
 `RemoveCluster(X)` the diff emits. That public helper returns the explicit
 `Remove{Http,Https,Tcp,Udp}Frontend` (predicate-aware verbs) and `RemoveBackend` requests for
 what X owns — `[]` when X is not in the state, never the `RemoveCluster` itself — so batches keep
-their 2.2 shape and apply cleanly on 2.2.1 and 2.3.2 data planes (measured on both).
+their 2.2 shape and apply cleanly on 2.2.1, 2.3.2 and 2.3.6 data planes (measured on each; on
+2.3.6 by the e2e suites' Service switches, 2026-11-23).
 
-In debug builds `diff` replays its own output and compares `tcp_fronts` with an order-sensitive
-`Vec` equality, so it panics when a cluster gains a TCP frontend that sorts before one it already
-holds (e.g. port 3000 added to a cluster holding 3001) — on 2.2.1 and 2.3.2 alike. Release
-builds are unaffected; tests must avoid that shape.
+In debug builds `diff` replays its own output and checks the result. Through 2.3.2 it compared
+`tcp_fronts` with an order-sensitive `Vec` equality, so it panicked when a cluster gained a TCP
+frontend that sorts before one it already held (e.g. port 3000 added to a cluster holding 3001);
+since 2.3.3 it compares each cluster's TCP frontends as a set (upstream 6064279a), so the linked
+2.3.6 accepts that shape. Release builds were never affected.
 
 Caveats (respect these):
 - `generate_requests` is **private**; `diff` / `dispatch` / `produce_initial_state` /
@@ -471,7 +481,7 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 
 ---
 
-## 13. Rewrite & redirect templates — measured on 2.2.0; re-measured unchanged on 2.2.1 and 2.3.2 (2026-10-19)
+## 13. Rewrite & redirect templates — measured on 2.2.0; re-measured unchanged on 2.2.1 and 2.3.2 (2026-10-19) and on 2.3.6 but for `Host` (2026-11-23)
 
 `RequestHttpFrontend` carries `rewrite_host`, `rewrite_path` and `rewrite_port`. The proto
 documents them under `PERMANENT` only, and describes `rewrite_host` as rewriting "both the
@@ -479,7 +489,8 @@ backend authority/path and the wire request line". Both statements needed measur
 anything could be mapped onto them; `crates/sozu-agent/examples/rewrite_redirect_probe.rs`
 reproduces every row below against a live Sōzu. The 2026-10-19 runs gave the same answers on
 `clevercloud/sozu:2.2.1` and `:2.3.2` except where a row says otherwise, and their echo backend
-records every `Host` line, where 2.2.0's recorded only the last.
+records every `Host` line, where 2.2.0's recorded only the last. The 2026-11-23 run on `:2.3.6`
+gave the same answers on 30 of its 32 cases; the two that changed are both about `Host`.
 
 Setup: one cluster with one backend (an in-process echo that reports the request line and the
 `Host` it received), one frontend per row, request `GET /original` unless stated.
@@ -488,7 +499,7 @@ Setup: one cluster with one backend (an in-process echo that reports the request
 | --------------- | -------- |
 | *(none)* — control | `200`, backend sees `GET /original`, `Host: <frontend hostname>` |
 | `rewrite_path="/rewritten"` | `200`, backend sees `GET /rewritten`, **Host unchanged** |
-| `rewrite_host="elsewhere"`, `rewrite_path="/rewritten"` | `200`, backend sees `GET /rewritten` and **two** `Host: elsewhere` lines (2026-10-19; a Go `net/http` backend answers `400` to that, measured with a separate probe on both versions) |
+| `rewrite_host="elsewhere"`, `rewrite_path="/rewritten"` | `200`, backend sees `GET /rewritten` and **two** `Host: elsewhere` lines through 2.3.3 (2026-10-19; a Go `net/http` backend answers `400` to that, measured with a separate probe on both versions); **one** on 2.3.6 (upstream 026a1fb8, 2.3.4), which the Go backend answers `200` (2026-11-23) |
 | `rewrite_path="/rewritten"`, request `GET /original?q=1&x=2` | `200`, backend sees `GET /rewritten` — **the query string is dropped** |
 | `rewrite_path="/lit$PATH[0]eral"` | `200`, backend sees `GET /lit/originaleral` — `$PATH[0]` is the whole request path |
 | `rewrite_path="/price$100"` | **`AddHttpFrontend` REJECTED**: `Could not parse path rewrite "/price$100"` |
@@ -506,7 +517,10 @@ Setup: one cluster with one backend (an in-process echo that reports the request
 
 Raw runs: [2.2.0](docs/probes/rewrite-redirect_sozu-2.2.0_2026-08-04.txt),
 [2.2.1](docs/probes/rewrite-redirect_sozu-2.2.1_2026-10-19.txt),
-[2.3.2](docs/probes/rewrite-redirect_sozu-2.3.2_2026-10-19.txt).
+[2.3.2](docs/probes/rewrite-redirect_sozu-2.3.2_2026-10-19.txt),
+[2.3.6](docs/probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt); the Go backend's answers:
+[2.3.2](docs/probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt),
+[2.3.6](docs/probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt).
 
 What that settles:
 
@@ -514,9 +528,11 @@ What that settles:
    configured backend address and rewrote only the forwarded `Host`. Backends are explicit
    addresses (`AddBackend`), so there is no authority to resolve. An earlier recorded result —
    a route timing out with `408` under a literal rewrite — was taken against **2.1.0** and does
-   not reproduce here. But it is not faithful either: on 2.2.1 and 2.3.2 (and presumably 2.2.0,
+   not reproduce here. It was not faithful either: on 2.2.1 and 2.3.2 (and presumably 2.2.0,
    whose probe could not see it) an HTTP/1 backend receives the rewritten `Host` **twice**, which
-   a strict backend refuses — so `URLRewrite.hostname` stays unwired until upstream fixes it.
+   a strict backend refuses. Since 2.3.4 (upstream 026a1fb8) it receives one, and an HTTP/2
+   backend gets the value as `:authority` (measured on 2.3.6), so nothing upstream blocks
+   `URLRewrite.hostname` any more; it is still unwired.
 2. **All three redirect policies honour the rewrite fields**, `FOUND` and `PERMANENT_REDIRECT`
    included, despite the proto documenting only `PERMANENT`. `rewrite_port` lands as an explicit
    port in `Location`.
@@ -529,7 +545,7 @@ What that settles:
    capture group — its boundary and tail are non-capturing — so a template naming `$PATH[1]` gets
    the frontend rejected. `ReplacePrefixMatch` needs boundary, remainder and query captured
    separately: `^<esc>(?:(/)((?-u:[^?\n]*)))?((?:\?(?-u:.*))?)$` matches the same targets as
-   today's rule and gives the Gateway API results in the table on 2.2.1 and 2.3.2 (2.3's
+   today's rule and gives the Gateway API results in the table on 2.2.1, 2.3.2 and 2.3.6 (2.3's
    `\A(?:…)\z` wrapper adds no group). It is a change to that shared, load-bearing regex in
    `ir::PathMatch::sozu_rule`, not grafted on per route, and it does not extend to the root `/`,
    which must stay Sōzu's `Prefix "/"`: spelled as a regex it competes with every other regex of
@@ -537,7 +553,11 @@ What that settles:
 5. **A literal path rewrite discards the query string**, on the forwarding path and in a redirect
    `Location` alike. Gateway API's `ReplaceFullPath` replaces the path and leaves the query alone,
    so this is a real deviation, not a detail; capturing the query in the rule and appending its
-   group (`/new$PATH[1]` on an `Exact` rule) keeps it (measured).
+   group (`/new$PATH[1]` on an `Exact` rule) keeps it (measured). Since 2.3.4 a `REGEX_PATH` rule
+   (upstream 660ce27e) matches the path without its query, takes `$PATH[n]` from the path alone
+   and appends the original query to a rewritten path or redirect `Location` that carries no `?`
+   of its own (measured on 2.3.6, [regex-path](docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt));
+   this controller emits none (see the 2.3.4 additions in §4).
 6. **A redirect keeps the query only when no path target is set.** `rewrite_host` with
    `rewrite_path` unset answers `Location: <request scheme>://<new host><request path><request
    query>`, so only the authority moves; with `rewrite_path` set the query is gone, as on the
@@ -578,11 +598,15 @@ Re-measured unchanged on 2.2.1 and 2.3.2 (2026-10-19, the raw runs above), which
 edits the builder admits but Sōzu does not apply faithfully: a delete + append of `Host`
 reaches the backend as two different `Host` lines and a delete of `Host` removes nothing, and a
 CR/LF in a header value or a redirect path is written raw into the backend request or the
-client response.
+client response. On 2.3.6 (2026-11-23) the `Host` half changed (upstream 026a1fb8, 2.3.4): a
+non-empty request edit of `Host` replaces the request authority — the last one wins and
+`rewrite_host` wins over it — so the backend gets one `Host` carrying it, an HTTP/2 backend as
+`:authority`, and a Gateway `add` of `Host` acts as a `set`; a delete still removes nothing. The
+CR/LF half is unchanged.
 
 ---
 
-## 14. Header predicates (HTTPRoute header matches) — measured on Sōzu 2.3.2
+## 14. Header predicates (HTTPRoute header matches) — measured on Sōzu 2.3.2, re-measured unchanged on 2.3.6
 
 Sōzu 2.3 (#1253, 88a3bfef) adds `RequestHttpFrontend.header_predicates` (field 17), a
 conjunction of `HeaderPredicate { name, kind, value }` with `kind` `EXACT = 0` (byte-equal),
@@ -714,3 +738,8 @@ request that carries none of them: `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Fo
 `User-Agent` are not.
 
 Raw run: [docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt](docs/probes/header-matches_sozu-2.3.2_2026-10-19.txt).
+Re-run on 2.3.6 with the builder at this release, beside a control run of the same binary on 2.3.2
+(2026-11-23): every verdict and round total is the same on both data planes
+([2.3.6](docs/probes/header-matches_sozu-2.3.6_2026-11-23.txt),
+[2.3.2 control](docs/probes/header-matches_sozu-2.3.2_2026-11-23.txt)); what differs from the
+October record comes from the builder merged since, not from Sōzu.

@@ -1,0 +1,34 @@
+# replace_certificate_fallback_probe against docker clevercloud/sozu:2.3.6 (deploy config, 2 workers), 2026-11-23
+# Two self-signed EC P-256 leaves for app.example.com (A, C), generated for this run (so their fingerprints differ
+# from the 2.3.2 record's): `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650
+# -subj /CN=app.example.com -addext subjectAltName=DNS:app.example.com` (OpenSSL 3.0.13; X509v3, PKCS#8 keys).
+# The last line of the run comes from the harness: `openssl s_client -connect 127.0.0.1:33443 -servername
+# app.example.com`, SHA-256 of the served leaf (`openssl x509 -outform DER | sha256sum`), six fresh handshakes.
+# The 2.3.2 record's first half (agent at decea4d, before the replace fallback) is not re-run: only the current agent.
+# Env: SOZU_SOCK=<sockdir>/sozu.sock PROBE_HTTPS=0.0.0.0:33443 PROBE_NAME=app.example.com
+#   PROBE_CERT_A/PROBE_KEY_A/PROBE_CERT_C/PROBE_KEY_C = the generated PEM files
+#   (the 2.3.2 run's listener was 0.0.0.0:8443, so its refusal reads id_bytes=12 where this one, one byte longer, reads 13).
+# Image: clevercloud/sozu:2.3.6, image id sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841
+#   (`sozu --version`: sozu 2.3.6, +jemallocator +crypto-ring). Run as
+#   `docker run -d --network host --user 1000:1000 --log-opt max-size=20m -v <sockdir>:/run/sozu
+#    -v <config.toml>:/etc/sozu/config.toml:ro clevercloud/sozu:2.3.6` (default `start -c /etc/sozu/config.toml`),
+#   one fresh container per run, socket dir bind-mounted from the host.
+# Config: deploy/sozu/config.toml at 8923b4a (worker_count = 2, connect_timeout = 2, activate_listeners = true,
+#   command_socket /run/sozu/sozu.sock) with only the two static listeners moved: http 0.0.0.0:8080 -> 0.0.0.0:33080,
+#   https 0.0.0.0:8443 -> 0.0.0.0:33443 (port isolation from parallel runs; nothing else changed).
+# Probe source: crates/sozu-agent/examples at 8923b4a (sozu-command-lib =2.3.6), built
+#   `cargo build --release -p sozu-gw-agent --example <probe>`, rustc 1.100.0; run on the host against the socket.
+
+## agent at 8923b4a (with the replace fallback)
+== replace certificate fallback probe ==
+A = 8c37f4b05cf71db3, C = f1aefc7129b85b1f, both [app.example.com] at 0.0.0.0:33443
+before: []
+add A (AddCertificate): applied
+  main: [8c37f4b05cf71db3 [app.example.com]]
+remove A, unrecorded (RemoveCertificate): applied
+  main: []
+rotate A -> C (ReplaceCertificate), raw: FAILURE | could not apply request on the main process state: Did not find Certificate with address or id_bytes=13
+  main: []
+rotate A -> C (ReplaceCertificate), through the agent: applied
+  main: [f1aefc7129b85b1f [app.example.com]]
+served for app.example.com (openssl s_client -servername app.example.com, 6 handshakes): 6 x f1aefc7129b85b1f (= C)

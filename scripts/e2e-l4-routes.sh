@@ -22,7 +22,7 @@ UDP_PORT=9001
 # mapping onto Sōzu's in-pod bind — which a port-forward to the pod bypasses.
 l4_probe() {
   local proto="$1" port="$2" payload="$3" target input=-
-  # Sōzu (2.2.0 through 2.3.2, upstream sozu#1840) closes TCP sessions on a
+  # Sōzu (2.2.0 through 2.3.6, upstream sozu#1840, not planned) closes TCP sessions on a
   # client half-close. Keep the write side open after printf finishes so the
   # echo can return; -T5 still bounds the probe if no reply arrives.
   if [ "$proto" = tcp ]; then input=-,ignoreeof; fi

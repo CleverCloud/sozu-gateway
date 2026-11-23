@@ -36,7 +36,7 @@ image:
     pullPolicy: IfNotPresent
   sozu:
     repository: clevercloud/sozu
-    tag: "2.3.2"
+    tag: "2.3.6"
     pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -128,8 +128,8 @@ metrics:
   # down: each Sōzu worker then answers a scrape with every cluster's metrics in
   # one message, and a message larger than max_command_buffer_size (1 638 400
   # bytes here) wedges that worker for good — no traffic, no commands, probes
-  # still green. Measured on Sōzu 2.2.1 and still so on 2.3.2, whose message
-  # is about 12% larger (docs/probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt).
+  # still green. Measured on Sōzu 2.2.1 and still so on 2.3.2 and 2.3.6, whose
+  # message is about 12% larger (docs/probes/metrics-no-clusters_sozu-2.3.6_2026-11-23.txt).
   # The size grows with the Services that have
   # received traffic: a local run on 2.2.1 with these buffers wedged somewhere
   # between 2 000 and 2 500, an order of magnitude rather than a limit to plan

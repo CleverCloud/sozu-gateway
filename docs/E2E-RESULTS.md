@@ -5,7 +5,7 @@ Kubernetes cluster, not just in unit tests. The pure logic (builder, translator)
 golden tests in `crates/*/tests/`; this page is about the assembled system serving real traffic.
 
 The latest data-plane upgrade check is
-[Sōzu 2.2.1 on 2026-09-10](#sozu-221-upgrade-validation-2026-09-10).
+[Sōzu 2.3.6 on 2026-11-23](#sōzu-236-upgrade-validation-2026-11-23).
 Earlier measurements keep their original versions and environments.
 
 ## Environment of the original runs
@@ -188,11 +188,22 @@ table above:
 
 | Question | Answer on 2.2.1 and 2.3.2 |
 | -------- | ------------------------- |
-| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful: stays unwired |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful: stays unwired (one line since 2.3.4, see the 2026-11-23 addendum) |
 | `ReplacePrefixMatch` via `$PATH[n]` | On today's capture-less prefix regex, `$PATH[1]` gets the frontend **rejected** (the `/` above came from the older regex). With a capturing spelling of the same rule, `/foo` → `/xyz`, `/foo/bar?q=1` → `/xyz/bar?q=1`: feasible for a non-root prefix |
 | Query string across a path rewrite | Dropped by a literal `rewrite_path`; kept when the rule captures it and the template appends that group |
 | `RequestRedirect` path target and the query | **Dropped** (`Location: …/new` for `/original?q=1&x=2`), which the shipped `path.replaceFullPath` redirect inherits; a redirect without a path target keeps it |
 | `$$` in a rewrite value | Rejected like `$`: there is no escape |
+
+**Addendum, 2026-11-23 — re-measured on Sōzu 2.3.6.** The same probe gave the same answers on
+`clevercloud/sozu:2.3.6` for 30 of its 32 cases
+([2.3.6](probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt)); the two that changed are both
+about `Host` (upstream 026a1fb8, first released in 2.3.4):
+
+| Question | Answer on 2.3.6 |
+| -------- | --------------- |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **one** `Host` line, and the Go `net/http` backend answers `200` ([2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [2.3.6](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)); an HTTP/2 backend gets it as `:authority`. Nothing upstream blocks wiring it; it is still unwired |
+| Gateway `set` (or `add`) of `Host` | Replaces the `Host` the backend receives (on 2.3.2 a second, different line); `rewrite_host` wins over it; a delete of `Host` still removes nothing |
+| Everything else above | Unchanged: the literal `$`/`$$` refusals, the dropped query, `$PATH[n]` on a capture-less rule, the redirect targets and the CR/LF passthrough |
 
 ## 5d. Data-plane shutdown — a measurement, not a feature
 
@@ -231,8 +242,12 @@ sessions, WebSockets and idle keep-alives are cut once the delay elapses, so
 
 ## 6. Gateway API conformance (HTTP, TCP and UDP)
 
-The latest full campaign ran the official **v1.6.2** suite and standard CRDs
-against master **431017f** and **Sōzu 2.2.1** on 2026-09-10:
+The latest full campaigns ran on 2026-11-23, once on Sōzu 2.3.2 and once on 2.3.6, on one
+cluster: GATEWAY-HTTP **23 / 37** then **24 / 37** core and 2 / 3 extended, TCP 17 / 19 and UDP
+19 / 20 on both, every verdict the same but one the builder decides before Sōzu
+([analysis](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-11-23.md)). The campaign below ran the
+official **v1.6.2** suite and standard CRDs against master **431017f** and **Sōzu 2.2.1** on
+2026-09-10:
 
 | Profile | Core | Extended |
 | ------- | ---- | -------- |
@@ -284,6 +299,8 @@ attempted. Record all of it or the next row is as unreadable as a bare "3 → 16
 | 2026-08-10 | v1.6.1 | v1.6.1 | **19 / 37** | 0 / 3 | same three | [gateway-http_crd-v1.6.1_2026-08-10.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-10.yaml) | unconditioned, on `master` 5fe5713. `GatewayWithAttachedRoutes` newly passes — a route sharing no hostname with its listener now reads `Accepted: False` / `NoMatchingListenerHostname` and no longer inflates `attachedRoutes`. Nothing regressed |
 | 2026-08-11 | v1.6.1 | v1.6.1 | **20 / 37** | **1 / 3** | same three | [gateway-http_crd-v1.6.1_2026-08-11.yaml](conformance/gateway-http_crd-v1.6.1_2026-08-11.yaml) | unconditioned. Redirect hostname/path/port targets wired: `HTTPRouteRedirectHostAndStatus` passes, and `HTTPRouteRedirectScheme` becomes the **first extended test to pass** — two of its four cases carry a `hostname`, so the whole test failed on them |
 | 2026-09-10 | v1.6.2 | v1.6.2 | **18 / 37** | **1 / 3** | same three | [gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.yaml](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-09-10.yaml) | unconditioned, master 431017f / Sōzu 2.2.1; also TCP 14/19 and UDP 16/20. Two Gateway status verdicts change; the old parallel reporter prevents attributing this delta to the proxy upgrade |
+| 2026-11-23 | v1.6.2 | v1.6.2 | **23 / 37** | **2 / 3** | same three | [gateway-http-tcp-udp_crd-v1.6.2_2026-11-23_sozu-2.3.2.yaml](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-11-23_sozu-2.3.2.yaml) | unconditioned, master 2fb8cfc / **Sōzu 2.3.2**; also TCP 17/19 and UDP 19/20. Not a delta against the row above (other cluster, master moved on by the Sōzu 2.3 work): the control for the next row |
+| 2026-11-23 | v1.6.2 | v1.6.2 | **24 / 37** | **2 / 3** | same three | [gateway-http-tcp-udp_crd-v1.6.2_2026-11-23_sozu-2.3.6.yaml](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-11-23_sozu-2.3.6.yaml) | same cluster and values, **Sōzu 2.3.6** (run first); TCP 17/19, UDP 19/20. Only `HTTPRouteMultipleGateways` moves: a route collision the builder decides before Sōzu, timing-dependent ([analysis](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-11-23.md)) |
 
 > **A conditioned row is not a score.** Rows 3 and 4 exist to produce a per-test picture, not a
 > number to quote — quoting `17/37` without "with a base Gateway excluded from readiness" is exactly
@@ -586,6 +603,28 @@ The same run with the 2.3.2 bump alone (names already apply in place, the chain 
   (`SOZU_GW_RESYNC_SECS`, 60 s by default), not immediately: the controller re-probes, then exits so
   the restarted process can wire the watches. With `SOZU_GW_RESYNC_SECS=0` there is no re-probe, and
   the Deployment has to be restarted by hand.
+
+## Sōzu 2.3.6 upgrade validation (2026-11-23)
+
+A fresh cluster: two amd64 worker nodes, Kubernetes **v1.37.2**, a provider LoadBalancer. The
+controller image was built with the repository's Dockerfile and deployed by digest; the Sōzu
+images are the published `clevercloud/sozu:2.3.2` (`sha256:273fc588…`) and `:2.3.6`
+(`sha256:27a14a59…`), unmodified.
+
+| Check | Result |
+| ----- | ------ |
+| `scripts/e2e.sh` on 2.3.6 (Ingress, TLS, path types, opt-out redirect, rotation, Service switch, deletion) | all 32 assertions pass |
+| `scripts/e2e-gateway.sh` on 2.3.6 | passes on a warm cluster; the cold first run hit the known CRD race (the suite probed at 09:40:54, the controller's resync noticed the new CRDs and restarted into Gateway mode at 09:40:55) |
+| `scripts/e2e-l4-routes.sh` on 2.3.6 | all assertions pass, re-pointing included, no reconcile failure |
+| Rolling upgrade, two replicas, master on 2.3.2 → this controller on 2.3.6 | **1,991 requests** over 137 s, all **200**, no transport error; **1,115** of them from the start of the upgrade to 60 s after the rollout, the old Pods' drain included; p99 12.6 ms against 12.9 ms before |
+| Gateway API conformance, 2.3.6 then 2.3.2 as the control | every verdict the same but one route collision the builder decides, timing-dependent ([analysis](conformance/gateway-http-tcp-udp_crd-v1.6.2_2026-11-23.md)) |
+| The repository's regression probes, against local containers | the same answers as on 2.3.2 but for `Host` edits and `rewrite_host`, which now reach the backend as one `Host`; the 2.3.4 `REGEX_PATH` rule and h2c prior knowledge, measured on their own, behave as upstream documents ([records](probes/README.md#records)) |
+| Hostname IDNA verdicts | Unicode 18 data: each version accepts names the other refuses ([record](probes/idna-hostnames_sozu-2.3.2-vs-2.3.6_2026-11-23.txt)) |
+
+The continuous probe ran in a Pod in the cluster, `curl` 8.10.1 against the gateway Service's
+ClusterIP with an Ingress host, a new connection per request, a 50 ms pause and a 5 s timeout; its
+clock has one-second resolution. The upgrade was one `helm upgrade` changing only the two images.
+This is one measured upgrade window, not a throughput benchmark.
 
 ## Sozu 2.2.1 upgrade validation (2026-09-10)
 

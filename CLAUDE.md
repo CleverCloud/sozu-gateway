@@ -234,7 +234,7 @@ its cascade then only meets what is already removed; see the reconcile-loop bull
 Frontend *removes* are tiered **before** frontend *adds*: Sōzu keys a route by
 `address;hostname;path[;method]` (*not* `cluster_id`), so re-pointing a host+path at a different
 cluster is a `Remove`+`Add` on the same route key, and adding first would be rejected as a
-duplicate (`StateError::Exists`) — there is still no atomic frontend replace in 2.3.2. Since 2.3.0
+duplicate (`StateError::Exists`) — there is still no atomic frontend replace in 2.3.6. Since 2.3.0
 `RemoveCluster` cascades to the cluster's frontends and backends (c2cad338) and
 `ConfigState::diff` relies on it, emitting no removal for what the cascade takes; tiered after the
 adds, a moved route would then be added while its old frontend still held the key. `reconcile`
@@ -256,9 +256,10 @@ the PEM texts. The other way round the name falls back to Sōzu's default certif
 **cycle** (certificates swapping names) cannot all go first: the replaces on a cycle keep the JSON
 order among themselves, so one name on it can still fall back for that moment. This also makes
 the HashSet-ordered routing diff deterministic for golden snapshots. In debug builds
-`ConfigState::diff` replays its own output with an order-sensitive check that panics when a
-cluster gains a TCP frontend sorting before one it already holds (2.2.1 and 2.3.2) — keep that
-shape out of tests.
+`ConfigState::diff` replays its own output and checks the result; through 2.3.2 the check compared
+TCP frontends in `Vec` order and panicked when a cluster gained one sorting before one it already
+held, and since 2.3.3 it compares them as sets (upstream 6064279a), so the linked 2.3.6 accepts
+that shape.
 
 ### Gateway API (Phase 2)
 
@@ -329,23 +330,31 @@ while `add` appends and `remove` deletes. Empty Gateway `set`/`add` values are r
 `Accepted=False`, `UnsupportedValue`, because they would otherwise become deletions. Unsupported
 sub-fields (`RequestMirror`, for example) are reported, never half-applied. A `RequestRedirect`
 rule has no `backendRef` (the API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
-`Option<String>`. **`URLRewrite` is reported, not wired** — a *choice* for its path, an upstream
-bug for its hostname. Measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and 2.3.2
-([PROTOCOL.md §13](PROTOCOL.md), [docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also
-retired an earlier `408` result taken against 2.1.0. Two measured conditions gate any path
-wiring: a literal `$` in a rewrite value makes Sōzu **reject the frontend** (`$$` is no escape,
-and translation is all-or-nothing, so one such route fails every reconcile), and a literal
-`rewrite_path` **drops the query string** that `ReplaceFullPath` keeps — on a redirect too, so
-the wired `path.replaceFullPath` redirect drops it today. `$PATH[n]` indexes the path rule's
-capture groups, and today's `ir::PathMatch::sozu_rule` regexes have none, so `$PATH[1]` gets the
-frontend rejected. A capturing spelling of the non-root prefix regex,
+`Option<String>`. **`URLRewrite` is reported, not wired** — a *choice* for its path; its
+hostname was an upstream bug until 2.3.4. Measured on Sōzu 2.2.0 and re-measured unchanged on
+2.2.1, 2.3.2 and 2.3.6 but for `Host` ([PROTOCOL.md §13](PROTOCOL.md),
+[docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also retired an earlier `408` result
+taken against 2.1.0. Two measured conditions gate any path wiring: a literal `$` in a rewrite
+value makes Sōzu **reject the frontend** (`$$` is no escape, and translation is all-or-nothing,
+so one such route fails every reconcile), and a literal `rewrite_path` **drops the query
+string** that `ReplaceFullPath` keeps — on a redirect too, so the wired `path.replaceFullPath`
+redirect drops it today. That holds for the `Regex` rules emitted here; a `REGEX_PATH` rule
+(2.3.4, upstream 660ce27e) matches the path without its query and appends the original query to
+a rewritten path or redirect `Location` that has none of its own (measured on 2.3.6,
+[docs/probes/](docs/probes/) `regex-path_*`), but it needs a ≥ 2.3.4 data plane, changes every
+route key it replaces (`;Q` instead of `;R`), and a re-forked worker orders it against a `Regex`
+rule of the same hostname by key, not by insertion (#80: measured, a method-less `Regex` then
+wins), so it is not emitted. `$PATH[n]` indexes the path rule's capture groups, and today's
+`ir::PathMatch::sozu_rule` regexes have none, so `$PATH[1]` gets the frontend rejected. A
+capturing spelling of the non-root prefix regex,
 `^<esc>(?:(/)((?-u:[^?\n]*)))?((?:\?(?-u:.*))?)$` (the same language), yields boundary,
 remainder and query: it keeps the query and makes `ReplacePrefixMatch` expressible (measured),
 but is not wired. The root `/` must stay Sōzu's native `Prefix "/"`: a root regex competes with
-every other regex and the last added wins (measured). `URLRewrite.hostname` is blocked:
-`rewrite_host` sends **two** `Host:` lines to an HTTP/1 backend, which a Go backend answers `400`
-(measured on both versions). The translator already maps `ir::Rewrite`, so the builder side is
-the only piece missing.
+every other regex and the last added wins (measured). `URLRewrite.hostname` is no longer
+blocked: through 2.3.3 `rewrite_host` sent **two** `Host:` lines to an HTTP/1 backend, which a Go
+backend answers `400`; since 2.3.4 (upstream 026a1fb8) it sends one and the same Go backend
+answers `200` (measured on 2.3.2 and 2.3.6, `rewrite-host-go_*`). The translator already maps
+`ir::Rewrite`, so the builder side is the only piece missing.
 
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
 *required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no
@@ -470,7 +479,7 @@ changes.
   Wildcard-vs-exact overlap is not arbitrated.
 - **Tenant input Sōzu would reject is refused in the builder, with the calls Sōzu makes.** A
   `tls.key` is parsed and loaded the way Sōzu loads it (`rustls-pki-types` + the ring provider)
-  and paired with the leaf exactly as Sōzu 2.3.2 pairs it (`tls::build_validated_certificate`):
+  and paired with the leaf exactly as Sōzu 2.3.6 pairs it (`tls::build_validated_certificate`):
   `rustls::sign::CertifiedKey::keys_match` on the leaf DER from
   `sozu_command_lib::certificate::parse_pem`, accepting only `Ok` or `InconsistentKeys::Unknown`.
   Any leaf rustls-webpki cannot parse as an end-entity cert, or whose SubjectPublicKeyInfo differs
@@ -481,12 +490,13 @@ changes.
   HTTP keeps routing. **Every path rule that compiles to a
   regex** — a user `ImplementationSpecific`/`RegularExpression` pattern, and the anchored regex a
   non-root `Prefix` or an `Exact` becomes — is compiled with `regex::bytes::Regex::new` on the
-  `regex` version Sōzu 2.3.2 builds against, **twice**, bare and wrapped in `\A(?:…)\z`, as the
-  2.3.2 main process does before dispatch: the crate refuses a compiled program past 10 MiB (a
+  `regex` version Sōzu 2.3.6 builds against, **twice**, bare and wrapped in `\A(?:…)\z`, as the
+  2.3.6 main process does before dispatch: the crate refuses a compiled program past 10 MiB (a
   literal path of a few hundred kilobytes, which Kubernetes accepts, reaches it), and the wrapper
   alone can fail (`/a(?x)#comment`, nesting 248–249 deep); and **every frontend hostname** goes
-  through `idna::domain_to_ascii` on the `idna` version and Unicode data Sōzu 2.3.2 builds
-  against (`admit_hostname`; parity re-measured on 2.3.2),
+  through `idna::domain_to_ascii` on the `idna` version and Unicode data Sōzu 2.3.6 builds
+  against (`admit_hostname`; parity re-measured on 2.3.6, whose ICU4X 2.4 / Unicode 18 data
+  admits names 2.3.2 refuses and the reverse, pinned by canaries in the hostname tests),
   because Kubernetes checks only the RFC 1123 grammar and an A-label such as
   `xn--a.example.com` fails IDNA. It is checked on the name actually emitted, not per label:
   in a right-to-left domain `*.xn--4gbrim.example.com` fails while `a.xn--4gbrim.example.com`
@@ -520,7 +530,8 @@ changes.
   socket on each scrape — **`no_clusters` unless `--metrics-per-cluster`** (chart
   `metrics.perCluster`), because a worker whose per-cluster answer exceeds
   `max_command_buffer_size` requeues it forever and stops serving (measured on 2.2.1 and still
-  on 2.3.2, whose message is about 12% larger, [docs/probes/](docs/probes/)) —
+  on 2.3.2 and 2.3.6, whose message is about 12% larger, [docs/probes/](docs/probes/); the
+  upstream fix, #1931, is on Sōzu's main branch and in no release yet) —
   and rendering the returned `AggregatedMetrics` with the pure
   [`prometheus` crate](crates/prometheus), prefixed by the controller's own health signals
   (`sozu_gw_controller_*`, incl. the last-successful-reconcile timestamp — the staleness alert).
@@ -539,21 +550,25 @@ changes.
 
 ### Version pins (verified, do not bump casually)
 
-`sozu-command-lib` **2.3.2** (LGPL-3.0, pinned exactly) against Sōzu **2.3.2**, `kube` **4**, `k8s-openapi`
+`sozu-command-lib` **2.3.6** (LGPL-3.0, pinned exactly) against Sōzu **2.3.6**, `kube` **4**, `k8s-openapi`
 **0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
 **v1.6.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
 `kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
 rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
 
-The library and data-plane image are aligned at 2.3.2 and move together (an `image.sozu.tag`
-below 2.3.0 is documented unsupported, not refused). The ICU data, rustls 0.23.46 and
-rustls-pki-types 1.15.1 are held at Sōzu 2.3.2's versions by the lock (see the tenant-input
-bullet). The library redacts certificate and key material from `Debug`. The proto adds fields we
-leave unset (listener `interface`, `AddBackend.unix_path`, `Cluster` fields 17–23) and verbs
-60–75 we never send, but for frontend `header_predicates` and their verbs 66–69 (HTTPRoute header
-matches, above); `tier()` places the predicate verbs with the plain ones, and the `silent_close`
-and unix-backend verbs defensively. If the versions diverge again, verify that the wire format
-still agrees before upgrading either side.
+The library and data-plane image are aligned at 2.3.6 and move together (an `image.sozu.tag`
+below 2.3.4 is documented unsupported, not refused: 2.3.0–2.3.3 parse hostnames with Unicode 17
+data, so the builder would admit a name they refuse, measured in
+[docs/probes/](docs/probes/) `idna-hostnames_*`). The ICU4X data (2.4.0, Unicode 18), rustls
+0.23.46, rustls-webpki 0.103.16 and rustls-pki-types 1.15.1 are held at Sōzu 2.3.6's versions by
+the lock (see the tenant-input bullet). The library redacts certificate and key material from
+`Debug`. The proto adds fields we leave unset (listener `interface`,
+`HttpListenerConfig.h2c_prior_knowledge` (2.3.4), `AddBackend.unix_path`, `Cluster` fields
+17–23), a path rule kind we never send (`REGEX_PATH`, 2.3.4) and verbs 60–75 we never send, but
+for frontend `header_predicates` and their verbs 66–69 (HTTPRoute header matches, above);
+`tier()` places the predicate verbs with the plain ones, and the `silent_close` and unix-backend
+verbs defensively. If the versions diverge again, verify that the wire format still agrees before
+upgrading either side.
 
 What 2.3.x changed that this codebase depends on (upstream commits, first released in 2.3.0
 unless marked): `RemoveCluster` cascades (c2cad338) — re-expanded by the translator, see the diff
@@ -579,10 +594,27 @@ repeated UDP `ActivateListener` keeps live flows (7109e20a); SIGTERM soft-stops 
 the `preStop` hook stays for its delay, and `sozu shutdown -t` is inert on a soft stop); an HTTP
 connect timeout fails over to an untried backend and exhaustion answers 503 (e959838e — TCPRoute
 still closes the session); a UDP cluster's `max_connections_per_ip` becomes a per-source flow cap
-(99e6aee2 — the translator sends none on a UDP cluster). Unchanged on 2.3.2: the per-cluster
-`QueryMetrics` worker wedge, TCP half-close (no reply after a client `SHUT_WR`, upstream
-sozu#1840) and the rewrite/redirect/header-edit fields, all measured
-([docs/probes/](docs/probes/)); one-label wildcards (#82); no rule priority (#80).
+(99e6aee2 — the translator sends none on a UDP cluster).
+
+What 2.3.3–2.3.6 changed (the bump needed no source change): the debug-build replay check inside
+`ConfigState::diff` compares TCP frontends as sets (6064279a, 2.3.3), retiring the order panic
+above; `QueryClusters*`/`QueryCertificatesFromWorkers` answer `Failure` unless every worker
+answered (same commit; not sent here); hostnames are parsed with ICU4X 2.4 / Unicode 18 data
+(b3c946c6, 2.3.4), which the lock and the builder's canaries follow — hence the 2.3.4 floor
+above; `rewrite_host` and a request edit of `Host` reach an HTTP/1.1 backend as one `Host`, the
+edit replacing the authority (`:authority` on HTTP/2) unless `rewrite_host` is set, while
+deleting `Host` still removes nothing (026a1fb8, 2.3.4: what blocked `URLRewrite.hostname`); the
+`REGEX_PATH` rule kind and the `h2c_prior_knowledge` listener option (660ce27e, 2c3b43e3, 2.3.4,
+both unused, both measured; a 2.3.2 data plane refuses the first per frontend and fails to boot
+with the second in its TOML); and data-plane fixes with no controller side — large transfers no
+longer cut at the loop budget, per-peer timeouts (2.3.4), timed-out HTTP/2 backend connections
+and reset stream slots (2.3.5, security), the UDP PROXY v2 destination (2.3.6; never enabled
+here). Measured unchanged on 2.3.6 (records dated 2026-11-23): the per-cluster `QueryMetrics`
+worker wedge, TCP half-close (no reply after a client `SHUT_WR`, upstream sozu#1840, closed as
+not planned), the rewrite/redirect fields but for `Host`, owner eviction, the failed-batch
+replay, the certificate fallback and in-place name change, the SNI races, header predicates,
+h2c backends and TCP health checks; unchanged by reading: one-label wildcards (#82), no rule
+priority (#80), no native 500 (#78), per-connection backend selection (#79).
 
 ## Deployment model
 
@@ -590,7 +622,7 @@ Control plane (this repo) and data plane (Sōzu) are **separate processes/contai
 sharing the command socket via an `emptyDir` volume. Both run as the **same unprivileged uid
 (1000)** so they can share that socket. The Helm chart ([charts/sozu-gateway](charts/sozu-gateway))
 ships both containers, an `IngressClass`, RBAC, and Sōzu's `ConfigMap`. The Sōzu image is used
-as-is (`clevercloud/sozu:2.3.2`) because the release binary is musl-linked.
+as-is (`clevercloud/sozu:2.3.6`) because the release binary is musl-linked.
 
 Releases (`v*` tags) publish the controller image (`ghcr.io/clevercloud/sozu-gateway-controller`)
 and the Helm chart (`oci://ghcr.io/clevercloud/sozu-gateway`) via

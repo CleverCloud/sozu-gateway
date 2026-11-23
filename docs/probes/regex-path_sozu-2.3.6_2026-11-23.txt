@@ -1,0 +1,836 @@
+# regex_path_probe (ad hoc: a Rust example, crates/sozu-agent/examples/regex_path_probe.rs, built on 8923b4a; its source is not in this repository) against docker clevercloud/sozu:2.3.6, 2026-11-23
+== image clevercloud/sozu:2.3.6 (sozu 2.3.6 ()) sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841 +crypto-ring; probe built with sozu-command-lib =2.3.6 (cargo build --release -p sozu-gw-agent --example regex_path_probe)
+== run: docker run -d --network host --user 1000:1000 --log-opt max-size=20m -v <socket dir>:<same path> clevercloud/sozu:2.3.6 start -c <socket dir>/config.toml
+== config = deploy/sozu/config.toml at 8923b4a with only command_socket/pid_file_path moved under the bind-mounted socket dir and the listeners moved to http 127.0.0.1:32601 / https 127.0.0.1:32603 (2 workers, worker_automatic_restart)
+== env SOZU_SOCK=/home/vscode/.cache/wfprobe-p2/rp/sozu.sock PROBE_HTTP_BIND=127.0.0.1:32601 PROBE_HTTP_DIAL=127.0.0.1:32601 PROBE_BACKEND=127.0.0.1:32201 PROBE_REPEAT=8 PROBE_REPEAT_SIMPLE=2
+== frontends are raw RequestHttpFrontend (AddHttpFrontend / RemoveHttpFrontend) on one command channel, PathRule.kind 3 = REGEX_PATH, every one with a request header edit X-Front=<label> so the echo names the frontend that served; redirect frontends carry no cluster (as the controller emits them), redirect_scheme UseSame
+== client: the probe's own raw HTTP/1.1 over TCP, one connection per request (so with 2 workers each answer comes from either one); "xN" = N identical answers out of the repeat count; target bytes >= 0x80 are printed \xNN and sent raw
+== the same binary was run against clevercloud/sozu:2.3.2 in the same way for a baseline: regex-path_sozu-2.3.2_2026-11-23.txt (REGEX_PATH refused there; every REGEX/Prefix row of round 0 identical, 37/37)
+== sozu REGEX_PATH probe ==
+socket=/home/vscode/.cache/wfprobe-p2/rp/sozu.sock listener=127.0.0.1:32601 dial=127.0.0.1:32601 backend=127.0.0.1:32201 repeat(precedence)=8 repeat(other)=2
+PathRuleKind::RegexPath as i32 = 3 (Regex = 1, Prefix = 0, Equals = 2)
+workers: [1, 0]
+AddCluster rp-echo: Ok("Successfully applied request to all workers")
+AddBackend rp-echo-1 -> 127.0.0.1:32201: Ok("Successfully applied request to all workers")
+
+######## AddHttpFrontend answers, in the order sent ########
+
+=== (a) ^/api/v2$ as REGEX_PATH (a-q) vs REGEX (a-r) ===
+  add a-q.probe            a-q                        RegexPath "^/api/v2$" -> Ok "Successfully applied request to all workers"
+  add a-r.probe            a-r                        Regex "^/api/v2$" -> Ok "Successfully applied request to all workers"
+
+=== (b) element-boundary prefix /foo: path-only REGEX_PATH ^/foo(?:/(?-u:.*))?$ (b-q) vs today's REGEX ^/foo(?:[/?](?-u:.*))?$ (b-r) ===
+  add b-q.probe            b-q                        RegexPath "^/foo(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add b-r.probe            b-r                        Regex "^/foo(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+
+=== (c) Exact /v1: REGEX_PATH ^/v1$ (c-q) vs today's REGEX ^/v1(?:\?(?-u:.*))?$ (c-r) ===
+  add c-q.probe            c-q                        RegexPath "^/v1$" -> Ok "Successfully applied request to all workers"
+  add c-r.probe            c-r                        Regex "^/v1(?:\\?(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+
+=== (d) rewrite_path on the forwarding path ===
+  add d-lit-q.probe        d-lit-q                    RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-lit-r.probe        d-lit-r                    Regex "^/lit(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-ownq-q.probe       d-ownq-q                   RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-cap-q.probe        d-cap-q                    RegexPath "^/foo(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-cap-r.probe        d-cap-r                    Regex "^/foo(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-cap0-q.probe       d-cap0-q                   RegexPath "^/foo(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add d-nogroup-q.probe    d-nogroup-q                RegexPath "^/foo(?:/(?-u:.*))?$" -> FAILURE "could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=12"
+
+=== (e) the same rules under redirect=PERMANENT (scheme UseSame), one FOUND ===
+  add e-lit-q.probe        e-lit-q                    RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-lit-r.probe        e-lit-r                    Regex "^/lit(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-ownq-q.probe       e-ownq-q                   RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-cap-q.probe        e-cap-q                    RegexPath "^/foo(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-cap-r.probe        e-cap-r                    Regex "^/foo(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-found-q.probe      e-found-q                  RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add e-host-q.probe       e-host-q                   RegexPath "^/lit(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+
+=== (f) precedence on one hostname (labels name the frontend that served; listed in the order added) ===
+  add f-rq.probe           f-rq:1st-REGEX             Regex "^/p(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-rq.probe           f-rq:2nd-REGEX_PATH        RegexPath "^/p(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qr.probe           f-qr:1st-REGEX_PATH        RegexPath "^/p(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qr.probe           f-qr:2nd-REGEX             Regex "^/p(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-rr.probe           f-rr:1st-REGEX             Regex "^/p(?:[/?](?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-rr.probe           f-rr:2nd-REGEX             Regex "^/p(?:/(?-u:.*))?(?:\\?(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qq.probe           f-qq:1st-REGEX_PATH        RegexPath "^/p(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qq.probe           f-qq:2nd-REGEX_PATH        RegexPath "^/p(/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-pq.probe           f-pq:1st-Prefix/           Prefix "/" -> Ok "Successfully applied request to all workers"
+  add f-pq.probe           f-pq:2nd-REGEX_PATH        RegexPath "^/r(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qp.probe           f-qp:1st-REGEX_PATH        RegexPath "^/r(?:/(?-u:.*))?$" -> Ok "Successfully applied request to all workers"
+  add f-qp.probe           f-qp:2nd-Prefix/           Prefix "/" -> Ok "Successfully applied request to all workers"
+  add f-pqroot.probe       f-pqroot:1st-Prefix/       Prefix "/" -> Ok "Successfully applied request to all workers"
+  add f-pqroot.probe       f-pqroot:2nd-REGEX_PATH^/$ RegexPath "^/$" -> Ok "Successfully applied request to all workers"
+  add f-qproot.probe       f-qproot:1st-REGEX_PATH^/$ RegexPath "^/$" -> Ok "Successfully applied request to all workers"
+  add f-qproot.probe       f-qproot:2nd-Prefix/       Prefix "/" -> Ok "Successfully applied request to all workers"
+
+=== (g) invalid patterns: what the main process answers at AddHttpFrontend ===
+  add g-open-q.probe       g-open-q                   RegexPath "/a(" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=22"
+  add g-open-r.probe       g-open-r                   Regex "/a(" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=12"
+  add g-balance-q.probe    g-balance-q                RegexPath "/a)(b" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=24"
+  add g-balance-r.probe    g-balance-r                Regex "/a)(b" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=14"
+  add g-xcomment-q.probe   g-xcomment-q               RegexPath "/a(?x)#comment" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=33"
+  add g-xcomment-r.probe   g-xcomment-r               Regex "/a(?x)#comment" -> FAILURE "could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=23"
+  add g-qmark-q.probe      g-qmark-q                  RegexPath "^/a\\?x$" -> Ok "Successfully applied request to all workers"
+  add g-empty-q.probe      g-empty-q                  RegexPath "" -> Ok "Successfully applied request to all workers"
+
+=== (h) a REGEX_PATH frontend with a method, for the key spelling ===
+  add h-method-q.probe     h-method-q                 RegexPath "^/m$" method=GET -> Ok "Successfully applied request to all workers"
+
+######## round 0: as added (each worker fed in the order sent) ########
+
+=== (a) ^/api/v2$ as REGEX_PATH (a-q) vs REGEX (a-r) ===
+  a-q.probe /api/v2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2 HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2?x=1 HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2? HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-q.probe /api/v2/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2 HTTP/1.1 host=[a-r.probe] x-front=[a-r]
+  a-r.probe /api/v2?x=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2?
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (b) element-boundary prefix /foo: path-only REGEX_PATH ^/foo(?:/(?-u:.*))?$ (b-q) vs today's REGEX ^/foo(?:[/?](?-u:.*))?$ (b-r) ===
+  b-q.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/ HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/bar
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo?q=1 HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/bar?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar?q=1 HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foobar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo%2F
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo%2Fbar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo/\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo?q=\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/ HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/bar
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo?q=1 HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/bar?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar?q=1 HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foobar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo%2F
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo%2Fbar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo/\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo?q=\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (c) Exact /v1: REGEX_PATH ^/v1$ (c-q) vs today's REGEX ^/v1(?:\?(?-u:.*))?$ (c-r) ===
+  c-q.probe /v1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1 HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1?x=1 HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1? HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1%3Fx=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1 HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1?x=1 HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1? HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1%3Fx=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (d) rewrite_path on the forwarding path ===
+  d-lit-q.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-q.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?q=1 HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-q.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?q=1&y=2 HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-r.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-lit-r.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-lit-r.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-ownq-q.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?own=1 HTTP/1.1 host=[d-ownq-q.probe] x-front=[d-ownq-q]
+  d-ownq-q.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?own=1 HTTP/1.1 host=[d-ownq-q.probe] x-front=[d-ownq-q]
+  d-cap-q.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/x
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x?q=1 HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar?q=1 HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/\xff?q=1
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  d-cap-r.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo/x
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x?q=1 HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo?q=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  d-cap0-q.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /z/foo/x?q=1 HTTP/1.1 host=[d-cap0-q.probe] x-front=[d-cap0-q]
+  d-nogroup-q.probe /foo/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (e) the same rules under redirect=PERMANENT (scheme UseSame), one FOUND ===
+  e-lit-q.probe /lit
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new
+  e-lit-q.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new?q=1
+  e-lit-q.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new?q=1&y=2
+  e-lit-r.probe /lit
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-lit-r.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-lit-r.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-ownq-q.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-ownq-q.probe/new?own=1
+  e-cap-q.probe /foo
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar
+  e-cap-q.probe /foo/x
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar/x
+  e-cap-q.probe /foo/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar/x?q=1
+  e-cap-q.probe /foo?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar?q=1
+  e-cap-r.probe /foo/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-r.probe/bar/x?q=1
+  e-found-q.probe /lit/x?q=1
+     x2 HTTP/1.1 302 Found | Location: http://e-found-q.probe/new?q=1
+  e-host-q.probe /lit/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://example.org/lit/x?q=1
+
+=== (f) precedence on one hostname (labels name the frontend that served; listed in the order added) ===
+  f-rq.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+  f-rq.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+  f-rq.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+  f-qr.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-rr.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-rr.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-rr.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-qq.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+  f-qq.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+  f-qq.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+  f-pq.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:1st-Prefix/]
+  f-qp.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:2nd-Prefix/]
+  f-pqroot.probe /
+     x8 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:1st-Prefix/]
+  f-qproot.probe /
+     x8 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:2nd-Prefix/]
+  f-qproot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:1st-REGEX_PATH^/$]
+  f-qproot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:2nd-Prefix/]
+
+=== (g) invalid patterns: what the main process answers at AddHttpFrontend ===
+  g-qmark-q.probe /a?x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-qmark-q.probe /a
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-empty-q.probe /
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-empty-q.probe /?q=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (h) a REGEX_PATH frontend with a method, for the key spelling ===
+  h-method-q.probe /m
+     x2 HTTP/1.1 200 OK | body: request-line=GET /m HTTP/1.1 host=[h-method-q.probe] x-front=[h-method-q]
+  h-method-q.probe /m?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /m?x=1 HTTP/1.1 host=[h-method-q.probe] x-front=[h-method-q]
+
+######## (h) ListFrontends (main process), the probe's REGEX_PATH frontends and their REGEX twins ########
+main lists 38 HTTP frontends
+  host=a-q.probe kind=Ok(RegexPath) (i32 3) value="^/api/v2$" method=None
+     key(to_string)=127.0.0.1:32601;a-q.probe;Q^/api/v2$
+     PathRule Display=path-only regexp '^/api/v2$'
+  host=a-r.probe kind=Ok(Regex) (i32 1) value="^/api/v2$" method=None
+     key(to_string)=127.0.0.1:32601;a-r.probe;R^/api/v2$
+     PathRule Display=regexp '^/api/v2$'
+  host=b-q.probe kind=Ok(RegexPath) (i32 3) value="^/foo(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;b-q.probe;Q^/foo(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/foo(?:/(?-u:.*))?$'
+  host=b-r.probe kind=Ok(Regex) (i32 1) value="^/foo(?:[/?](?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;b-r.probe;R^/foo(?:[/?](?-u:.*))?$
+     PathRule Display=regexp '^/foo(?:[/?](?-u:.*))?$'
+  host=c-q.probe kind=Ok(RegexPath) (i32 3) value="^/v1$" method=None
+     key(to_string)=127.0.0.1:32601;c-q.probe;Q^/v1$
+     PathRule Display=path-only regexp '^/v1$'
+  host=c-r.probe kind=Ok(Regex) (i32 1) value="^/v1(?:\\?(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;c-r.probe;R^/v1(?:\?(?-u:.*))?$
+     PathRule Display=regexp '^/v1(?:\?(?-u:.*))?$'
+  host=d-cap-q.probe kind=Ok(RegexPath) (i32 3) value="^/foo(/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;d-cap-q.probe;Q^/foo(/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/foo(/(?-u:.*))?$'
+  host=d-cap0-q.probe kind=Ok(RegexPath) (i32 3) value="^/foo(/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;d-cap0-q.probe;Q^/foo(/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/foo(/(?-u:.*))?$'
+  host=d-lit-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;d-lit-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=d-ownq-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;d-ownq-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=e-cap-q.probe kind=Ok(RegexPath) (i32 3) value="^/foo(/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;e-cap-q.probe;Q^/foo(/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/foo(/(?-u:.*))?$'
+  host=e-found-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;e-found-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=e-host-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;e-host-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=e-lit-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;e-lit-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=e-ownq-q.probe kind=Ok(RegexPath) (i32 3) value="^/lit(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;e-ownq-q.probe;Q^/lit(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/lit(?:/(?-u:.*))?$'
+  host=f-pq.probe kind=Ok(RegexPath) (i32 3) value="^/r(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-pq.probe;Q^/r(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/r(?:/(?-u:.*))?$'
+  host=f-pqroot.probe kind=Ok(RegexPath) (i32 3) value="^/$" method=None
+     key(to_string)=127.0.0.1:32601;f-pqroot.probe;Q^/$
+     PathRule Display=path-only regexp '^/$'
+  host=f-qp.probe kind=Ok(RegexPath) (i32 3) value="^/r(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-qp.probe;Q^/r(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/r(?:/(?-u:.*))?$'
+  host=f-qproot.probe kind=Ok(RegexPath) (i32 3) value="^/$" method=None
+     key(to_string)=127.0.0.1:32601;f-qproot.probe;Q^/$
+     PathRule Display=path-only regexp '^/$'
+  host=f-qq.probe kind=Ok(RegexPath) (i32 3) value="^/p(/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-qq.probe;Q^/p(/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/p(/(?-u:.*))?$'
+  host=f-qq.probe kind=Ok(RegexPath) (i32 3) value="^/p(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-qq.probe;Q^/p(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/p(?:/(?-u:.*))?$'
+  host=f-qr.probe kind=Ok(RegexPath) (i32 3) value="^/p(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-qr.probe;Q^/p(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/p(?:/(?-u:.*))?$'
+  host=f-rq.probe kind=Ok(RegexPath) (i32 3) value="^/p(?:/(?-u:.*))?$" method=None
+     key(to_string)=127.0.0.1:32601;f-rq.probe;Q^/p(?:/(?-u:.*))?$
+     PathRule Display=path-only regexp '^/p(?:/(?-u:.*))?$'
+  host=g-empty-q.probe kind=Ok(RegexPath) (i32 3) value="" method=None
+     key(to_string)=127.0.0.1:32601;g-empty-q.probe;Q
+     PathRule Display=path-only regexp ''
+  host=g-qmark-q.probe kind=Ok(RegexPath) (i32 3) value="^/a\\?x$" method=None
+     key(to_string)=127.0.0.1:32601;g-qmark-q.probe;Q^/a\?x$
+     PathRule Display=path-only regexp '^/a\?x$'
+  host=h-method-q.probe kind=Ok(RegexPath) (i32 3) value="^/m$" method=Some("GET")
+     key(to_string)=127.0.0.1:32601;h-method-q.probe;Q^/m$;GET
+     PathRule Display=path-only regexp '^/m$'
+  key order of the f-* frontends as the main lists them:
+     127.0.0.1:32601;f-pq.probe;P/  [f-pq:1st-Prefix/]
+     127.0.0.1:32601;f-pq.probe;Q^/r(?:/(?-u:.*))?$  [f-pq:2nd-REGEX_PATH]
+     127.0.0.1:32601;f-pqroot.probe;P/  [f-pqroot:1st-Prefix/]
+     127.0.0.1:32601;f-pqroot.probe;Q^/$  [f-pqroot:2nd-REGEX_PATH^/$]
+     127.0.0.1:32601;f-qp.probe;P/  [f-qp:2nd-Prefix/]
+     127.0.0.1:32601;f-qp.probe;Q^/r(?:/(?-u:.*))?$  [f-qp:1st-REGEX_PATH]
+     127.0.0.1:32601;f-qproot.probe;P/  [f-qproot:2nd-Prefix/]
+     127.0.0.1:32601;f-qproot.probe;Q^/$  [f-qproot:1st-REGEX_PATH^/$]
+     127.0.0.1:32601;f-qq.probe;Q^/p(/(?-u:.*))?$  [f-qq:2nd-REGEX_PATH]
+     127.0.0.1:32601;f-qq.probe;Q^/p(?:/(?-u:.*))?$  [f-qq:1st-REGEX_PATH]
+     127.0.0.1:32601;f-qr.probe;Q^/p(?:/(?-u:.*))?$  [f-qr:1st-REGEX_PATH]
+     127.0.0.1:32601;f-qr.probe;R^/p(?:[/?](?-u:.*))?$  [f-qr:2nd-REGEX]
+     127.0.0.1:32601;f-rq.probe;Q^/p(?:/(?-u:.*))?$  [f-rq:2nd-REGEX_PATH]
+     127.0.0.1:32601;f-rq.probe;R^/p(?:[/?](?-u:.*))?$  [f-rq:1st-REGEX]
+     127.0.0.1:32601;f-rr.probe;R^/p(?:/(?-u:.*))?(?:\?(?-u:.*))?$  [f-rr:2nd-REGEX]
+     127.0.0.1:32601;f-rr.probe;R^/p(?:[/?](?-u:.*))?$  [f-rr:1st-REGEX]
+
+UpgradeWorker 0: status=0 "Upgrade successful:\n- finished soft stop of worker 0\n- finished activation of new worker 2"
+workers: [2, 1]
+
+######## round 1: 1 of 2 worker(s) re-forked from the main process state ########
+
+=== (f) precedence on one hostname (labels name the frontend that served; listed in the order added) ===
+  f-rq.probe /p
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+  f-rq.probe /p/x
+     x6 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+     x2 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+  f-rq.probe /p?q=1
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:2nd-REGEX_PATH]
+  f-qr.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-rr.probe /p
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-rr.probe /p/x
+     x4 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+     x4 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-rr.probe /p?q=1
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:2nd-REGEX]
+  f-qq.probe /p
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+  f-qq.probe /p/x
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+  f-qq.probe /p?q=1
+     x5 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:2nd-REGEX_PATH]
+     x3 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+  f-pq.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:1st-Prefix/]
+  f-qp.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:2nd-Prefix/]
+  f-pqroot.probe /
+     x8 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:1st-Prefix/]
+  f-qproot.probe /
+     x7 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:1st-REGEX_PATH^/$]
+     x1 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:2nd-Prefix/]
+  f-qproot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:1st-REGEX_PATH^/$]
+  f-qproot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:2nd-Prefix/]
+
+UpgradeWorker 1: status=0 "Upgrade successful:\n- finished soft stop of worker 1\n- finished activation of new worker 3"
+workers: [2, 3]
+
+######## round 2: 2 of 2 worker(s) re-forked from the main process state ########
+
+=== (f) precedence on one hostname (labels name the frontend that served; listed in the order added) ===
+  f-rq.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+  f-rq.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+  f-rq.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rq.probe] x-front=[f-rq:1st-REGEX]
+  f-qr.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-qr.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qr.probe] x-front=[f-qr:2nd-REGEX]
+  f-rr.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+  f-rr.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+  f-rr.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-rr.probe] x-front=[f-rr:1st-REGEX]
+  f-qq.probe /p
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+  f-qq.probe /p/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p/x HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+  f-qq.probe /p?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /p?q=1 HTTP/1.1 host=[f-qq.probe] x-front=[f-qq:1st-REGEX_PATH]
+  f-pq.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:2nd-REGEX_PATH]
+  f-pq.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-pq.probe] x-front=[f-pq:1st-Prefix/]
+  f-qp.probe /r
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r/x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r/x HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /r?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /r?q=1 HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:1st-REGEX_PATH]
+  f-qp.probe /other
+     x8 HTTP/1.1 200 OK | body: request-line=GET /other HTTP/1.1 host=[f-qp.probe] x-front=[f-qp:2nd-Prefix/]
+  f-pqroot.probe /
+     x8 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:2nd-REGEX_PATH^/$]
+  f-pqroot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-pqroot.probe] x-front=[f-pqroot:1st-Prefix/]
+  f-qproot.probe /
+     x8 HTTP/1.1 200 OK | body: request-line=GET / HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:1st-REGEX_PATH^/$]
+  f-qproot.probe /?q=1
+     x8 HTTP/1.1 200 OK | body: request-line=GET /?q=1 HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:1st-REGEX_PATH^/$]
+  f-qproot.probe /x
+     x8 HTTP/1.1 200 OK | body: request-line=GET /x HTTP/1.1 host=[f-qproot.probe] x-front=[f-qproot:2nd-Prefix/]
+
+######## every worker re-forked: the non-precedence sections again ########
+
+=== (a) ^/api/v2$ as REGEX_PATH (a-q) vs REGEX (a-r) ===
+  a-q.probe /api/v2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2 HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2?x=1 HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2? HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  a-q.probe /api/v2/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-q.probe /api/v2/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2 HTTP/1.1 host=[a-r.probe] x-front=[a-r]
+  a-r.probe /api/v2?x=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2?
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-r.probe /api/v2/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (b) element-boundary prefix /foo: path-only REGEX_PATH ^/foo(?:/(?-u:.*))?$ (b-q) vs today's REGEX ^/foo(?:[/?](?-u:.*))?$ (b-r) ===
+  b-q.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/ HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/bar
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo?q=1 HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foo/bar?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar?q=1 HTTP/1.1 host=[b-q.probe] x-front=[b-q]
+  b-q.probe /foobar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo%2F
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo%2Fbar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo/\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-q.probe /foo?q=\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/ HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/bar
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo?q=1 HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foo/bar?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /foo/bar?q=1 HTTP/1.1 host=[b-r.probe] x-front=[b-r]
+  b-r.probe /foobar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo%2F
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo%2Fbar
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo/\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  b-r.probe /foo?q=\xff
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (c) Exact /v1: REGEX_PATH ^/v1$ (c-q) vs today's REGEX ^/v1(?:\?(?-u:.*))?$ (c-r) ===
+  c-q.probe /v1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1 HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1?x=1 HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1? HTTP/1.1 host=[c-q.probe] x-front=[c-q]
+  c-q.probe /v1/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-q.probe /v1%3Fx=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1 HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1?x=1 HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1?
+     x2 HTTP/1.1 200 OK | body: request-line=GET /v1? HTTP/1.1 host=[c-r.probe] x-front=[c-r]
+  c-r.probe /v1/
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  c-r.probe /v1%3Fx=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (d) rewrite_path on the forwarding path ===
+  d-lit-q.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-q.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?q=1 HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-q.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?q=1&y=2 HTTP/1.1 host=[d-lit-q.probe] x-front=[d-lit-q]
+  d-lit-r.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-lit-r.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-lit-r.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten HTTP/1.1 host=[d-lit-r.probe] x-front=[d-lit-r]
+  d-ownq-q.probe /lit
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?own=1 HTTP/1.1 host=[d-ownq-q.probe] x-front=[d-ownq-q]
+  d-ownq-q.probe /lit?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /rewritten?own=1 HTTP/1.1 host=[d-ownq-q.probe] x-front=[d-ownq-q]
+  d-cap-q.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/x
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x?q=1 HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar?q=1 HTTP/1.1 host=[d-cap-q.probe] x-front=[d-cap-q]
+  d-cap-q.probe /foo/\xff?q=1
+     x2 HTTP/1.1 400 Bad Request | body: <html><head><meta charset='utf-8'><head><body>
+  d-cap-r.probe /foo
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo/x
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /bar/x?q=1 HTTP/1.1 host=[d-cap-r.probe] x-front=[d-cap-r]
+  d-cap-r.probe /foo?q=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  d-cap0-q.probe /foo/x?q=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /z/foo/x?q=1 HTTP/1.1 host=[d-cap0-q.probe] x-front=[d-cap0-q]
+  d-nogroup-q.probe /foo/x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (e) the same rules under redirect=PERMANENT (scheme UseSame), one FOUND ===
+  e-lit-q.probe /lit
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new
+  e-lit-q.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new?q=1
+  e-lit-q.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-q.probe/new?q=1&y=2
+  e-lit-r.probe /lit
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-lit-r.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-lit-r.probe /lit/x?q=1&y=2
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-lit-r.probe/new
+  e-ownq-q.probe /lit?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-ownq-q.probe/new?own=1
+  e-cap-q.probe /foo
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar
+  e-cap-q.probe /foo/x
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar/x
+  e-cap-q.probe /foo/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar/x?q=1
+  e-cap-q.probe /foo?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-q.probe/bar?q=1
+  e-cap-r.probe /foo/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://e-cap-r.probe/bar/x?q=1
+  e-found-q.probe /lit/x?q=1
+     x2 HTTP/1.1 302 Found | Location: http://e-found-q.probe/new?q=1
+  e-host-q.probe /lit/x?q=1
+     x2 HTTP/1.1 301 Moved Permanently | Location: http://example.org/lit/x?q=1
+
+=== (g) invalid patterns: what the main process answers at AddHttpFrontend ===
+  g-qmark-q.probe /a?x
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-qmark-q.probe /a
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-empty-q.probe /
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  g-empty-q.probe /?q=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+
+=== (h) a REGEX_PATH frontend with a method, for the key spelling ===
+  h-method-q.probe /m
+     x2 HTTP/1.1 200 OK | body: request-line=GET /m HTTP/1.1 host=[h-method-q.probe] x-front=[h-method-q]
+  h-method-q.probe /m?x=1
+     x2 HTTP/1.1 200 OK | body: request-line=GET /m?x=1 HTTP/1.1 host=[h-method-q.probe] x-front=[h-method-q]
+
+######## (i) removal of a-q.probe (REGEX_PATH ^/api/v2$) ########
+  RemoveHttpFrontend naming kind Regex (same value): Err("could not apply request on the main process state: Did not find HttpFrontend with address or id_bytes=36")
+  a-q.probe /api/v2
+     x2 HTTP/1.1 200 OK | body: request-line=GET /api/v2 HTTP/1.1 host=[a-q.probe] x-front=[a-q]
+  RemoveHttpFrontend naming kind RegexPath: Ok("Successfully applied request to all workers")
+  a-q.probe /api/v2
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  a-q.probe /api/v2?x=1
+     x2 HTTP/1.1 404 Not Found | body: <html><head><meta charset='utf-8'><head><body>
+  main still lists 0 frontend(s) for a-q.probe
+
+== done ==
+== probe exit 0
+
+== sozu CLI inside the container: sozu -c <config> frontend list --http (main process, after the probe ended; a-q.probe removed by (i))
+Logs will be sent to stdout
+Access logs will be sent to None
+Success: Successfully listed frontends
+┌─────────────────┬─────────────────┬──────────────────┬───────────────────────────────────────────────────────────────────────┬─────────────┬──────────┬───────────────────┬──────┐
+│ HTTP frontends  │                 │                  │                                                                       │             │          │                   │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ cluster_id      │ address         │ hostname         │ path                                                                  │ method      │ position │ header_predicates │ tags │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ a-r.probe        │ PathRule { kind: Regex, value: "^/api/v2$" }                          │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ b-q.probe        │ PathRule { kind: RegexPath, value: "^/foo(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ b-r.probe        │ PathRule { kind: Regex, value: "^/foo(?:[/?](?-u:.*))?$" }            │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ c-q.probe        │ PathRule { kind: RegexPath, value: "^/v1$" }                          │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ c-r.probe        │ PathRule { kind: Regex, value: "^/v1(?:\\?(?-u:.*))?$" }              │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-cap-q.probe    │ PathRule { kind: RegexPath, value: "^/foo(/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-cap-r.probe    │ PathRule { kind: Regex, value: "^/foo(/(?-u:.*))?$" }                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-cap0-q.probe   │ PathRule { kind: RegexPath, value: "^/foo(/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-lit-q.probe    │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-lit-r.probe    │ PathRule { kind: Regex, value: "^/lit(?:[/?](?-u:.*))?$" }            │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ d-ownq-q.probe   │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-cap-q.probe    │ PathRule { kind: RegexPath, value: "^/foo(/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-cap-r.probe    │ PathRule { kind: Regex, value: "^/foo(/(?-u:.*))?$" }                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-found-q.probe  │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-host-q.probe   │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-lit-q.probe    │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-lit-r.probe    │ PathRule { kind: Regex, value: "^/lit(?:[/?](?-u:.*))?$" }            │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ Deny            │ 127.0.0.1:32601 │ e-ownq-q.probe   │ PathRule { kind: RegexPath, value: "^/lit(?:/(?-u:.*))?$" }           │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-pq.probe       │ PathRule { kind: Prefix, value: "/" }                                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-pq.probe       │ PathRule { kind: RegexPath, value: "^/r(?:/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-pqroot.probe   │ PathRule { kind: Prefix, value: "/" }                                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-pqroot.probe   │ PathRule { kind: RegexPath, value: "^/$" }                            │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qp.probe       │ PathRule { kind: Prefix, value: "/" }                                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qp.probe       │ PathRule { kind: RegexPath, value: "^/r(?:/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qproot.probe   │ PathRule { kind: Prefix, value: "/" }                                 │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qproot.probe   │ PathRule { kind: RegexPath, value: "^/$" }                            │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qq.probe       │ PathRule { kind: RegexPath, value: "^/p(/(?-u:.*))?$" }               │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qq.probe       │ PathRule { kind: RegexPath, value: "^/p(?:/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qr.probe       │ PathRule { kind: RegexPath, value: "^/p(?:/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-qr.probe       │ PathRule { kind: Regex, value: "^/p(?:[/?](?-u:.*))?$" }              │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-rq.probe       │ PathRule { kind: RegexPath, value: "^/p(?:/(?-u:.*))?$" }             │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-rq.probe       │ PathRule { kind: Regex, value: "^/p(?:[/?](?-u:.*))?$" }              │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-rr.probe       │ PathRule { kind: Regex, value: "^/p(?:/(?-u:.*))?(?:\\?(?-u:.*))?$" } │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ f-rr.probe       │ PathRule { kind: Regex, value: "^/p(?:[/?](?-u:.*))?$" }              │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ g-empty-q.probe  │ PathRule { kind: RegexPath, value: "" }                               │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ g-qmark-q.probe  │ PathRule { kind: RegexPath, value: "^/a\\?x$" }                       │ None        │ 2        │ 0                 │      │
+├─────────────────┼─────────────────┼──────────────────┼───────────────────────────────────────────────────────────────────────┼─────────────┼──────────┼───────────────────┼──────┤
+│ rp-echo         │ 127.0.0.1:32601 │ h-method-q.probe │ PathRule { kind: RegexPath, value: "^/m$" }                           │ Some("GET") │ 2        │ 0                 │      │
+└─────────────────┴─────────────────┴──────────────────┴───────────────────────────────────────────────────────────────────────┴─────────────┴──────────┴───────────────────┴──────┘
+== sozu log: ERROR/WARN lines
+2026-11-23T09:49:04.885373Z 1795427344885373304 1 ERROR MAIN	could not apply request on the main process state: Could not parse path rewrite, rewrite_path_bytes=12
+2026-11-23T09:49:04.899075Z 1795427344899075729 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=22
+2026-11-23T09:49:04.899266Z 1795427344899266589 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=12
+2026-11-23T09:49:04.899348Z 1795427344899348857 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=24
+2026-11-23T09:49:04.899413Z 1795427344899413343 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=14
+2026-11-23T09:49:04.899556Z 1795427344899556348 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=33
+2026-11-23T09:49:04.899650Z 1795427344899650147 1 ERROR MAIN	could not apply request on the main process state: Could not parse rule from frontend path, path_bytes=23
+2026-11-23T09:49:11.327311Z 1795427351327311399 1 ERROR MAIN	could not apply request on the main process state: Did not find HttpFrontend with address or id_bytes=36

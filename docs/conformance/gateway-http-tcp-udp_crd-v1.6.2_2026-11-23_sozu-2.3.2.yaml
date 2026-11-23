@@ -1,0 +1,121 @@
+apiVersion: gateway.networking.k8s.io/v1
+date: "2026-11-23T10:53:03Z"
+gatewayAPIChannel: standard
+gatewayAPIVersion: v1.6.2
+implementation:
+  contact:
+  - https://github.com/CleverCloud/sozu-gateway/issues
+  organization: clevercloud
+  project: sozu-gateway
+  url: https://github.com/CleverCloud/sozu-gateway
+  version: 2fb8cfceb92374f6ff2eea498adb9def3864a20e (clevercloud/sozu:2.3.2)
+kind: ConformanceReport
+mode: default
+profiles:
+- core:
+    failedTests:
+    - UDPRouteWeightedRouting
+    result: failure
+    statistics:
+      Failed: 1
+      Passed: 19
+      Skipped: 0
+  name: GATEWAY-UDP
+  summary: Core tests failed with 1 test failures.
+- core:
+    failedTests:
+    - HTTPRouteHeaderMatching
+    - HTTPRouteHostnameIntersection
+    - HTTPRouteInvalidBackendRefUnknownKind
+    - HTTPRouteInvalidCrossNamespaceBackendRef
+    - HTTPRouteInvalidNonExistentBackendRef
+    - HTTPRouteInvalidReferenceGrant
+    - HTTPRouteListenerHostnameMatching
+    - HTTPRouteMatching
+    - HTTPRouteMultipleGateways
+    - HTTPRouteNoBackendRefs
+    - HTTPRoutePartiallyInvalidViaInvalidReferenceGrant
+    - HTTPRoutePathMatchOrder
+    - HTTPRouteReferenceGrant
+    - HTTPRouteWeight
+    result: failure
+    statistics:
+      Failed: 14
+      Passed: 23
+      Skipped: 0
+  extended:
+    failedTests:
+    - HTTPRouteMethodMatching
+    result: failure
+    statistics:
+      Failed: 1
+      Passed: 2
+      Skipped: 0
+    supportedFeatures:
+    - HTTPRouteMethodMatching
+    - HTTPRouteResponseHeaderModification
+    - HTTPRouteSchemeRedirect
+    unsupportedFeatures:
+    - BackendTLSPolicy
+    - BackendTLSPolicySANValidation
+    - GatewayAddressEmpty
+    - GatewayBackendClientCertificate
+    - GatewayFrontendClientCertificateValidation
+    - GatewayFrontendClientCertificateValidationInsecureFallback
+    - GatewayHTTPListenerIsolation
+    - GatewayHTTPSListenerDetectMisdirectedRequests
+    - GatewayInfrastructurePropagation
+    - GatewayPort8080
+    - GatewayStaticAddresses
+    - HTTPRoute303RedirectStatusCode
+    - HTTPRoute307RedirectStatusCode
+    - HTTPRoute308RedirectStatusCode
+    - HTTPRouteBackendProtocolH2C
+    - HTTPRouteBackendProtocolWebSocket
+    - HTTPRouteBackendRequestHeaderModification
+    - HTTPRouteBackendTimeout
+    - HTTPRouteCORS
+    - HTTPRouteDestinationPortMatching
+    - HTTPRouteHostRewrite
+    - HTTPRouteNamedRouteRule
+    - HTTPRouteParentRefPort
+    - HTTPRoutePathRedirect
+    - HTTPRoutePathRewrite
+    - HTTPRoutePortRedirect
+    - HTTPRouteQueryParamMatching
+    - HTTPRouteRequestMirror
+    - HTTPRouteRequestMultipleMirrors
+    - HTTPRouteRequestPercentageMirror
+    - HTTPRouteRequestTimeout
+    - HTTPRouteRetry
+    - HTTPRouteRetryBackendTimeout
+    - HTTPRouteRetryConnectionError
+    - ListenerSet
+  name: GATEWAY-HTTP
+  summary: Core tests failed with 14 test failures. Extended tests failed with 1 test
+    failures.
+- core:
+    failedTests:
+    - TCPRouteInvalidNonTCPListener
+    - TCPRouteWeightedRouting
+    result: failure
+    statistics:
+      Failed: 2
+      Passed: 17
+      Skipped: 0
+  name: GATEWAY-TCP
+  summary: Core tests failed with 2 test failures.
+succeededProvisionalTests:
+- TCPRouteInvalidBackendRefNonexistent
+- TCPRouteInvalidCrossNamespaceBackendRef
+- TCPRouteParentRefAttachAll
+- TCPRouteParentRefPortAndSectionName
+- TCPRouteReferenceGrant
+- UDPRoute
+- UDPRouteInvalidBackendRefNonexistent
+- UDPRouteInvalidCrossNamespaceBackendRef
+- UDPRouteMultipleRoutesAttachment
+- UDPRouteNotAllowedByListeners
+- UDPRouteParentRefAttachAllListeners
+- UDPRouteParentRefPortAndSectionName
+- UDPRouteReferenceGrant

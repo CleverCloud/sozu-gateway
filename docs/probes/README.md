@@ -41,6 +41,11 @@ with grpc-go 1.75.0 clients, curl and Python — that is not in this repository.
 Each file's header says how it was run and what each host or cluster name in it
 stands for; the raw output follows it verbatim.
 
+So are the records marked *ad hoc* in the table below (`rewrite-host-go`, `regex-path`,
+`h2c-prior-knowledge`): Rust examples built on the repository at the commit their header names,
+whose source is not in this repository, for features this controller does not use yet. The
+`idna-hostnames` record drives Sōzu's own CLI; its header holds the method.
+
 | Probe | Question |
 | ----- | -------- |
 | `grpc-backend-changes` (out of tree) | Whether open gRPC streams survive a backend's GOAWAY (GracefulStop) or its removal from the cluster, and whether RPCs are balanced per RPC or per client connection — see [Upgrading](../UPGRADING.md#a-service-port-declaring-kubernetesioh2c-gets-http2) |
@@ -78,3 +83,8 @@ run.
 | TCP half-close (no example; the method is in each record) | 2.2.0, 2.2.1 | [tcp-half-close_2026-09-10.md](tcp-half-close_2026-09-10.md) |
 | TCP half-close (local docker, Python client) | 2.3.2 | [tcp-half-close_sozu-2.3.2_2026-10-19.txt](tcp-half-close_sozu-2.3.2_2026-10-19.txt) |
 | Container restart detection | 2.2.1 | [restart-generation_2026-09-10.md](restart-generation_2026-09-10.md) |
+| Every in-tree probe above, re-run for the 2.3.6 bump (each record compares itself with its 2.3.2 one) | 2.3.6 | [metrics-no-clusters](metrics-no-clusters_sozu-2.3.6_2026-11-23.txt), [tcp-half-close](tcp-half-close_sozu-2.3.6_2026-11-23.txt), [health-check](health-check_sozu-2.3.6_2026-11-23.txt), [owner-eviction](owner-eviction_sozu-2.3.6_2026-11-23.txt), [partial-apply](partial-apply_sozu-2.3.6_2026-11-23.txt), [replace-certificate-fallback](replace-certificate-fallback_sozu-2.3.6_2026-11-23.txt), [sni-ownership](sni-ownership_sozu-2.3.6_2026-11-23.txt), [sni-ownership-race](sni-ownership-race_sozu-2.3.6_2026-11-23.txt), [header-matches](header-matches_sozu-2.3.6_2026-11-23.txt) (with a [2.3.2 control](header-matches_sozu-2.3.2_2026-11-23.txt) of the same binary), [h2c-backend](h2c-backend_sozu-2.3.6_2026-11-23.txt), [rewrite-redirect](rewrite-redirect_sozu-2.3.6_2026-11-23.txt) |
+| Hostname IDNA verdicts across the ICU4X 2.4 / Unicode 18 data move (Sōzu's own CLI) | 2.3.2, 2.3.6 | [idna-hostnames_sozu-2.3.2-vs-2.3.6_2026-11-23.txt](idna-hostnames_sozu-2.3.2-vs-2.3.6_2026-11-23.txt) |
+| `rewrite_host` and `Host` edits to a Go `net/http` backend over HTTP/1.1 and h2c (ad hoc) | 2.3.2, 2.3.6 | [rewrite-host-go_sozu-2.3.2_2026-11-23.txt](rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [rewrite-host-go_sozu-2.3.6_2026-11-23.txt](rewrite-host-go_sozu-2.3.6_2026-11-23.txt) |
+| The 2.3.4 `REGEX_PATH` rule kind: matching, rewrites, redirects, precedence, re-fork replay, refusals, route key (ad hoc) | 2.3.2, 2.3.6 | [regex-path_sozu-2.3.2_2026-11-23.txt](regex-path_sozu-2.3.2_2026-11-23.txt), [regex-path_sozu-2.3.6_2026-11-23.txt](regex-path_sozu-2.3.6_2026-11-23.txt) |
+| The 2.3.4 `h2c_prior_knowledge` HTTP listener option (ad hoc) | 2.3.2, 2.3.6 | [h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt](h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt), [h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt](h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt) |

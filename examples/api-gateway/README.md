@@ -17,8 +17,9 @@ installed in the cluster. Hosts are fictional — reach them with a `Host` heade
 Honesty notes baked into the examples: a `RequestRedirect` rule carries no
 `backendRef`; a redirect `path` target drops the request's query string;
 `URLRewrite` is reported rather than half-applied — its path is measured
-expressible but not wired, its `hostname` blocked by Sōzu sending two `Host`
-lines (Sōzu 2.2.0, re-measured on 2.2.1 and 2.3.2), see
+expressible but not wired, and its `hostname`, blocked through Sōzu 2.3.3 by
+two `Host` lines, is not wired either (Sōzu 2.2.0, re-measured on 2.2.1, 2.3.2
+and 2.3.6), see
 [docs/E2E-RESULTS.md §5c](../../docs/E2E-RESULTS.md).
 
 Each file's header comment carries the exact `curl` to verify it. Apply one with:

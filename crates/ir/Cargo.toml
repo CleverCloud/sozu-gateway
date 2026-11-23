@@ -13,7 +13,7 @@ serde = { workspace = true }
 
 [dev-dependencies]
 # The equivalence test compiles each generated rule the way Sōzu does, on the
-# `regex` version Sōzu 2.3.2 builds against (the same as 2.2.1's; pinned in the
+# `regex` version Sōzu 2.3.6 builds against (the same as 2.2.1's; pinned in the
 # lock, see the builder's manifest).
 regex = "1"
 # The write side of the shadow's backward compatibility (an empty

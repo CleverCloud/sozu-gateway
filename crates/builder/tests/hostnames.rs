@@ -1,7 +1,7 @@
 //! Hostnames Sōzu's router cannot parse are refused per object.
 //!
 //! Kubernetes validates an Ingress host and a Gateway API `Hostname` against
-//! the RFC 1123 label grammar only. Sōzu (2.3.2, as 2.2.1 did) also runs every
+//! the RFC 1123 label grammar only. Sōzu (2.3.6, as 2.2.1 did) also runs every
 //! frontend hostname through `idna::domain_to_ascii` and rejects the whole request when
 //! it fails, which (translation being all-or-nothing) fails every reconcile of
 //! the shared instance. These tests pin that such a name is reported on the
@@ -18,8 +18,8 @@ use sozu_gw_builder::{build, BuildConfig, BuildOutput, Inputs, Problem};
 use sozu_gw_gateway_api::{Gateway, GatewayClass, HttpRoute};
 use sozu_gw_ir as ir;
 
-/// Names Sōzu refuses ("parsing hostname failed"; measured on 2.2.1, the same
-/// on 2.3.2), each for a different
+/// Names Sōzu 2.3.6 refuses ("parsing hostname failed"; measured, and all but
+/// the last refused on 2.2.1 and 2.3.2 too), each for a different
 /// IDNA reason, although the apiserver admits every one of them.
 const REFUSED: &[&str] = &[
     // Punycode that decodes to nothing valid.
@@ -32,15 +32,23 @@ const REFUSED: &[&str] = &[
     "0.xn--4gbrim.example.com",
     // So does the `*` label itself.
     "*.xn--4gbrim.example.com",
+    // U+05D0 U+1B3A: a right-to-left label holding a Balinese vowel sign,
+    // whose Bidi_Class is NSM through Unicode 17 and L in 18. Refused only
+    // with Unicode 18 data (ICU4X 2.4, Sōzu ≥ 2.3.4; 2.3.2 accepts it).
+    "xn--4db870i.example.com",
 ];
 
-/// Names Sōzu parses (2.2.1 and 2.3.2), including a valid A-label and a plain label in a
-/// right-to-left domain.
+/// Names Sōzu 2.3.6 parses (measured, and all but the last on 2.2.1 and 2.3.2
+/// too), including a valid A-label and a plain label in a right-to-left domain.
 const ACCEPTED: &[&str] = &[
     "good.example.com",
     "*.example.com",
     "xn--bcher-kva.example.com",
     "a.xn--4gbrim.example.com",
+    // U+18E00, assigned in Unicode 18: accepted only with Unicode 18 data
+    // (ICU4X 2.4, Sōzu ≥ 2.3.4; 2.3.2 refuses it). This and the RTL name in
+    // REFUSED fail if the IDNA data stops matching the data plane's.
+    "xn--pc7f.example.com",
 ];
 
 fn from_json<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {

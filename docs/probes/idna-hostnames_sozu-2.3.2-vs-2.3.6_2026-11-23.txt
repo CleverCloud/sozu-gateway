@@ -1,0 +1,51 @@
+# Hostname IDNA verdicts of Sōzu 2.3.2 and 2.3.6, docker clevercloud/sozu, 2026-11-23
+# Question: does the ICU4X data move in Sōzu 2.3.4 (icu_* 2.3.0 -> 2.4.0, Unicode 17 -> 18, upstream
+# b3c946c6) change which frontend hostnames the main process accepts, as an exhaustive
+# `idna::domain_to_ascii` diff over both data sets predicted? Every name in
+# crates/builder/tests/hostnames.rs is re-checked on both versions too.
+# Method: a fresh `docker run --network host --user 1000:1000 clevercloud/sozu:<v> start` per version,
+# 1 worker, one HTTP listener on 127.0.0.1:35080, the socket directory bind-mounted from the host; one
+# `sozu cluster add --id c --load-balancing-policy round_robin`, then one
+# `sozu frontend http add --address 127.0.0.1:35080 --hostname <name> id c` per name, through the
+# image's own CLI (`docker exec`). Each line is the name and the CLI's output, its log banner kept.
+# Images: clevercloud/sozu:2.3.2 @sha256:273fc58803618c3707f817ca772ca537714f22fcb10416f263246352b47ca7e3,
+#         clevercloud/sozu:2.3.6 @sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841.
+# Names: U+18E00 (xn--pc7f, Jurchen), U+12550 (xn--zg5d), U+1DB00 (xn--wf3h) are unassigned in Unicode 17
+# and assigned in 18; xn--4db870i is U+05D0 U+1B3A and xn--mgb409h is U+0627 U+1B3A, a right-to-left label
+# holding a Balinese vowel sign whose Bidi_Class moves from NSM to L in Unicode 18. The rest are the
+# fixtures of hostnames.rs and of the builder's hostname_tests.
+
+== clevercloud/sozu:2.3.2 (clevercloud/sozu@sha256:273fc58803618c3707f817ca772ca537714f22fcb10416f263246352b47ca7e3)
+cluster: No content
+xn--pc7f.example.com           Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--zg5d.example.com           Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--wf3h.example.com           Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--4db870i.example.com        Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--mgb409h.example.com        Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--a.example.com              Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+xn--zz.x.com                   Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+*.xn--a.example.com            Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+0.xn--4gbrim.example.com       Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+*.xn--4gbrim.example.com       Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--.example.com               Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+good.example.com               Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+*.example.com                  Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--bcher-kva.example.com      Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+a.xn--4gbrim.example.com       Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+== clevercloud/sozu:2.3.6 (clevercloud/sozu@sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841)
+cluster: No content
+xn--pc7f.example.com           Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--zg5d.example.com           Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--wf3h.example.com           Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--4db870i.example.com        Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--mgb409h.example.com        Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=2
+xn--a.example.com              Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+xn--zz.x.com                   Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+*.xn--a.example.com            Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+0.xn--4gbrim.example.com        Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=24  Error: Cli(Failure("could not apply request on the main pr
+*.xn--4gbrim.example.com        Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=24  Error: Cli(Failure("could not apply request on the main pr
+xn--.example.com               Logs will be sent to stdout Access logs will be sent to None  Request failed: could not apply request on the main process state: parsing hostname failed, hostname_bytes=1
+good.example.com               Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+*.example.com                  Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+xn--bcher-kva.example.com      Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 
+a.xn--4gbrim.example.com       Logs will be sent to stdout Access logs will be sent to None Success: Successfully applied request to all workers No content 

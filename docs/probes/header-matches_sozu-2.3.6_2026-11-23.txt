@@ -1,0 +1,521 @@
+# header_match_probe against docker clevercloud/sozu:2.3.6 (config.toml: 2 workers, automatic restart), 2026-11-23
+# Image: clevercloud/sozu:2.3.6, sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841 (`sozu 2.3.6`, +crypto-ring).
+# Sōzu: docker run -d --network host --user 1000:1000 --log-opt max-size=20m, socket directory bind-mounted from the
+# host at /run/sozu; config = deploy/sozu/config.toml at 8923b4a (2 workers, worker_automatic_restart, buffer_size
+# 16_393, connect_timeout 2, Sōzu's default front/back/request timeouts) with its two listeners replaced by HTTP
+# 0.0.0.0:34081..34084 and 0.0.0.0:34086..34090 and HTTPS 0.0.0.0:34085 (PROBE_LISTEN_BASE 34081; the 2.3.2 record
+# used base 29381, so its 0.0.0.0:2938x/29390 are 0.0.0.0:3408x/34090 here).
+# Backends: v1/v2/v3 on 127.0.0.1:34091..34093, each answering `backend=<name>` with Connection: close
+# (python3.12 name_backends.py, an ad hoc server not in this repository).
+# Probe: source 8923b4a (sozu-command-lib =2.3.6), `cargo build --release -p sozu-gw-agent --example header_match_probe`,
+# run as SOZU_SOCK=<run>/sozu.sock PROBE_LISTEN_BASE=34081
+# PROBE_BACKENDS=v1=127.0.0.1:34091,v2=127.0.0.1:34092,v3=127.0.0.1:34093 (PROBE_REPEAT default 12).
+# The builder at 8923b4a is not the one the 2026-10-19 2.3.2 record ran: its route problems carry `header_match` and
+# `copy_of`, it skips other header matches (HeaderMatchOverlap on `header-matching`; 50 frontends / 25 predicated, not
+# 51 / 26) and the probe labels skipped cases differently, so the route lines, the IR count and the hm/m verdicts that
+# follow from them differ from that record for that reason. header-matches_sozu-2.3.2_2026-11-23.txt is this binary
+# against Sōzu 2.3.2: every verdict and round total there equals this run's.
+
+== header match probe: HTTPRoutes -> builder -> translator -> agent -> Sōzu
+route header-matching: accepted=true (Accepted) problems=[HeaderMatchOverlap { hostname: "*", header_match: "prefix / with version=\"two\"", route: "HTTPRoute gateway-conformance-infra/header-matching (prefix / with color=\"orange\", version=\"two\")", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }, HeaderMatchOverlap { hostname: "*", header_match: "prefix / with color=\"red\"", route: "HTTPRoute gateway-conformance-infra/header-matching (prefix / with version=\"one\")", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }, HeaderMatchOverlap { hostname: "*", header_match: "prefix / with color=\"yellow\"", route: "HTTPRoute gateway-conformance-infra/header-matching (prefix / with version=\"one\")", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }]
+route hostless-pla: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "*", header_match: "prefix / with x-canary=\"1\"", route: "prefix /api", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }]
+route hostless-plz: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "*", header_match: "prefix / with x-canary=\"1\"", route: "prefix /api", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }]
+route matching: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "*", header_match: "prefix / with version=\"one\"", route: "prefix /v2", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }]
+route matching-part1: accepted=true (Accepted) problems=[]
+route method-matching: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "*", header_match: "prefix / with version=\"four\"", route: "GET prefix /path1", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }, HeaderMatchOutranksRoute { hostname: "*", header_match: "PUT prefix / with version=\"one\"", route: "prefix /path5", copy_of: None, reason: "on a route without hostnames Sōzu serves the first matching header-matched frontend it holds, in an order this controller does not set" }]
+route nma: accepted=true (Accepted) problems=[]
+route nmz: accepted=true (Accepted) problems=[]
+route npa: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "npa.test", header_match: "prefix /api with x-canary=\"1\"", route: "prefix /api/v2", copy_of: None, reason: "Sōzu serves whichever of two method-less path regexes it holds last" }]
+route npz: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "npz.test", header_match: "prefix /api with x-canary=\"1\"", route: "prefix /api/v2", copy_of: None, reason: "Sōzu serves whichever of two method-less path regexes it holds last" }]
+route rea: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "rea.test", header_match: "prefix / with x-canary=\"1\"", route: "exact /", copy_of: None, reason: "on the target `/` Sōzu serves whichever of a path regex and the root prefix it holds last" }]
+route rez: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "rez.test", header_match: "prefix / with x-canary=\"1\"", route: "exact /", copy_of: None, reason: "on the target `/` Sōzu serves whichever of a path regex and the root prefix it holds last" }]
+route rga: accepted=true (Accepted) problems=[]
+route rgz: accepted=true (Accepted) problems=[]
+route rla: accepted=true (Accepted) problems=[]
+route rlz: accepted=true (Accepted) problems=[]
+route rma: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "rma.test", header_match: "prefix / with x-canary=\"1\"", route: "GET prefix /", copy_of: None, reason: "Sōzu ranks the root prefix by its length alone, ignoring the method, and serves whichever of two it holds last" }]
+route rmz: accepted=true (Accepted) problems=[HeaderMatchOutranksRoute { hostname: "rmz.test", header_match: "prefix / with x-canary=\"1\"", route: "GET prefix /", copy_of: None, reason: "Sōzu ranks the root prefix by its length alone, ignoring the method, and serves whichever of two it holds last" }]
+route matching-part2: accepted=true (Accepted) problems=[]
+ir: 50 frontends, 25 with header matches (lifted copies included)
+  pla  gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34087;*;R^/api(?:[/?](?-u:.*))?$
+  plz  gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34088;*;R^/api(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;nma.test;R^/api(?:[/?](?-u:.*))?$;GET
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;nma.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;nmz.test;R^/api(?:[/?](?-u:.*))?$;GET
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;nmz.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;npa.test;R^/api/v2(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;npz.test;R^/api/v2(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rea.test;R^/(?:\?(?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rez.test;R^/(?:\?(?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rga.test;R^/(?:\?(?-u:.*))?$;GET
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;rga.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rgz.test;R^/(?:\?(?-u:.*))?$;GET
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;rgz.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rla.test;R^/api(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;rla.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rlz.test;R^/api(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;rlz.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rma.test;P/;GET
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rmz.test;P/;GET
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;nma.test;R^/api(?:[/?](?-u:.*))?$;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;nmz.test;R^/api(?:[/?](?-u:.*))?$;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rga.test;R^/(?:\?(?-u:.*))?$;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rgz.test;R^/(?:\?(?-u:.*))?$;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;rla.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;rlz.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;frma.test;P/;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;frma.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;frma.test;P/;GET
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;frmz.test;P/;GET;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;frmz.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;frmz.test;P/;GET
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;frea.test;R^/(?:\?(?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;frea.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;frea.test;R^/(?:\?(?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;frez.test;R^/(?:\?(?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;frez.test;P/;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;frez.test;R^/(?:\?(?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;fnpa.test;R^/api/v2(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;fnpa.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34086;fnpa.test;R^/api/v2(?:[/?](?-u:.*))?$
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;fnpz.test;R^/api/v2(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34086;fnpz.test;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pr   gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34086;fnpz.test;R^/api/v2(?:[/?](?-u:.*))?$
+  pfa  gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34089;*;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pfa  gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34089;*;P/;H0:"x-canary"="1"
+  pfa  gateway-conformance-infra.infra-backend-v1.8080 0.0.0.0:34089;*;R^/api(?:[/?](?-u:.*))?$
+  pfz  gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34090;*;R^/api(?:[/?](?-u:.*))?$;H0:"x-canary"="1"
+  pfz  gateway-conformance-infra.infra-backend-v2.8080 0.0.0.0:34090;*;P/;H0:"x-canary"="1"
+  pfz  gateway-conformance-infra.infra-backend-v3.8080 0.0.0.0:34090;*;R^/api(?:[/?](?-u:.*))?$
+applied without header matches: 39 requests {"ADD_BACKEND": 3, "ADD_CLUSTER": 3, "ADD_HTTP_FRONTEND": 33}
+workers: [0, 1]
+== round 0: header matches skipped (what the builder did before)
+hm    GET    gw.test      /                Version: one                 want=v1   got 404=12         FAIL
+hm    GET    gw.test      /                Version: two                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Version: two + Color: orange want=v1   got 404=12         FAIL
+hm    GET    gw.test      /                Version: two + Color: blue   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: orange                want=404  got 404=12         pass
+hm    GET    gw.test      /                Some-Other-Header: one       want=404  got 404=12         pass
+hm    GET    gw.test      /                Color: blue                  want=v1   got 404=12         FAIL
+hm    GET    gw.test      /                Color: green                 want=v1   got 404=12         FAIL
+hm    GET    gw.test      /                Color: red                   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: yellow                want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: purple                want=404  got 404=12         pass
+m     GET    gw.test      /                                             want=v1   got v1=12          pass
+m     GET    gw.test      /example                                      want=v1   got v1=12          pass
+m     GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+m     GET    gw.test      /v2                                           want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2/example                                   want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /                Version: two                 want=v2   got v1=12          FAIL
+m     GET    gw.test      /v2/                                          want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2example                                    want=v1   got v1=12          pass
+m     GET    gw.test      /foo/v2/example                               want=v1   got v1=12          pass
+m+    GET    gw.test      /v2              Version: one                 want=v2   got v1=12          FAIL  (same-class tie, #80)
+mm    POST   gw.test      /                                             want=v1   got v1=12          pass
+mm    GET    gw.test      /                                             want=v2   got v2=12          pass
+mm    HEAD   gw.test      /                                             want=404  got 404=12         pass
+mm    GET    gw.test      /path1                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PUT    gw.test      /                version: one                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+mm    POST   gw.test      /path2           version: two                 want=v3   got v1=12          FAIL
+mm    PATCH  gw.test      /path3                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    DELETE gw.test      /path4           version: three               want=v1   got 404=12         FAIL
+mm    PUT    gw.test      /                                             want=404  got 404=12         pass
+mm    DELETE gw.test      /path4                                        want=404  got 404=12         pass
+mm    PATCH  gw.test      /path5                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PATCH  gw.test      /                version: four                want=v2   got v2=12          pass
+mar   GET    example.com  /                                             want=v1   got v1=12          pass
+mar   GET    example.com  /example                                      want=v1   got v1=12          pass
+mar   GET    example.net  /example                                      want=v1   got v1=12          pass
+mar   GET    example.com  /example         Version: one                 want=v1   got v1=12          pass
+mar   GET    example.com  /v2                                           want=v2   got v2=12          pass
+mar   GET    example.net  /v2                                           want=v1   got v1=12          pass
+mar   GET    example.com  /v2/example                                   want=v2   got v2=12          pass
+mar   GET    example.com  /                Version: two                 want=v2   got v1=12          FAIL
+mar+  GET    example.com  /v2              Version: one                 want=v2   got v2=12          pass
+pr    GET    rma.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rmz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rma.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rea.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rez.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rea.test     /?q=1            X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rea.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rga.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rgz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rga.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL
+pr    GET    rgz.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL
+pr    GET    rga.test     /                                             want=v1   got v1=12          pass
+pr    GET    rla.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rlz.test     /api/x           X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rla.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL
+pr    GET    rlz.test     /apix            X-Canary: 1                  want=v2   got 404=12         FAIL
+pr    GET    npa.test     /api/v2          X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    npz.test     /api/v2          X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    npa.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    nma.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    nmz.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   nma.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL
+pla   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+plz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pla   GET    any.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    frma.test    /                X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frmz.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frea.test    /                X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frez.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpa.test    /api/v2          X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpz.test    /api/v2          X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pfa   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pfz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+-- 49 pass, 0 split between workers, 26 fail of 75
+applied header matches added: 41 requests {"ADD_HTTP_FRONTEND_WITH_HEADER_PREDICATES": 41}
+== round 1: header matches added by a diff, both workers fed in batch order
+hm    GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Version: two + Color: orange want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two + Color: blue   want=v2   got v1=12          FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: orange                want=404  got 404=12         pass
+hm    GET    gw.test      /                Some-Other-Header: one       want=404  got 404=12         pass
+hm    GET    gw.test      /                Color: blue                  want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: green                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: red                   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: yellow                want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: purple                want=404  got 404=12         pass
+m     GET    gw.test      /                                             want=v1   got v1=12          pass
+m     GET    gw.test      /example                                      want=v1   got v1=12          pass
+m     GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+m     GET    gw.test      /v2                                           want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2/example                                   want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /                Version: two                 want=v2   got v2=12          pass
+m     GET    gw.test      /v2/                                          want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2example                                    want=v1   got v1=12          pass
+m     GET    gw.test      /foo/v2/example                               want=v1   got v1=12          pass
+m+    GET    gw.test      /v2              Version: one                 want=v2   got v1=12          FAIL  (same-class tie, #80)
+mm    POST   gw.test      /                                             want=v1   got v1=12          pass
+mm    GET    gw.test      /                                             want=v2   got v2=12          pass
+mm    HEAD   gw.test      /                                             want=404  got 404=12         pass
+mm    GET    gw.test      /path1                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PUT    gw.test      /                version: one                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+mm    POST   gw.test      /path2           version: two                 want=v3   got v3=12          pass
+mm    PATCH  gw.test      /path3                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    DELETE gw.test      /path4           version: three               want=v1   got v1=12          pass
+mm    PUT    gw.test      /                                             want=404  got 404=12         pass
+mm    DELETE gw.test      /path4                                        want=404  got 404=12         pass
+mm    PATCH  gw.test      /path5                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PATCH  gw.test      /                version: four                want=v2   got v2=12          pass
+mar   GET    example.com  /                                             want=v1   got v1=12          pass
+mar   GET    example.com  /example                                      want=v1   got v1=12          pass
+mar   GET    example.net  /example                                      want=v1   got v1=12          pass
+mar   GET    example.com  /example         Version: one                 want=v1   got v1=12          pass
+mar   GET    example.com  /v2                                           want=v2   got v2=12          pass
+mar   GET    example.net  /v2                                           want=v1   got v1=12          pass
+mar   GET    example.com  /v2/example                                   want=v2   got v2=12          pass
+mar   GET    example.com  /                Version: two                 want=v2   got v2=12          pass
+mar+  GET    example.com  /v2              Version: one                 want=v2   got v2=12          pass
+pr    GET    rma.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rmz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rma.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rea.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rez.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rea.test     /?q=1            X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rea.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rga.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rgz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rga.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rgz.test     /x               X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rga.test     /                                             want=v1   got v1=12          pass
+pr    GET    rla.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rlz.test     /api/x           X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rla.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rlz.test     /apix            X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    npa.test     /api/v2          X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    npz.test     /api/v2          X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    npa.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    nma.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    nmz.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   nma.test     /api             X-Canary: 1                  want=v2   got v2=12          pass
+pla   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+plz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pla   GET    any.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    frma.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frmz.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frea.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frez.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpa.test    /api/v2          X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    fnpz.test    /api/v2          X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pfa   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pfz   GET    any.test     /api             X-Canary: 1                  want=v3   got v2=12          FAIL  (refused by the builder, programmed anyway)
+-- 58 pass, 0 split between workers, 17 fail of 75
+UpgradeWorker 0: status=0 Upgrade successful:
+- finished soft stop of worker 0
+- finished activation of new worker 2
+workers: [1, 2]
+== round 2: 1 worker(s) replaced, forked from the main process state
+hm    GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Version: two + Color: orange want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two + Color: blue   want=v2   got v1=12          FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: orange                want=404  got 404=12         pass
+hm    GET    gw.test      /                Some-Other-Header: one       want=404  got 404=12         pass
+hm    GET    gw.test      /                Color: blue                  want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: green                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: red                   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: yellow                want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: purple                want=404  got 404=12         pass
+m     GET    gw.test      /                                             want=v1   got v1=12          pass
+m     GET    gw.test      /example                                      want=v1   got v1=12          pass
+m     GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+m     GET    gw.test      /v2                                           want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2/example                                   want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /                Version: two                 want=v2   got v2=12          pass
+m     GET    gw.test      /v2/                                          want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2example                                    want=v1   got v1=12          pass
+m     GET    gw.test      /foo/v2/example                               want=v1   got v1=12          pass
+m+    GET    gw.test      /v2              Version: one                 want=v2   got v1=12          FAIL  (same-class tie, #80)
+mm    POST   gw.test      /                                             want=v1   got v1=12          pass
+mm    GET    gw.test      /                                             want=v2   got v2=12          pass
+mm    HEAD   gw.test      /                                             want=404  got 404=12         pass
+mm    GET    gw.test      /path1                                        want=v1   got v1=8,v2=4      SPLIT  (same-class tie, #80)
+mm    PUT    gw.test      /                version: one                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+mm    POST   gw.test      /path2           version: two                 want=v3   got v3=12          pass
+mm    PATCH  gw.test      /path3                                        want=v1   got v1=7,v2=5      SPLIT  (same-class tie, #80)
+mm    DELETE gw.test      /path4           version: three               want=v1   got v1=12          pass
+mm    PUT    gw.test      /                                             want=404  got 404=12         pass
+mm    DELETE gw.test      /path4                                        want=404  got 404=12         pass
+mm    PATCH  gw.test      /path5                                        want=v1   got v1=9,v2=3      SPLIT  (same-class tie, #80)
+mm    PATCH  gw.test      /                version: four                want=v2   got v2=12          pass
+mar   GET    example.com  /                                             want=v1   got v1=12          pass
+mar   GET    example.com  /example                                      want=v1   got v1=12          pass
+mar   GET    example.net  /example                                      want=v1   got v1=12          pass
+mar   GET    example.com  /example         Version: one                 want=v1   got v1=12          pass
+mar   GET    example.com  /v2                                           want=v2   got v2=12          pass
+mar   GET    example.net  /v2                                           want=v1   got v1=12          pass
+mar   GET    example.com  /v2/example                                   want=v2   got v2=12          pass
+mar   GET    example.com  /                Version: two                 want=v2   got v2=12          pass
+mar+  GET    example.com  /v2              Version: one                 want=v2   got v2=12          pass
+pr    GET    rma.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rmz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rma.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rea.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rez.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rea.test     /?q=1            X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rea.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rga.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rgz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rga.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rgz.test     /x               X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rga.test     /                                             want=v1   got v1=12          pass
+pr    GET    rla.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rlz.test     /api/x           X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rla.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rlz.test     /apix            X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    npa.test     /api/v2          X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    npz.test     /api/v2          X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    npa.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    nma.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    nmz.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   nma.test     /api             X-Canary: 1                  want=v2   got v2=12          pass
+pla   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+plz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pla   GET    any.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    frma.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frmz.test    /                X-Canary: 1                  want=v3   got v2=9,v3=3      SPLIT  (refused by the builder, programmed anyway)
+pr    GET    frea.test    /                X-Canary: 1                  want=v1   got v1=9,v2=3      SPLIT  (refused by the builder, programmed anyway)
+pr    GET    frez.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpa.test    /api/v2          X-Canary: 1                  want=v1   got v1=4,v2=8      SPLIT  (refused by the builder, programmed anyway)
+pr    GET    fnpz.test    /api/v2          X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pfa   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=6,v2=6      SPLIT  (refused by the builder, programmed anyway)
+pfz   GET    any.test     /api             X-Canary: 1                  want=v3   got v2=12          FAIL  (refused by the builder, programmed anyway)
+-- 53 pass, 7 split between workers, 15 fail of 75
+UpgradeWorker 1: status=0 Upgrade successful:
+- finished soft stop of worker 1
+- finished activation of new worker 3
+workers: [2, 3]
+== round 3: 2 worker(s) replaced, forked from the main process state
+hm    GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Version: two + Color: orange want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two + Color: blue   want=v2   got v1=12          FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: orange                want=404  got 404=12         pass
+hm    GET    gw.test      /                Some-Other-Header: one       want=404  got 404=12         pass
+hm    GET    gw.test      /                Color: blue                  want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: green                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: red                   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: yellow                want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: purple                want=404  got 404=12         pass
+m     GET    gw.test      /                                             want=v1   got v1=12          pass
+m     GET    gw.test      /example                                      want=v1   got v1=12          pass
+m     GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+m     GET    gw.test      /v2                                           want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2/example                                   want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /                Version: two                 want=v2   got v2=12          pass
+m     GET    gw.test      /v2/                                          want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2example                                    want=v1   got v1=12          pass
+m     GET    gw.test      /foo/v2/example                               want=v1   got v1=12          pass
+m+    GET    gw.test      /v2              Version: one                 want=v2   got v1=12          FAIL  (same-class tie, #80)
+mm    POST   gw.test      /                                             want=v1   got v1=12          pass
+mm    GET    gw.test      /                                             want=v2   got v2=12          pass
+mm    HEAD   gw.test      /                                             want=404  got 404=12         pass
+mm    GET    gw.test      /path1                                        want=v1   got v2=12          FAIL  (same-class tie, #80)
+mm    PUT    gw.test      /                version: one                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+mm    POST   gw.test      /path2           version: two                 want=v3   got v3=12          pass
+mm    PATCH  gw.test      /path3                                        want=v1   got v2=12          FAIL  (same-class tie, #80)
+mm    DELETE gw.test      /path4           version: three               want=v1   got v1=12          pass
+mm    PUT    gw.test      /                                             want=404  got 404=12         pass
+mm    DELETE gw.test      /path4                                        want=404  got 404=12         pass
+mm    PATCH  gw.test      /path5                                        want=v1   got v2=12          FAIL  (same-class tie, #80)
+mm    PATCH  gw.test      /                version: four                want=v2   got v2=12          pass
+mar   GET    example.com  /                                             want=v1   got v1=12          pass
+mar   GET    example.com  /example                                      want=v1   got v1=12          pass
+mar   GET    example.net  /example                                      want=v1   got v1=12          pass
+mar   GET    example.com  /example         Version: one                 want=v1   got v1=12          pass
+mar   GET    example.com  /v2                                           want=v2   got v2=12          pass
+mar   GET    example.net  /v2                                           want=v1   got v1=12          pass
+mar   GET    example.com  /v2/example                                   want=v2   got v2=12          pass
+mar   GET    example.com  /                Version: two                 want=v2   got v2=12          pass
+mar+  GET    example.com  /v2              Version: one                 want=v2   got v2=12          pass
+pr    GET    rma.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rmz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rma.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rea.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rez.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rea.test     /?q=1            X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rea.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rga.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rgz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rga.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rgz.test     /x               X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rga.test     /                                             want=v1   got v1=12          pass
+pr    GET    rla.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rlz.test     /api/x           X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rla.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rlz.test     /apix            X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    npa.test     /api/v2          X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    npz.test     /api/v2          X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    npa.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    nma.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    nmz.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   nma.test     /api             X-Canary: 1                  want=v2   got v2=12          pass
+pla   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+plz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pla   GET    any.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    frma.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frmz.test    /                X-Canary: 1                  want=v3   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frea.test    /                X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frez.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpa.test    /api/v2          X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpz.test    /api/v2          X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pfa   GET    any.test     /api             X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pfz   GET    any.test     /api             X-Canary: 1                  want=v3   got v2=12          FAIL  (refused by the builder, programmed anyway)
+-- 55 pass, 0 split between workers, 20 fail of 75
+applied everything removed: 80 requests {"REMOVE_BACKEND": 3, "REMOVE_CLUSTER": 3, "REMOVE_HTTP_FRONTEND": 33, "REMOVE_HTTP_FRONTEND_WITH_HEADER_PREDICATES": 41}
+applied everything re-added in one batch: 80 requests {"ADD_BACKEND": 3, "ADD_CLUSTER": 3, "ADD_HTTP_FRONTEND": 33, "ADD_HTTP_FRONTEND_WITH_HEADER_PREDICATES": 41}
+== round 4: the whole IR added in one batch, both workers fed in batch order
+hm    GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Version: two + Color: orange want=v1   got v1=12          pass
+hm    GET    gw.test      /                Version: two + Color: blue   want=v2   got v1=12          FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: orange                want=404  got 404=12         pass
+hm    GET    gw.test      /                Some-Other-Header: one       want=404  got 404=12         pass
+hm    GET    gw.test      /                Color: blue                  want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: green                 want=v1   got v1=12          pass
+hm    GET    gw.test      /                Color: red                   want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: yellow                want=v2   got 404=12         FAIL  (header match skipped by the builder)
+hm    GET    gw.test      /                Color: purple                want=404  got 404=12         pass
+m     GET    gw.test      /                                             want=v1   got v1=12          pass
+m     GET    gw.test      /example                                      want=v1   got v1=12          pass
+m     GET    gw.test      /                Version: one                 want=v1   got v1=12          pass
+m     GET    gw.test      /v2                                           want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2/example                                   want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /                Version: two                 want=v2   got v2=12          pass
+m     GET    gw.test      /v2/                                          want=v2   got v1=12          FAIL  (same-class tie, #80)
+m     GET    gw.test      /v2example                                    want=v1   got v1=12          pass
+m     GET    gw.test      /foo/v2/example                               want=v1   got v1=12          pass
+m+    GET    gw.test      /v2              Version: one                 want=v2   got v1=12          FAIL  (same-class tie, #80)
+mm    POST   gw.test      /                                             want=v1   got v1=12          pass
+mm    GET    gw.test      /                                             want=v2   got v2=12          pass
+mm    HEAD   gw.test      /                                             want=404  got 404=12         pass
+mm    GET    gw.test      /path1                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PUT    gw.test      /                version: one                 want=v2   got 404=12         FAIL  (header match skipped by the builder)
+mm    POST   gw.test      /path2           version: two                 want=v3   got v3=12          pass
+mm    PATCH  gw.test      /path3                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    DELETE gw.test      /path4           version: three               want=v1   got v1=12          pass
+mm    PUT    gw.test      /                                             want=404  got 404=12         pass
+mm    DELETE gw.test      /path4                                        want=404  got 404=12         pass
+mm    PATCH  gw.test      /path5                                        want=v1   got v1=12          pass  (same-class tie, #80)
+mm    PATCH  gw.test      /                version: four                want=v2   got v2=12          pass
+mar   GET    example.com  /                                             want=v1   got v1=12          pass
+mar   GET    example.com  /example                                      want=v1   got v1=12          pass
+mar   GET    example.net  /example                                      want=v1   got v1=12          pass
+mar   GET    example.com  /example         Version: one                 want=v1   got v1=12          pass
+mar   GET    example.com  /v2                                           want=v2   got v2=12          pass
+mar   GET    example.net  /v2                                           want=v1   got v1=12          pass
+mar   GET    example.com  /v2/example                                   want=v2   got v2=12          pass
+mar   GET    example.com  /                Version: two                 want=v2   got v2=12          pass
+mar+  GET    example.com  /v2              Version: one                 want=v2   got v2=12          pass
+pr    GET    rma.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rmz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rma.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rea.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rez.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rea.test     /?q=1            X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rea.test     /x               X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    rga.test     /                X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rgz.test     /                X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   rga.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rgz.test     /x               X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rga.test     /                                             want=v1   got v1=12          pass
+pr    GET    rla.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    rlz.test     /api/x           X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    rla.test     /                X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    rlz.test     /apix            X-Canary: 1                  want=v2   got v2=12          pass
+pr    GET    npa.test     /api/v2          X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    npz.test     /api/v2          X-Canary: 1                  want=v3   got v3=12          pass
+pr    GET    npa.test     /api             X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    nma.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+pr    GET    nmz.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pr    POST   nma.test     /api             X-Canary: 1                  want=v2   got v2=12          pass
+pla   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass
+plz   GET    any.test     /api             X-Canary: 1                  want=v3   got v3=12          pass
+pla   GET    any.test     /                X-Canary: 1                  want=v2   got 404=12         FAIL  (header match skipped by the builder)
+pr    GET    frma.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frmz.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    frea.test    /                X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    frez.test    /                X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pr    GET    fnpa.test    /api/v2          X-Canary: 1                  want=v1   got v2=12          FAIL  (refused by the builder, programmed anyway)
+pr    GET    fnpz.test    /api/v2          X-Canary: 1                  want=v3   got v3=12          pass  (refused by the builder, programmed anyway)
+pfa   GET    any.test     /api             X-Canary: 1                  want=v1   got v1=12          pass  (refused by the builder, programmed anyway)
+pfz   GET    any.test     /api             X-Canary: 1                  want=v3   got v2=12          FAIL  (refused by the builder, programmed anyway)
+-- 58 pass, 0 split between workers, 17 fail of 75
+applied header matches removed: 41 requests {"REMOVE_HTTP_FRONTEND_WITH_HEADER_PREDICATES": 41}
+main process lists 33 HTTP frontends, 0 with header predicates
+== headers seen by the router when the client sends none (regex `.+` predicate)
+x-forwarded-for    no client header -> v1    set by Sōzu before routing
+x-forwarded-proto  no client header -> v1    set by Sōzu before routing
+x-forwarded-port   no client header -> v1    set by Sōzu before routing
+x-forwarded-host   no client header -> 404   absent at routing
+forwarded          no client header -> v1    set by Sōzu before routing
+x-real-ip          no client header -> 404   absent at routing
+x-request-id       no client header -> v1    set by Sōzu before routing
+sozu-id            no client header -> v1    set by Sōzu before routing
+x-trace-id         no client header -> 404   absent at routing
+traceparent        no client header -> 404   absent at routing
+user-agent         no client header -> 404   absent at routing
+== done
+
+# header_match_probe against docker clevercloud/sozu:2.3.6 (config-options.toml: 2 workers, automatic restart), 2026-11-23
+# Same image, docker flags and listeners as above; the managed-headers listener 0.0.0.0:34081 also sets
+# `send_x_real_ip = true` and `sozu_id_header = "X-Trace-Id"`. Same binary, run with PROBE_MANAGED_ONLY=1 and the
+# same SOZU_SOCK/PROBE_LISTEN_BASE/PROBE_BACKENDS.
+
+== headers seen by the router when the client sends none (regex `.+` predicate)
+x-forwarded-for    no client header -> v1    set by Sōzu before routing
+x-forwarded-proto  no client header -> v1    set by Sōzu before routing
+x-forwarded-port   no client header -> v1    set by Sōzu before routing
+x-forwarded-host   no client header -> 404   absent at routing
+forwarded          no client header -> v1    set by Sōzu before routing
+x-real-ip          no client header -> v1    set by Sōzu before routing
+x-request-id       no client header -> v1    set by Sōzu before routing
+sozu-id            no client header -> 404   absent at routing
+x-trace-id         no client header -> v1    set by Sōzu before routing
+traceparent        no client header -> 404   absent at routing
+user-agent         no client header -> 404   absent at routing
+== done
