@@ -1,0 +1,91 @@
+# h2c_prior_knowledge_probe against docker clevercloud/sozu:2.3.6, 2026-11-23
+# Question: what an HTTP listener does with cleartext HTTP/2 by prior knowledge, without and with the opt-in
+# `h2c_prior_knowledge = true` (upstream 2c3b43e3, #1911, first released in 2.3.4), and with an `Upgrade: h2c` offer,
+# to an h2c-only backend behind a cluster with `http2` and to an HTTP/1.1-only backend behind one without; clients
+# that stall at request_timeout; the option toggled over the socket (UpdateHttpListenerConfig field 44); the h2c metrics.
+# Image: clevercloud/sozu:2.3.6, sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841 (`sozu 2.3.6`, +crypto-ring)
+# Sōzu: docker run -d --network host --user 1000:1000 --log-opt max-size=20m, socket directory bind-mounted at
+# /run/sozu; config = deploy/sozu/config.toml at 8923b4a (2 workers, worker_automatic_restart, buffer_size 16_393,
+# connect_timeout 2, Sōzu's default front 60 / back 30 / request 10 s) with its listeners replaced by HTTP
+# 0.0.0.0:34280 (no option: the deploy default), HTTP 0.0.0.0:34281 with `h2c_prior_knowledge = true`, HTTPS
+# 0.0.0.0:34643 (unused).
+# Probe: ad hoc, a Rust example (h2c_prior_knowledge_probe.rs on 8923b4a, source not in this repository; backends
+# in-process, from h2c_backend_probe, reporting more of each request), `cargo build --release -p sozu-gw-agent
+# --example h2c_prior_knowledge_probe`, run as SOZU_SOCK=<run>/sozu.sock PROBE_HTTP_PLAIN=0.0.0.0:34280
+# PROBE_HTTP_PK=0.0.0.0:34281 PROBE_DIAL_PLAIN=127.0.0.1:34280 PROBE_DIAL_PK=127.0.0.1:34281
+# PROBE_BACKEND_H2C=127.0.0.1:34297 PROBE_BACKEND_H1=127.0.0.1:34299 (PROBE_MAX_TIME 10, PROBE_STALL_WAIT 75).
+# Client: curl 8.5.0 (nghttp2 1.59.0, OpenSSL 3.0.13); the raw clients are Rust TcpStreams in the probe.
+# Compare the WITHOUT section with grpc-cleartext_sozu-2.3.2_2026-10-19.txt (H1: raw preface -> 1478-byte
+# `HTTP/1.1 400 Bad Request`; H2: `curl --http2-prior-knowledge` -> 000; H3: `curl --http2` -> 1.1 200) and with
+# h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt (this binary against 2.3.2). Sōzu's own log for the run, not part of
+# the raw output: the two stalled clients on 0.0.0.0:34281 that were closed at 10 s without an answer left no access
+# log line at all (every 408 and 400 did).
+
+== h2c prior knowledge probe ==
+listeners (main process): 0.0.0.0:34280: h2c_prior_knowledge=None request_timeout=10; 0.0.0.0:34281: h2c_prior_knowledge=Some(true) request_timeout=10
+emitted: ADD_CLUSTER pk.app.80 http2=Some(true), ADD_CLUSTER pk.h1.80 http2=None, ADD_BACKEND, ADD_BACKEND, ADD_HTTP_FRONTEND, ADD_HTTP_FRONTEND, ADD_HTTP_FRONTEND, ADD_HTTP_FRONTEND
+
+## listener 0.0.0.0:34280: WITHOUT h2c_prior_knowledge (the deploy default)
+  curl --http2-prior-knowledge -> app.example.com (h2c-only backend, cluster http2=true): http_version=0 status=000 curl_exit=56 (curl: (56) Remote peer returned unexpected data while we expected SETTINGS frame.  Perhaps, peer does not support HTTP/2 properly.)
+  curl --http1.1 -> app.example.com (h2c-only backend, cluster http2=true): http_version=1.1 status=200 [HTTP/1.1 200 FromH2] | h2c-only backend answered over HTTP/2.0: GET /plain/http1.1
+    backend: h2c-only backend conn 1: HTTP/2 connection preface
+    backend: h2c-only backend conn 1 stream 1: HTTP/2.0 GET /plain/http1.1 :scheme=http :authority=app.example.com:34280 x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:59958\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  curl --http2 (Upgrade: h2c offer) -> app.example.com (h2c-only backend, cluster http2=true): http_version=1.1 status=200 [HTTP/1.1 200 FromH2] | h2c-only backend answered over HTTP/2.0: GET /plain/http2
+    backend: h2c-only backend conn 2: HTTP/2 connection preface
+    backend: h2c-only backend conn 2 stream 1: HTTP/2.0 GET /plain/http2 :scheme=http :authority=app.example.com:34280 x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:59972\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  curl --http2-prior-knowledge -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=0 status=000 curl_exit=56 (curl: (56) Remote peer returned unexpected data while we expected SETTINGS frame.  Perhaps, peer does not support HTTP/2 properly.)
+  curl --http1.1 -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=1.1 status=200 [HTTP/1.1 200 OK; Connection: close] | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 1: "GET /plain/http1.1 HTTP/1.1" host="h1.example.com:34280" upgrade=- connection=- HTTP2-Settings=- x-forwarded-proto="http" -> 200
+  curl --http2 (Upgrade: h2c offer) -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=1.1 status=200 [HTTP/1.1 200 OK; Connection: close] | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 2: "GET /plain/http2 HTTP/1.1" host="h1.example.com:34280" upgrade="h2c" connection="Upgrade, HTTP2-Settings" HTTP2-Settings=present x-forwarded-proto="http" -> 200
+  raw preface + empty SETTINGS (grpc-cleartext H1): received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false; closed (EOF) after 0.0 s
+  raw prior-knowledge GET app.example.com: received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false; closed (EOF) after 0.0 s
+  raw preface split 16+8 bytes, 3 s apart, then GET app.example.com: received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false; closed (EOF) after 0.0 s
+  raw preface diverging at byte 19 ("PRI * HTTP/2.0\r\n\r\nSX\r\n\r\n"): received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false; closed (EOF) after 0.0 s
+
+## listener 0.0.0.0:34281: WITH h2c_prior_knowledge = true
+  curl --http2-prior-knowledge -> app.example.com (h2c-only backend, cluster http2=true): http_version=2 status=200 [HTTP/2 200] | h2c-only backend answered over HTTP/2.0: GET /pk/http2-prior-knowledge
+    backend: h2c-only backend conn 3: HTTP/2 connection preface
+    backend: h2c-only backend conn 3 stream 1: HTTP/2.0 GET /pk/http2-prior-knowledge :scheme=http :authority=app.example.com:34281 x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:44908\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  curl --http1.1 -> app.example.com (h2c-only backend, cluster http2=true): http_version=1.1 status=200 [HTTP/1.1 200 FromH2] | h2c-only backend answered over HTTP/2.0: GET /pk/http1.1
+    backend: h2c-only backend conn 4: HTTP/2 connection preface
+    backend: h2c-only backend conn 4 stream 1: HTTP/2.0 GET /pk/http1.1 :scheme=http :authority=app.example.com:34281 x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:44922\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  curl --http2 (Upgrade: h2c offer) -> app.example.com (h2c-only backend, cluster http2=true): http_version=1.1 status=200 [HTTP/1.1 200 FromH2] | h2c-only backend answered over HTTP/2.0: GET /pk/http2
+    backend: h2c-only backend conn 5: HTTP/2 connection preface
+    backend: h2c-only backend conn 5 stream 1: HTTP/2.0 GET /pk/http2 :scheme=http :authority=app.example.com:34281 x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:44926\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  curl --http2-prior-knowledge -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=2 status=200 [HTTP/2 200] | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 3: "GET /pk/http2-prior-knowledge HTTP/1.1" host="h1.example.com:34281" upgrade=- connection=- HTTP2-Settings=- x-forwarded-proto="http" -> 200
+  curl --http1.1 -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=1.1 status=200 [HTTP/1.1 200 OK; Connection: close] | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 4: "GET /pk/http1.1 HTTP/1.1" host="h1.example.com:34281" upgrade=- connection=- HTTP2-Settings=- x-forwarded-proto="http" -> 200
+  curl --http2 (Upgrade: h2c offer) -> h1.example.com (HTTP/1.1-only backend, cluster http2 unset): http_version=1.1 status=200 [HTTP/1.1 200 OK; Connection: close] | http1-only backend answered over HTTP/1.1
+    backend: http1-only backend conn 5: "GET /pk/http2 HTTP/1.1" host="h1.example.com:34281" upgrade="h2c" connection="Upgrade, HTTP2-Settings" HTTP2-Settings=present x-forwarded-proto="http" -> 200
+  raw preface + empty SETTINGS (grpc-cleartext H1): received 79 bytes, starts with an HTTP/2 SETTINGS frame: true, frames: SETTINGS[s0] WINDOW_UPDATE[s0] SETTINGS[s0,ACK]; still open after 5 s
+  raw prior-knowledge GET app.example.com: received 209 bytes, starts with an HTTP/2 SETTINGS frame: true, frames: SETTINGS[s0] WINDOW_UPDATE[s0] SETTINGS[s0,ACK] HEADERS[s1](:status=200) DATA[s1]("h2c-only backend answered over HTTP/2.0: GET /raw/prior-knowledge") DATA[s1,END_STREAM](""); stream 1 ended after 0.0 s, connection left open
+    backend: h2c-only backend conn 6: HTTP/2 connection preface
+    backend: h2c-only backend conn 6 stream 1: HTTP/2.0 GET /raw/prior-knowledge :scheme=http :authority=app.example.com x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:45894\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  raw preface split 16+8 bytes, 3 s apart, then GET app.example.com: received 207 bytes, starts with an HTTP/2 SETTINGS frame: true, frames: SETTINGS[s0] WINDOW_UPDATE[s0] SETTINGS[s0,ACK] HEADERS[s1](:status=200) DATA[s1]("h2c-only backend answered over HTTP/2.0: GET /raw/split-preface") DATA[s1,END_STREAM](""); stream 1 ended after 0.0 s, connection left open
+    backend: h2c-only backend conn 7: HTTP/2 connection preface
+    backend: h2c-only backend conn 7 stream 1: HTTP/2.0 GET /raw/split-preface :scheme=http :authority=app.example.com x-forwarded-proto=http forwarded="proto=http;for=\"127.0.0.1:45902\";by=0.0.0.0" upgrade/connection/http2-settings headers: none
+  raw preface diverging at byte 19 ("PRI * HTTP/2.0\r\n\r\nSX\r\n\r\n"): received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false; closed (EOF) after 0.0 s
+
+## stalled clients (request_timeout 10 s by default), held up to 75 s each
+  plain: nothing sent: received 497 bytes, HTTP/1: "HTTP/1.1 408 Request Timeout" (Connection: close), starts with an HTTP/2 SETTINGS frame: false, first byte at 10.0 s; closed (EOF) at 10.0 s
+  plain: 16 of the preface's 24 bytes ("PRI * HTTP/2.0\r\n"): received 1478 bytes, HTTP/1: "HTTP/1.1 400 Bad Request" (Connection: close), starts with an HTTP/2 SETTINGS frame: false, first byte at 0.0 s; closed (EOF) at 0.0 s
+  plain: partial HTTP/1.1 head (no blank line): received 497 bytes, HTTP/1: "HTTP/1.1 408 Request Timeout" (Connection: close), starts with an HTTP/2 SETTINGS frame: false, first byte at 10.0 s; closed (EOF) at 10.0 s
+  pk: nothing sent: received nothing; closed (EOF) at 10.0 s
+  pk: 16 of the preface's 24 bytes ("PRI * HTTP/2.0\r\n"): received nothing; closed (EOF) at 10.0 s
+  pk: partial HTTP/1.1 head (no blank line): received 497 bytes, HTTP/1: "HTTP/1.1 408 Request Timeout" (Connection: close), starts with an HTTP/2 SETTINGS frame: false, first byte at 10.0 s; closed (EOF) at 10.0 s
+
+## runtime toggle: UpdateHttpListenerConfig on 0.0.0.0:34280
+UpdateHttpListener h2c_prior_knowledge=true: Ok "Successfully applied request to all workers"
+listeners (main process): 0.0.0.0:34280: h2c_prior_knowledge=Some(true) request_timeout=10; 0.0.0.0:34281: h2c_prior_knowledge=Some(true) request_timeout=10
+  curl --http2-prior-knowledge x6 (fresh connections): {"http_version/status=2 200 exit=0": 6}
+UpdateHttpListener h2c_prior_knowledge=false: Ok "Successfully applied request to all workers"
+listeners (main process): 0.0.0.0:34280: h2c_prior_knowledge=Some(false) request_timeout=10; 0.0.0.0:34281: h2c_prior_knowledge=Some(true) request_timeout=10
+  curl --http2-prior-knowledge x6 (fresh connections): {"http_version/status=0 000 exit=56": 6}
+
+## metrics
+QueryMetrics: Ok {"content_type":{"METRICS":{"main":{"config.cluster_added":{"inner":{"COUNT":4}},"config.http_frontend_added":{"inner":{"COUNT":8}},"config.http_listener_updated":{"inner":{"COUNT":4}},"configuration.backends":{"inner":{"GAUGE":2}},"configuration.clusters":{"inner":{"GAUGE":2}},"configuration.frontends":{"inner":{"GAUGE":4}}},"workers":{"0":{"proxy":{"http.h2c.prior_knowledge":{"inner":{"COUNT":5}}},"clusters":{}},"1":{"proxy":{"http.h2c.prior_knowledge":{"inner":{"COUNT":6}}},"clusters":{}}},"clusters":{},"proxying":{}}}}
+
+cleanup: 8 requests applied
+== done

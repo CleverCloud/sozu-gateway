@@ -114,9 +114,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// backend metrics in a single response, and Sōzu's worker requeues a
 /// response larger than `max_command_buffer_size` forever instead of dropping
 /// it — that worker then stops serving traffic and commands, spinning a core,
-/// while every probe stays green. Measured on 2.2.1 and again on 2.3.2, where
-/// the message is about 12% larger (`backend_header_time`; see
-/// `docs/probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt`). The size
+/// while every probe stays green. Measured on 2.2.1 and again on 2.3.2 and
+/// 2.3.6, where the message is about 12% larger (`backend_header_time`; see
+/// `docs/probes/metrics-no-clusters_sozu-2.3.6_2026-11-23.txt`). The size
 /// grows with the number of clusters
 /// that have seen traffic, so on a large enough cluster a routine scrape takes
 /// the gateway down. Filtering by `cluster_ids` does not bound it either: at

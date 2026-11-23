@@ -1,0 +1,70 @@
+# rewrite_host_probe (ad hoc: a Rust example, crates/sozu-agent/examples/rewrite_host_probe.rs, built on 8923b4a; its source is not in this repository) against docker clevercloud/sozu:2.3.6, 2026-11-23
+== image clevercloud/sozu:2.3.6 (sozu 2.3.6 ()) sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841 +crypto-ring; probe built with sozu-command-lib =2.3.6 (cargo build --release -p sozu-gw-agent --example rewrite_host_probe)
+== run: docker run -d --network host --user 1000:1000 --log-opt max-size=20m -v <socket dir>:<same path> clevercloud/sozu:2.3.6 start -c <socket dir>/config.toml
+== config = deploy/sozu/config.toml at 8923b4a with only command_socket/pid_file_path moved under the bind-mounted socket dir and the listeners moved to http 127.0.0.1:32611 / https 127.0.0.1:32613 (2 workers, worker_automatic_restart)
+== env SOZU_SOCK=/home/vscode/.cache/wfprobe-p2/rh/sozu.sock PROBE_HTTP_BIND=127.0.0.1:32611 PROBE_HTTP_DIAL=127.0.0.1:32611 PROBE_ECHO=127.0.0.1:32212 PROBE_GO=127.0.0.1:32211
+== backends: rh-echo-h1 = the probe's in-process raw echo (records every Host line); rh-go-h1 / rh-go-h2 = one tiny Go net/http server (go1.27.4, http.Protocols HTTP1 + UnencryptedHTTP2, source below) at 127.0.0.1:32211, the second cluster with http2=true (Sōzu speaks h2c prior knowledge to it)
+== Go control, direct (no Sōzu): `GET / HTTP/1.1` with two `Host: a` lines -> "HTTP/1.1 400 Bad Request"; curl 8.5.0 GET /x?y=1 -> proto=HTTP/1.1, --http2-prior-knowledge -> proto=HTTP/2.0
+== client: the probe's own raw HTTP/1.1 over TCP; "200 FromH2" is the reason phrase Sōzu writes on an HTTP/1.1 answer converted from an HTTP/2 backend (both versions)
+== Go backend source (main.go): Handler prints runtime.Version(), r.Proto, r.Host, r.RequestURI, r.Header.Values("Host"), r.Header.Values("X-Front"); net/http rejects two Host lines with 400 before the handler runs
+== the same binary was run against clevercloud/sozu:2.3.2 (sha256:273fc58803618c3707f817ca772ca537714f22fcb10416f263246352b47ca7e3) in the same way: rewrite-host-go_sozu-2.3.2_2026-11-23.txt
+== sozu log: no ERROR line during the run
+== sozu rewrite_host / Host header probe ==
+socket=/home/vscode/.cache/wfprobe-p2/rh/sozu.sock listener=127.0.0.1:32611 dial=127.0.0.1:32611 echo=127.0.0.1:32212 go=127.0.0.1:32211
+every request: GET /original?q=1 HTTP/1.1, Host: <stem>.<backend>.probe
+
+cluster rh-echo-h1: backend 127.0.0.1:32212 http2=false
+cluster rh-go-h1: backend 127.0.0.1:32211 http2=false
+cluster rh-go-h2: backend 127.0.0.1:32211 http2=true
+
+--- baseline ---
+Q: control: no rewrite, no header edit
+   rewrite_host=None rewrite_path=None request headers=[]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: baseline.echo.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="baseline.goh1.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="baseline.goh2.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+--- rwhost-path ---
+Q: rewrite_host + rewrite_path (rewrite_redirect_probe's host-and-path shape)
+   rewrite_host=Some("elsewhere.probe") rewrite_path=Some("/rewritten") request headers=[]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /rewritten HTTP/1.1 host-lines=[Host: elsewhere.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="elsewhere.probe" uri="/rewritten" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="elsewhere.probe" uri="/rewritten" header[Host]=[] x-front=[]
+
+--- rwhost ---
+Q: rewrite_host alone (URLRewrite.hostname)
+   rewrite_host=Some("elsewhere.probe") rewrite_path=None request headers=[]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: elsewhere.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="elsewhere.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="elsewhere.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+--- hdr-host-set ---
+Q: Gateway `set Host` as the builder emits it: Host delete (empty) + Host append
+   rewrite_host=None rewrite_path=None request headers=[("Host", ""), ("Host", "override.probe")]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: override.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="override.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="override.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+--- hdr-host-add ---
+Q: a single non-empty request header Host (Gateway `add Host`): replaces or adds?
+   rewrite_host=None rewrite_path=None request headers=[("Host", "override.probe")]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: override.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="override.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="override.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+--- hdr-host-del ---
+Q: a single empty request header Host (Gateway `remove Host`)
+   rewrite_host=None rewrite_path=None request headers=[("Host", "")]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: hdr-host-del.echo.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="hdr-host-del.goh1.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="hdr-host-del.goh2.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+--- rwhost-and-hdr ---
+Q: rewrite_host AND a request header Host: which one wins?
+   rewrite_host=Some("elsewhere.probe") rewrite_path=None request headers=[("Host", "override.probe")]
+A[rh-echo-h1]: HTTP/1.1 200 OK | body: echo request-line=GET /original?q=1 HTTP/1.1 host-lines=[Host: elsewhere.probe]
+A[rh-go-h1]: HTTP/1.1 200 OK | body: go(go1.27.4) proto=HTTP/1.1 r.Host="elsewhere.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+A[rh-go-h2]: HTTP/1.1 200 FromH2 | body: go(go1.27.4) proto=HTTP/2.0 r.Host="elsewhere.probe" uri="/original?q=1" header[Host]=[] x-front=[]
+
+== done ==
+== probe exit 0

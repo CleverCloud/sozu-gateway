@@ -1,0 +1,41 @@
+# sni_ownership_probe against docker clevercloud/sozu:2.3.6 (deploy config, 2 workers), 2026-11-23
+# Env: SOZU_SOCK=<sockdir>/sozu.sock PROBE_HTTPS=0.0.0.0:33443 PROBE_CONNECT=127.0.0.1:33443, PROBE_ROUNDS unset (40).
+# The probe at 8923b4a splits the race into four (translator order, give reversed, take reversed, both
+# reversed) and prints the round count; the 2.3.2 plain record predates that split and has two race lines
+# (translator order, both batches reversed), so only its first race line and the "both reversed" one compare.
+# Image: clevercloud/sozu:2.3.6, image id sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841
+#   (`sozu --version`: sozu 2.3.6, +jemallocator +crypto-ring). Run as
+#   `docker run -d --network host --user 1000:1000 --log-opt max-size=20m -v <sockdir>:/run/sozu
+#    -v <config.toml>:/etc/sozu/config.toml:ro clevercloud/sozu:2.3.6` (default `start -c /etc/sozu/config.toml`),
+#   one fresh container per run, socket dir bind-mounted from the host.
+# Config: deploy/sozu/config.toml at 8923b4a (worker_count = 2, connect_timeout = 2, activate_listeners = true,
+#   command_socket /run/sozu/sozu.sock) with only the two static listeners moved: http 0.0.0.0:8080 -> 0.0.0.0:33080,
+#   https 0.0.0.0:8443 -> 0.0.0.0:33443 (port isolation from parallel runs; nothing else changed).
+# Probe source: crates/sozu-agent/examples at 8923b4a (sozu-command-lib =2.3.6), built
+#   `cargo build --release -p sozu-gw-agent --example <probe>`, rustc 1.100.0; run on the host against the socket.
+
+== sni ownership probe ==
+victim 2e6f2ec7 (notAfter 2036-06-19), attacker dd3f3e70 (notAfter 2036-09-18)
+-- both claim the name: AddCertificate(victim, ["api.probe"]); AddCertificate(attacker, ["api.probe", "attacker.probe"])
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- strip it from the attacker: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: victim: 6 | attacker.probe: attacker: 6
+-- victim deleted: ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); RemoveCertificate(2e6f2ec7)
+   applied
+   api.probe: attacker: 6 | attacker.probe: attacker: 6
+-- victim back, older: AddCertificate(victim, ["api.probe"]); ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: victim: 6 | attacker.probe: attacker: 6
+-- back to the attacker: applied
+-- only the loser's request: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"])
+   applied
+   api.probe: default(1017a1ad): 6
+-- then the winner's: applied
+   api.probe: victim: 6
+-- back to the attacker: applied
+-- race, translator order, 40 rounds: give: AddCertificate(victim, ["api.probe"]); ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); take: ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); RemoveCertificate(2e6f2ec7); 0 batches failed; api.probe served: attacker: 532, victim: 1036
+-- race, give reversed, 40 rounds: give: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); AddCertificate(victim, ["api.probe"]); take: ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); RemoveCertificate(2e6f2ec7); 0 batches failed; api.probe served: attacker: 434, default(1017a1ad): 16, victim: 1126
+-- race, take reversed, 40 rounds: give: AddCertificate(victim, ["api.probe"]); ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); take: RemoveCertificate(2e6f2ec7); ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); 0 batches failed; api.probe served: attacker: 517, default(1017a1ad): 26, victim: 1094
+-- race, both reversed, 40 rounds: give: ReplaceCertificate(same fingerprint -> attacker, ["attacker.probe"]); AddCertificate(victim, ["api.probe"]); take: RemoveCertificate(2e6f2ec7); ReplaceCertificate(same fingerprint -> attacker, ["api.probe", "attacker.probe"]); 0 batches failed; api.probe served: attacker: 491, default(1017a1ad): 31, victim: 1110

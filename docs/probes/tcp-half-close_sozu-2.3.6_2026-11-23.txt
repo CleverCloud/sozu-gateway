@@ -1,0 +1,121 @@
+TCP half-close against docker clevercloud/sozu:2.3.6 (sozu 2.3.6, +crypto-ring; image digest
+sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841), 2026-11-23, run locally:
+`docker run -d --network host --user 1000:1000 --log-opt max-size=20m`, the socket directory
+bind-mounted from the host, 2 workers. The TCP listener, cluster, backend and frontend were added
+with Sozu's own CLI inside the container (`docker exec ... sozu -c /etc/sozu/config.toml <args>`;
+the commands are echoed below without the `-c`, their stdout indented). The 2.3.6 CLI prints
+"Logs will be sent to stdout", "Access logs will be sent to None" and "Success: ..." on stdout
+(stderr was empty), lines the 2.3.2 record does not show. The backend is a Python echo server on
+127.0.0.1:31690. The client sends one line, then either shuts down its write side (`halfclose`,
+what `printf | socat -` does at stdin EOF) or keeps it open (`keepopen`, what `socat -,ignoreeof`
+does), and prints what it receives within 3 s. The last two lines are the controls against the
+backend directly. The container and the echo server were removed after the run. Client and echo
+backend are byte-identical to the 2.3.2 record's; only the ports moved into a range reserved for
+this run (proxy 38680 -> 31680, backend 38690 -> 31690). Python 3.12.3. Probe source: ad hoc
+(no in-repo example), the scripts below; harness at 8923b4a's tree, nothing in it changed.
+
+A first identical run a few seconds earlier (CLI stderr merged into stdout) gave the same eight
+answers (halfclose b'' x3, keepopen b'hello-tcp\n' x3, both direct controls echoed).
+
+Compare tcp-half-close_sozu-2.3.2_2026-10-19.txt (same method) and tcp-half-close_2026-09-10.md
+(Sozu 2.2.0 and 2.2.1, in-cluster, socat).
+
+Config:
+
+command_socket = "/run/sozu/sozu.sock"
+command_buffer_size = 163_840
+max_command_buffer_size = 1_638_400
+log_level = "info"
+log_target = "stdout"
+worker_count = 2
+worker_automatic_restart = true
+handle_process_affinity = false
+buffer_size = 16_393
+max_connections = 500
+max_buffers = 1000
+pid_file_path = "/run/sozu/sozu.pid"
+activate_listeners = true
+
+Client (hc-client.py):
+
+import socket, sys, time
+port = int(sys.argv[1]); mode = sys.argv[2]
+s = socket.create_connection(("127.0.0.1", port)); s.settimeout(3)
+s.sendall(b"hello-tcp\n")
+if mode == "halfclose":
+    s.shutdown(socket.SHUT_WR)  # client sends, then shuts its write side (stdin EOF in `socat -`)
+out = b""
+start = time.monotonic()
+try:
+    while True:
+        d = s.recv(4096)
+        if not d: break
+        out += d
+        if mode != "halfclose" and out.endswith(b"\n"): break
+except socket.timeout:
+    pass
+print(f"{mode}: received {out!r} after {time.monotonic() - start:.3f} s")
+
+Echo backend (hc-echo.py):
+
+import socket, sys, threading
+port = int(sys.argv[1])
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port)); srv.listen(64)
+def h(c):
+    try:
+        while True:
+            d = c.recv(4096)
+            if not d: break
+            c.sendall(d)
+    finally: c.close()
+while True:
+    c, _ = srv.accept(); threading.Thread(target=h, args=(c,), daemon=True).start()
+
+Output:
+
+[run] image=clevercloud/sozu:2.3.6 (sozu 2.3.6 ()), 2 workers
+$ sozu listener tcp add --address 127.0.0.1:31680
+  Logs will be sent to stdout
+  Access logs will be sent to None
+  Success: Successfully applied request to all workers
+  No content
+$ sozu listener tcp activate --address 127.0.0.1:31680
+  Logs will be sent to stdout
+  Access logs will be sent to None
+  Success: Successfully applied request to all workers
+  No content
+$ sozu cluster add --id hc --load-balancing-policy round_robin
+  Logs will be sent to stdout
+  Access logs will be sent to None
+  Success: Successfully applied request to all workers
+  No content
+$ sozu backend add --id hc --backend-id hc-0 --address 127.0.0.1:31690
+  Logs will be sent to stdout
+  Access logs will be sent to None
+  Success: Successfully applied request to all workers
+  No content
+$ sozu frontend tcp add --id hc --address 127.0.0.1:31680
+  Logs will be sent to stdout
+  Access logs will be sent to None
+  Success: Successfully applied request to all workers
+  No content
+[proxy 127.0.0.1:31680 run 1] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:31680 run 1] keepopen: received b'hello-tcp\n' after 0.000 s
+[proxy 127.0.0.1:31680 run 2] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:31680 run 2] keepopen: received b'hello-tcp\n' after 0.001 s
+[proxy 127.0.0.1:31680 run 3] halfclose: received b'' after 0.000 s
+[proxy 127.0.0.1:31680 run 3] keepopen: received b'hello-tcp\n' after 0.001 s
+[backend 127.0.0.1:31690 direct] halfclose: received b'hello-tcp\n' after 0.000 s
+[backend 127.0.0.1:31690 direct] keepopen: received b'hello-tcp\n' after 0.000 s
+
+Sozu's access-log lines for the six proxied sessions of this run (container log, not in the 2.3.2
+record; fields after the addresses: timings, then bytes in from the client and bytes out to it).
+Each halfclose session logs 10 bytes in and 0 out, each keepopen one 10 and 10:
+
+2026-11-23T09:49:43.478905Z 1795427383478905760 8 INFO-ACCESS  WRK-01	[01M83WZE5PFFV5P2EZSZ4WJJ6R 01M83WZE5PFFV5P2EZSZ4WJJ6R hc hc-0] 127.0.0.1:54144 127.0.0.1:31690 139μs/108μs/-/11μs/12μs 10 0 [] None TCP -
+2026-11-23T09:49:43.501817Z 1795427383501817958 8 INFO-ACCESS  WRK-01	[01M83WZE6C6YYZG3E9E5J6W8VK 01M83WZE6C6YYZG3E9E5J6W8VK hc hc-0] 127.0.0.1:54156 127.0.0.1:31690 1067μs/131μs/-/21μs/20μs 10 10 [] None TCP -
+2026-11-23T09:49:43.521640Z 1795427383521640603 7 INFO-ACCESS  WRK-00	[01M83WZE71VJHVQ1NZH72A6D9S 01M83WZE71VJHVQ1NZH72A6D9S hc hc-0] 127.0.0.1:54172 127.0.0.1:31690 156μs/139μs/-/31μs/31μs 10 0 [] None TCP -
+2026-11-23T09:49:43.544695Z 1795427383544695720 7 INFO-ACCESS  WRK-00	[01M83WZE7Q0XT9S8Z8AZXS705Z 01M83WZE7Q0XT9S8Z8AZXS705Z hc hc-0] 127.0.0.1:54174 127.0.0.1:31690 1254μs/185μs/-/34μs/18μs 10 10 [] None TCP -
+2026-11-23T09:49:43.562485Z 1795427383562485746 7 INFO-ACCESS  WRK-00	[01M83WZE8A9ZWPKDART13SMBP6 01M83WZE8A9ZWPKDART13SMBP6 hc hc-0] 127.0.0.1:54178 127.0.0.1:31690 93μs/83μs/-/15μs/17μs 10 0 [] None TCP -
+2026-11-23T09:49:43.585636Z 1795427383585636322 7 INFO-ACCESS  WRK-00	[01M83WZE90TC9WACY7ENKWG2F3 01M83WZE90TC9WACY7ENKWG2F3 hc hc-0] 127.0.0.1:54188 127.0.0.1:31690 1366μs/209μs/-/21μs/40μs 10 10 [] None TCP -

@@ -4,6 +4,71 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu 2.3.6
+
+The controller now links `sozu-command-lib` 2.3.6 and the chart defaults to
+`clevercloud/sozu:2.3.6` (was 2.3.2). The controller sends what it sent before;
+the IR and the persisted shadow format are unchanged. Changing the image rolls
+the gateway Pods; keep at least two replicas. If your values pin
+`image.sozu.tag`, or you upgrade with `--reuse-values`, set
+`--set image.sozu.tag=2.3.6`. To downgrade, move both images back together.
+
+**Keep the image at 2.3.4 or later under this controller.** Sōzu 2.3.4 parses
+hostnames with Unicode 18 data (ICU4X 2.4), and the controller admits hostnames
+with the same data, so the two agree. A 2.3.0–2.3.3 image still uses Unicode 17:
+it refuses a name this controller admits, `xn--pc7f.example.com` for instance
+([measured](probes/idna-hostnames_sozu-2.3.2-vs-2.3.6_2026-11-23.txt)), and
+since translation is all-or-nothing, one such Ingress or route fails every
+reconcile of the shared instance.
+
+### What changes for tenants
+
+- **Hostnames follow Unicode 18.** A name using a code point new in Unicode 18
+  is admitted, where it was reported `InvalidHostname`. A right-to-left label
+  holding a Balinese vowel sign whose direction Unicode 18 changed to
+  left-to-right is refused and reported, where it was programmed. Both measured
+  on the data plane, the second with U+1B3A; U+1B3C and U+1B42 changed the same
+  way in the data and were not tried.
+- **An HTTPRoute `RequestHeaderModifier` on `Host` takes effect.** `set` and
+  `add` of `Host` now replace the Host the backend receives: one line, or
+  `:authority` to an HTTP/2 backend. On 2.3.2 the backend got a second, different
+  `Host` line, which a strict server (Go's `net/http`) answers `400`, and an
+  HTTP/2 backend got nothing. `remove` of `Host` still does nothing. Routing is
+  not affected: Sōzu routes before it applies edits
+  ([measured](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)).
+
+### What changes in the data plane
+
+From the upstream changelog; not re-measured here.
+
+- **Large HTTP transfers are no longer cut.** A transfer whose two peers kept up
+  for 10,000 loop iterations in one turn (about 160 MiB at 16 KiB buffers) was
+  closed mid-body. It now yields to the event loop (2.3.4), counted by
+  `sozu_http_mux_loop_budget_yield`. A response waiting on one peer is no
+  longer cut by the other peer's timeout.
+- **Two HTTP/2 fixes upstream files under security** (2.3.5). A request answered
+  `504` by a timeout no longer leaves its backend connection able to deliver its
+  late response to the client connection's next request. A stream Sōzu resets
+  gives its slot back at once: about 500 provoked resets on one connection used
+  to empty a worker's buffer pool until that connection closed.
+- **The image's zlib** moves past RUSTSEC-2026-0544 (2.3.6). The controller does
+  not link zlib; its own lock moves rustls-webpki to 0.103.16, past
+  RUSTSEC-2026-0382, with the Sōzu release that ships it.
+
+### What does not change
+
+Re-measured on 2.3.6 (records `docs/probes/*_2026-11-23.txt`):
+
+- the per-cluster metrics wedge below. The fix is on Sōzu's main branch, not in
+  a release, so keep `metrics.perCluster` off on a large gateway;
+- TCP half-close: a client that shuts its write side gets no reply;
+- everything the controller relies on and probes: owner eviction, the
+  failed-batch replay, the certificate rotation fallback and in-place name
+  changes, the SNI ownership races, header predicates, h2c backends and TCP
+  health checks. The e2e suites pass.
+
+---
+
 ## HTTPRoute header matches are honoured
 
 A match with `headers` used to be skipped and reported
@@ -94,7 +159,7 @@ as a black-holed pod IP stays listed
 
 Two things to know before turning it on:
 
-- **It needs the Sōzu image the chart pins (2.3.2).** A Sōzu older than 2.3.0
+- **It needs the Sōzu image the chart pins (2.3.6).** A Sōzu older than 2.3.0
   ignores the TCP mode and sends `GET /` instead, which marks every backend
   that does not answer HTTP 2xx down — measured on 2.2.1, a TCP backend went
   down and the cluster fell back to routing to all of its backends
@@ -204,14 +269,16 @@ streams to one were cut short
 ([measured](probes/grpc-quick-interop_sozu-2.2.1_2026-10-19.txt), `Q7`/`Q7b`;
 with grpc-go, `client-stream` in
 [this record](probes/grpc-streams_sozu-2.2.1_2026-10-19.txt)). The chart's
-image is 2.3.2; do not run this controller against an older data plane.
+image is 2.3.6; do not run this controller against a data plane older than
+2.3.4 (see [Sōzu 2.3.6](#sōzu-236)).
 
 **gRPC** reaches an h2c port through an HTTPRoute or an Ingress on the
-**HTTPS** listener only. Sōzu's cleartext listener refuses HTTP/2 with prior
-knowledge, which is how gRPC clients speak without TLS
-([measured](probes/grpc-quick-interop_sozu-2.3.2_2026-10-19.txt), and
-deliberate upstream: Sōzu 2.3.2 `lib/src/http.rs:764-782`), so gRPC over
-`http://` fails before routing. A TCPRoute, which forwards bytes, could still
+**HTTPS** listener only. Sōzu's cleartext listener, as the chart configures it, refuses HTTP/2
+with prior knowledge, which is how gRPC clients speak without TLS
+([measured](probes/grpc-quick-interop_sozu-2.3.2_2026-10-19.txt) on 2.3.2, where it was
+deliberate upstream: `lib/src/http.rs:764-782`), so gRPC over `http://` fails before routing.
+Sōzu 2.3.4 made it an opt-in listener option (`h2c_prior_knowledge`, upstream 2c3b43e3) that the
+chart does not set. A TCPRoute, which forwards bytes, could still
 carry it without L7 routing; that was not measured. What else to expect,
 measured on 2.3.2 with grpc-go 1.75.0 unless marked otherwise:
 
@@ -638,12 +705,14 @@ message exceeds `max_command_buffer_size` (1 638 400 bytes in the chart)
 requeues it forever: it stops serving traffic and commands and spins a core,
 while `/readyz`, the container probes and `reconcile_failures_total` all stay
 green, until the Pod is restarted. It also logs an error on every requeue —
-1.6 million lines in about 20 s on 2.2.1; on 2.3.2 tens of thousands within a
-minute, counted in a log capped at 20 MB — which the chart's
+1.6 million lines in about 20 s on 2.2.1; on 2.3.2 and 2.3.6 tens of thousands
+within a minute, counted in a log capped at 20 MB — which the chart's
 `log_target = "stdout"` writes to the node's container logs. This is not new in
-2.3, and Sōzu 2.3.2 still does all of this
-([measured](probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt)), and its
-message is about 12% larger: 63 984 bytes at 80 clusters against 56 889 on 2.2.1,
+2.3, and Sōzu 2.3.2 and 2.3.6 still do all of this
+([2.3.2](probes/metrics-no-clusters_sozu-2.3.2_2026-10-19.txt),
+[2.3.6](probes/metrics-no-clusters_sozu-2.3.6_2026-11-23.txt); the upstream fix,
+#1931, is on Sōzu's main branch and in no release yet), and the 2.3 message is
+about 12% larger: 63 984 bytes at 80 clusters against 56 889 on 2.2.1,
 same probe and buffers. The message grows
 with every routed Service port that has received traffic. On a laptop, on
 2.2.1, with the chart's

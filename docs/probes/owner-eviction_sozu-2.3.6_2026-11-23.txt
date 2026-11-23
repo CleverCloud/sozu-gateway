@@ -1,0 +1,26 @@
+# owner_eviction_probe against docker clevercloud/sozu:2.3.6 (deploy config, 2 workers), 2026-11-23
+# The 2.3.2 record's first half (agent at master bdd6740, before the stale-owner eviction) is not re-run:
+# only the current agent, i.e. the second half ("agent with stale-owner eviction").
+# Env: SOZU_SOCK=<sockdir>/sozu.sock PROBE_HTTP=0.0.0.0:33080 PROBE_L4_BASE=33101
+#   (the 2.3.2 run used the defaults 0.0.0.0:8080 and 9101, so its ports read 9101/9102/9103 where these read 33101/33102/33103).
+# Image: clevercloud/sozu:2.3.6, image id sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841
+#   (`sozu --version`: sozu 2.3.6, +jemallocator +crypto-ring). Run as
+#   `docker run -d --network host --user 1000:1000 --log-opt max-size=20m -v <sockdir>:/run/sozu
+#    -v <config.toml>:/etc/sozu/config.toml:ro clevercloud/sozu:2.3.6` (default `start -c /etc/sozu/config.toml`),
+#   one fresh container per run, socket dir bind-mounted from the host.
+# Config: deploy/sozu/config.toml at 8923b4a (worker_count = 2, connect_timeout = 2, activate_listeners = true,
+#   command_socket /run/sozu/sozu.sock) with only the two static listeners moved: http 0.0.0.0:8080 -> 0.0.0.0:33080,
+#   https 0.0.0.0:8443 -> 0.0.0.0:33443 (port isolation from parallel runs; nothing else changed).
+# Probe source: crates/sozu-agent/examples at 8923b4a (sozu-command-lib =2.3.6), built
+#   `cargo build --release -p sozu-gw-agent --example <probe>`, rustc 1.100.0; run on the host against the socket.
+
+## agent at 8923b4a (with stale-owner eviction)
+== owner eviction probe ==
+before: http add.probe/ -> stale, http ghost.probe/ -> stale, http remove.probe/ -> stale, tcp :33101 -> stale, tcp :33103 -> stale, udp :33102 -> stale
+http add for another cluster: applied
+http removal naming the shadow's cluster: applied
+http removal naming a cluster sozu never held: applied
+tcp add for another cluster: applied
+udp add for another cluster: applied
+tcp removal naming the shadow's cluster: applied
+after: http add.probe/ -> wanted, tcp :33101 -> wanted, udp :33102 -> wanted

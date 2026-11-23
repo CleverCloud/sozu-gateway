@@ -216,7 +216,7 @@ impl Default for SozuRequestHeaders {
 
 /// Why Sōzu would refuse `check` on an `AddCluster`, if it would.
 ///
-/// Sōzu 2.3.2's `ConfigState::add_cluster` validates an inline check with
+/// Sōzu 2.3.6's `ConfigState::add_cluster` validates an inline check with
 /// `validate_health_check_config` and refuses the whole request on failure
 /// (`command/src/state.rs`), and the translator folds every `AddCluster` into a
 /// `ConfigState` before anything reaches the socket: one invalid check would
@@ -592,7 +592,7 @@ pub enum Problem {
     /// `rule.timeouts` has no Sōzu equivalent; the rule still routes,
     /// without the timeout, and the gap is reported.
     TimeoutsUnsupported,
-    /// An HTTPRoute match with `queryParams`. Sōzu 2.3.2 has no query
+    /// An HTTPRoute match with `queryParams`. Sōzu 2.3.6 has no query
     /// predicate, and a path regex cannot express the Gateway API semantics
     /// (first value only, an order-independent AND), so the match is skipped
     /// rather than widened to ignore the parameters.
@@ -1229,7 +1229,7 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
 /// the `regex` crate refuses a compiled program above its 10 MiB size limit —
 /// reached by a literal path of a few hundred kilobytes, which Kubernetes
 /// accepts on an Ingress (no length bound on `path`). The rule reaches Sōzu
-/// verbatim and Sōzu 2.3.2 compiles it with `regex::bytes::Regex::new` —
+/// verbatim and Sōzu 2.3.6 compiles it with `regex::bytes::Regex::new` —
 /// default flags, no `RegexBuilder` limits — twice, bare and anchored (below),
 /// in the main process before the frontend is dispatched, failing the whole
 /// request on error and, since translation is all-or-nothing, every reconcile
@@ -1255,7 +1255,7 @@ pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> 
 /// Why Sōzu would refuse to compile `pattern` — a `Regex` path rule or a
 /// `regex` header predicate value, which share one grammar — if it would.
 ///
-/// Sōzu 2.3.2 compiles both with its `anchored_regex` (`lib/src/router/mod.rs`):
+/// Sōzu 2.3.6 compiles both with its `anchored_regex` (`lib/src/router/mod.rs`):
 /// as written, then wrapped in `\A(?:…)\z`, with `regex::bytes::Regex::new`,
 /// and refuses the frontend if either fails. The wrapper alone can fail: an
 /// `(?x)` comment swallows the closing group, the wrapper's two extra nesting
@@ -1286,7 +1286,7 @@ const MAX_HOSTNAME_LENGTH: usize = 4096;
 /// Admit a frontend hostname into the IR only if Sōzu's router can parse it.
 ///
 /// Every hostname but the bare `*` catch-all goes into the route table's tree,
-/// where Sōzu 2.3.2 (like 2.2.1) parses it twice when the frontend is added: as a
+/// where Sōzu 2.3.6 (like 2.2.1) parses it twice when the frontend is added: as a
 /// `DomainRule` (`*` is any host, a `/` makes a regex domain, a `*` is only
 /// accepted in front) and through `idna::domain_to_ascii`, whose ASCII form is
 /// inserted into a trie that refuses an empty leading label. Any of these
@@ -1452,7 +1452,7 @@ fn validate_inferred_certificate_names(names: &[String]) -> Result<Vec<String>, 
 /// corrupt key would make Sōzu reject the `AddCertificate` at apply time —
 /// certificates tier before frontends, so that blocks every frontend add.
 /// The key is therefore parsed and loaded exactly as Sōzu loads it, and then
-/// paired with the leaf exactly as Sōzu 2.3.2 pairs it before committing the
+/// paired with the leaf exactly as Sōzu 2.3.6 pairs it before committing the
 /// certificate (2.2.x did not check the pair at all: a key that belonged to
 /// another certificate loaded fine and failed every handshake).
 pub(crate) fn extract_cert(
@@ -1519,7 +1519,7 @@ pub(crate) fn extract_cert(
         .key_provider
         .load_private_key(key_der)
         .map_err(|e| format!("invalid private key in tls.key: {e}"))?;
-    // Sōzu 2.3.2 refuses the pair before committing it
+    // Sōzu 2.3.6 refuses the pair before committing it
     // (`tls::build_validated_certificate`) with `CertifiedKey::keys_match`:
     // webpki parses the leaf, and the SubjectPublicKeyInfo the provider
     // derives from the key must equal the leaf's byte for byte. Only
@@ -1703,7 +1703,7 @@ pub(crate) enum HttpBackendProtocol {
     /// then reach the backend as HTTP/2 — measured, see
     /// `docs/probes/h2c-backend_sozu-2.3.2_2026-10-19.txt`.
     H2c,
-    /// `kubernetes.io/wss`: WebSocket over TLS. Sōzu 2.3.2 has no TLS towards
+    /// `kubernetes.io/wss`: WebSocket over TLS. Sōzu 2.3.6 has no TLS towards
     /// a backend (`AddBackend` carries an address, never a TLS setting), so
     /// the route cannot speak the declared protocol.
     ///
@@ -3309,7 +3309,7 @@ impl HeaderRegexes {
     }
 }
 
-/// How Sōzu 2.3.2 weighs one of the rules we emit when it selects among the
+/// How Sōzu 2.3.6 weighs one of the rules we emit when it selects among the
 /// matching rules of one class in a hostname leaf (`TreeSelection::offer`,
 /// `lib/src/router/mod.rs:1071-1115`; offered in the order the leaf holds them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3556,7 +3556,7 @@ pub(crate) struct ClaimedCert {
 /// same-fingerprint `ReplaceCertificate`, which Sōzu applies only since 2.3.2
 /// (0bc160b7, #81); 2.2.1 acknowledged it and kept serving the name.
 ///
-/// Names are compared as Sōzu 2.3.2 stores them, ASCII-lowercased at load. A
+/// Names are compared as Sōzu 2.3.6 stores them, ASCII-lowercased at load. A
 /// wildcard and an exact name are different names here, and Sōzu's trie
 /// prefers the exact one, so a `*.example.com` owner does not stop a newer
 /// `app.example.com` claim; that overlap is not arbitrated.
@@ -4354,6 +4354,9 @@ mod hostname_tests {
             "*.xn--a.example.com",
             "0.xn--4gbrim.example.com",
             "*.xn--4gbrim.example.com",
+            // Unicode 18 data only (Sōzu ≥ 2.3.4): U+05D0 U+1B3A, whose
+            // Balinese sign turned Bidi_Class L inside a right-to-left label.
+            "xn--4db870i.example.com",
             "",
             ".",
             ".example.com",
@@ -4369,6 +4372,8 @@ mod hostname_tests {
             "good.example.com",
             "xn--bcher-kva.example.com",
             "a.xn--4gbrim.example.com",
+            // Unicode 18 data only (Sōzu ≥ 2.3.4): U+18E00, newly assigned.
+            "xn--pc7f.example.com",
             "a..b.com",
             "a...b.com",
             "example.com.",
@@ -4443,7 +4448,7 @@ mod header_match_precedence {
         }
     }
 
-    /// Which copies win against their header match in every order Sōzu 2.3.2
+    /// Which copies win against their header match in every order Sōzu 2.3.6
     /// may hold the two (`TreeSelection::offer`; measured for the root shapes
     /// and the longer prefix in `header_match_probe`).
     #[test]

@@ -25,14 +25,14 @@
 //! lifts the routes that outrank them (`lift_header_matches`).
 //! Query match and weighted split are Sōzu limits (weights are honoured, since
 //! 2.3.2 by every policy, but a backend is selected per connection, not per
-//! request, and there is no native 500). URLRewrite's path is merely
-//! unwired — measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and
-//! 2.3.2 (PROTOCOL.md §13) — with two conditions any wiring owes first: a
-//! literal `$` in a rewrite value makes Sōzu reject the frontend outright (and
+//! request, and there is no native 500). URLRewrite is merely unwired —
+//! measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1, 2.3.2 and 2.3.6
+//! (PROTOCOL.md §13) — with two conditions its path owes first: a literal `$`
+//! in a rewrite value makes Sōzu reject the frontend outright (and
 //! translation is all-or-nothing), and a literal path rewrite drops the query
 //! string that `ReplaceFullPath` keeps (a capturing path rule keeps it,
-//! measured). Its `hostname` is blocked upstream: `rewrite_host` sends an
-//! HTTP/1 backend two `Host` lines.
+//! measured). Its `hostname` was blocked upstream until 2.3.4, whose
+//! `rewrite_host` sends an HTTP/1 backend one `Host` line instead of two.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -1557,7 +1557,7 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                     // *remainder*: `$PATH[n]` indexes the path rule's regex
                     // captures, and the regex a Kubernetes prefix compiles to
                     // today has none, so a template naming `$PATH[1]` gets the
-                    // frontend rejected (measured on 2.2.1 and 2.3.2). A
+                    // frontend rejected (measured on 2.2.1, 2.3.2 and 2.3.6). A
                     // capturing spelling of the non-root prefix regex would
                     // express it (measured, PROTOCOL.md §13); not wired yet.
                     // A literal `path` drops the request's query string from
@@ -1655,14 +1655,16 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
             }
             HttpRouteRulesFiltersType::UrlRewrite => {
                 // Not wired — but no longer for the reason this used to give.
-                // Measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1 and
-                // 2.3.2 (PROTOCOL.md §13): `rewrite_path` alone rewrites the
-                // forwarded path toward the *same* backend, and `rewrite_host`
-                // changes only the forwarded Host — the proxy still dials the
-                // cluster's configured address, but an HTTP/1 backend gets the
-                // Host line twice, which a strict backend refuses, so
-                // `hostname` stays blocked upstream. The `408` this comment
-                // claimed was taken against 2.1.0 and does not reproduce.
+                // Measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1,
+                // 2.3.2 and 2.3.6 (PROTOCOL.md §13): `rewrite_path` alone
+                // rewrites the forwarded path toward the *same* backend, and
+                // `rewrite_host` changes only the forwarded Host — the proxy
+                // still dials the cluster's configured address. Through 2.3.3
+                // an HTTP/1 backend got that Host line twice, which a strict
+                // backend refuses; 2.3.4 sends one (measured on 2.3.6), so
+                // nothing upstream blocks `hostname` any more. The `408` this
+                // comment claimed was taken against 2.1.0 and does not
+                // reproduce.
                 //
                 // Two things must be settled before wiring the path, both
                 // measured: a literal `$` makes Sōzu reject the frontend

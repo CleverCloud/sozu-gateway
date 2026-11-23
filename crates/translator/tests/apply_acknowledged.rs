@@ -2,14 +2,14 @@
 //! failed part-way, and whether the controller adopts it.
 //!
 //! Sōzu's main process is stood in for by `sozu-command-lib`'s own
-//! `ConfigState` (the linked version, 2.3.2), fed the way the agent feeds
+//! `ConfigState` (the linked version, 2.3.6), fed the way the agent feeds
 //! Sōzu: in order; a teardown of something already gone settled, a
 //! frontend's after evicting whatever still holds its key; a duplicate
 //! listener add settled; a duplicate frontend add repaired (evict, re-add);
 //! a replace on a listener holding no certificate sent as an add; anything
 //! else refused, which stops the batch. [`Sozu::V23`] layers on top the 2.3
 //! behaviours a lagging baseline trips over (see [`dispatch`]). The linked
-//! 2.3.2 state carries them itself, so every case run in both modes also
+//! 2.3.6 state carries them itself, so every case run in both modes also
 //! checks that the stand-in agrees with it.
 
 use std::collections::BTreeSet;
@@ -198,7 +198,7 @@ enum Sozu {
 }
 
 /// What the main process does with one request. `Linked` is the linked
-/// `ConfigState` as is (2.3.2; it was 2.2.1 when these rules were written). `V23` adds what 2.3 changed and a lagging baseline
+/// `ConfigState` as is (2.3.6; it was 2.2.1 when these rules were written). `V23` adds what 2.3 changed and a lagging baseline
 /// runs into: an `AddBackend` naming a cluster it does not hold is refused;
 /// `RemoveCluster` takes the cluster's backends and frontends with it;
 /// removing the last certificate at a listener drops the listener's entry,
@@ -357,7 +357,7 @@ fn settle(sozu: Sozu, state: &mut ConfigState, request: &Request) -> bool {
             }
             _ => false,
         },
-        // Sōzu 2.3.2 refuses a UDP address another cluster holds with an
+        // Sōzu 2.3.6 refuses a UDP address another cluster holds with an
         // error of its own; the agent repairs it as it does `Exists`.
         Err(StateError::UdpFrontendAddressTaken { .. })
             if matches!(request.request_type, Some(RequestType::AddUdpFrontend(_))) =>
@@ -1642,7 +1642,7 @@ fn wherever_a_batch_stops_the_adopted_baseline_converges() {
 }
 
 /// A UDP address another cluster holds, a drift the shadow missed. The
-/// linked 2.3.2 state refuses the add with an error of its own
+/// linked 2.3.6 state refuses the add with an error of its own
 /// (`UdpFrontendAddressTaken`), not `Exists`; the agent repairs both alike
 /// (evict the holder, add again), and so does each stand-in mode, leaving
 /// the address to the desired cluster alone.

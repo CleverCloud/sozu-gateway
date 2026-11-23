@@ -521,7 +521,7 @@ mod tests {
     /// The two routers a generated rule must satisfy: Sōzu 2.2.1 runs
     /// `regex::bytes::Regex::new(value).is_match(target)` unanchored, and 2.3.0
     /// and later wrap the value as `\A(?:value)\z` first (47eb07c). The
-    /// shipped data plane is 2.3.2; the unanchored half is kept so a downgrade
+    /// shipped data plane is 2.3.6; the unanchored half is kept so a downgrade
     /// to 2.2.x routes the same. Each pattern is compiled both ways, on the
     /// `regex` version Sōzu builds against, and must give the same answer on
     /// every target — including a remainder that is not valid UTF-8, which

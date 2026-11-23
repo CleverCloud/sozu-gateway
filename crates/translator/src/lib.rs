@@ -133,7 +133,7 @@ fn cluster_request(c: &ir::Cluster, udp: bool) -> Request {
         // by the TCP and UDP proxies, so a cluster an L4 route shares is
         // unaffected.
         http2: c.http2.then_some(true),
-        // A TCP-connect check means nothing to datagrams, and Sōzu 2.3.2 does
+        // A TCP-connect check means nothing to datagrams, and Sōzu 2.3.6 does
         // not refuse one on a UDP cluster (`command/src/state.rs`), so it is
         // left out here; the builder has already dropped and reported it.
         health_check: if udp {
@@ -646,7 +646,7 @@ fn tier(req: &Request) -> u8 {
         // `add_http_frontend` hit an Occupied entry → `StateError::Exists`, and
         // the trailing Remove would then delete the route outright. Removing
         // first leaves the entry Vacant for the re-add (a tiny, unavoidable gap
-        // since Sōzu, 2.3.2 included, has no atomic frontend replace).
+        // since Sōzu, 2.3.6 included, has no atomic frontend replace).
         //
         // Sōzu 2.3 carries a frontend with header predicates or a
         // `silent_close` redirect on dedicated verbs (`RequestType::add_http_frontend`
