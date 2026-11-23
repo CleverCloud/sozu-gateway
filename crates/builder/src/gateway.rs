@@ -16,24 +16,35 @@
 //!    either one Service `backendRef` or a redirect-only rule (no backend);
 //!  - filters (Phase 3): RequestHeaderModifier / ResponseHeaderModifier,
 //!    RequestRedirect (scheme, status, hostname/path/port targets), and
-//!    URLRewrite `hostname` (Sōzu's `rewrite_host`, faithful since 2.3.4);
+//!    URLRewrite `hostname` (Sōzu's `rewrite_host`, faithful since 2.3.4) and
+//!    `path` of type `ReplaceFullPath` (`rewrite_path`);
 //!  - cross-namespace `backendRefs`/`certificateRefs` honour `ReferenceGrant`.
+//!
+//! Every path match but the root `/` is matched against the request path
+//! alone, query string excluded: Sōzu 2.3.4's `REGEX_PATH` rule
+//! (`crate::path_only`), which also carries the request's query over to a
+//! `ReplaceFullPath` target — a redirect's `Location` or a rewritten path.
 //!
 //! Not yet: query matches, weighted multi-backend split (incl. a single
 //! weight-0 drain), rule timeouts, per-backendRef filters, TLS Passthrough,
-//! RequestMirror, redirect `ReplacePrefixMatch`, and URLRewrite `path`. Header
+//! RequestMirror, and `ReplacePrefixMatch` (redirect and URLRewrite). Header
 //! matches are programmed, but Sōzu ranks them above path and method, so the
 //! builder lifts the routes that outrank them (`lift_header_matches`).
 //! Query match and weighted split are Sōzu limits (weights are honoured, since
 //! 2.3.2 by every policy, but a backend is selected per connection, not per
-//! request, and there is no native 500). A URLRewrite `path` is merely unwired
-//! — measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1, 2.3.2 and 2.3.6
-//! (PROTOCOL.md §13): a literal `$` in a rewrite value makes Sōzu reject the
-//! frontend outright (and translation is all-or-nothing), and a literal path
-//! rewrite drops the query string that `ReplaceFullPath` keeps (a capturing
-//! path rule keeps it, measured). A URLRewrite carrying a `path` is reported
-//! and its rule served without the rewrite, hostname included. The `hostname`
-//! alone is wired: through 2.3.3 `rewrite_host` sent an HTTP/1 backend two
+//! request, and there is no native 500). `ReplacePrefixMatch` needs the
+//! matched prefix's remainder, which the path rules emitted here do not
+//! capture (PROTOCOL.md §13). The root `/` is Sōzu's own `Prefix "/"`, on
+//! which a literal path target drops the request's query (measured for a
+//! rewrite on Sōzu 2.2.0 and re-measured unchanged on 2.2.1, 2.3.2 and 2.3.6;
+//! a redirect `Location` is built from the same rewritten path, and drops it
+//! on a `REGEX` rule, measured): a redirect there is programmed as before and
+//! loses the query, a URLRewrite `path` is reported and its rule served
+//! without the rewrite, hostname included. A
+//! literal `$` in a rewrite value makes Sōzu reject the frontend outright
+//! (and translation is all-or-nothing), so path and host targets are admitted
+//! only as literals (`path_target_refusal`). The `hostname` rewrite became
+//! faithful in 2.3.4: through 2.3.3 `rewrite_host` sent an HTTP/1 backend two
 //! `Host` lines, which Go's `net/http` answers 400; 2.3.4 sends one.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,10 +57,11 @@ use sozu_gw_gateway_api::gateway::{
     GatewayListenersAllowedRoutesNamespacesFrom as ApiAllowedFrom, GatewayListenersTlsMode,
 };
 use sozu_gw_gateway_api::httproute::{
-    HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectPathType,
+    HttpRouteRules, HttpRouteRulesFilters, HttpRouteRulesFiltersRequestRedirectPathType,
     HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersType,
-    HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesHeadersType, HttpRouteRulesMatchesMethod,
-    HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType,
+    HttpRouteRulesFiltersUrlRewritePathType, HttpRouteRulesMatchesHeaders,
+    HttpRouteRulesMatchesHeadersType, HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPath,
+    HttpRouteRulesMatchesPathType,
 };
 use sozu_gw_gateway_api::{TcpRoute, UdpRoute};
 use sozu_gw_ir as ir;
@@ -1006,7 +1018,11 @@ fn attach_rule(
     let ParsedFilters {
         filters,
         unprogrammable,
-    } = parse_filters(rule.filters.as_deref().unwrap_or(&[]), problems);
+    } = parse_filters(
+        rule.filters.as_deref().unwrap_or(&[]),
+        keeps_query_on_rewrite(rule),
+        problems,
+    );
     // A filter we cannot honour takes the whole rule out: the alternative is
     // serving a response the author never asked for. The gap must show in the
     // status too, not only in the problem list, so the route never reads
@@ -1245,6 +1261,8 @@ fn attach_rule(
                         filters: filters.clone(),
                         listener: bind,
                         header_matches: header_matches.clone(),
+                        // The Gateway API matches a path, never its query.
+                        path_only: crate::path_only(path, true),
                     },
                     source: source.clone(),
                 });
@@ -1256,20 +1274,42 @@ fn attach_rule(
 /// Map an HTTPRoute path match to an IR path match. `Err` is a regex Sōzu
 /// would refuse; the caller skips the rule.
 fn path_match(path: Option<&HttpRouteRulesMatchesPath>) -> Result<ir::PathMatch, Problem> {
+    admit_path(unadmitted_path_match(path))
+}
+
+/// [`path_match`] before Sōzu's compilation is checked.
+fn unadmitted_path_match(path: Option<&HttpRouteRulesMatchesPath>) -> ir::PathMatch {
     let Some(path) = path else {
-        return Ok(ir::PathMatch::Prefix("/".to_string()));
+        return ir::PathMatch::Prefix("/".to_string());
     };
     let value = path
         .value
         .clone()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/".to_string());
-    admit_path(match path.r#type {
+    match path.r#type {
         Some(HttpRouteRulesMatchesPathType::Exact) => ir::PathMatch::Exact(value),
         Some(HttpRouteRulesMatchesPathType::RegularExpression) => ir::PathMatch::Regex(value),
         // PathPrefix (the default) or unset.
         _ => ir::PathMatch::Prefix(crate::canonical_prefix(&value)),
-    })
+    }
+}
+
+/// Whether Sōzu keeps the request's query on a path the rule rewrites:
+/// whether every match of `rule` that can be programmed (a query match never
+/// is) compiles to a path-only rule. Sōzu appends the original query to a
+/// rewritten path only on a `REGEX_PATH` rule (2.3.4, measured on 2.3.6,
+/// `docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`), and the root `/` is
+/// its own `Prefix "/"`, on which a literal `rewrite_path` drops the query
+/// (PROTOCOL.md §13). A rule with no match matches the root.
+fn keeps_query_on_rewrite(rule: &HttpRouteRules) -> bool {
+    match rule.matches.as_deref() {
+        None | Some([]) => false,
+        Some(matches) => matches
+            .iter()
+            .filter(|m| m.query_params.as_ref().is_none_or(|q| q.is_empty()))
+            .all(|m| crate::path_only(&unadmitted_path_match(m.path.as_ref()), true)),
+    }
 }
 
 /// Why an HTTPRoute match's header conditions cannot be programmed.
@@ -1405,14 +1445,32 @@ fn push_header_value(
     replace: bool,
     problems: &mut Vec<Problem>,
 ) -> bool {
+    let filter = match on {
+        ir::HeaderTarget::Request => "RequestHeaderModifier",
+        ir::HeaderTarget::Response => "ResponseHeaderModifier",
+    };
+    let operation = if replace { "set" } else { "add" };
     if value.is_empty() {
-        let filter = match on {
-            ir::HeaderTarget::Request => "RequestHeaderModifier",
-            ir::HeaderTarget::Response => "ResponseHeaderModifier",
-        };
-        let operation = if replace { "set" } else { "add" };
         problems.push(Problem::FilterUnsupported {
             kind: format!("{filter}.{operation} {key} with an empty value"),
+        });
+        return false;
+    }
+    // Sōzu writes the value unchecked into the request or response, where a
+    // CR/LF writes header lines of its own (measured for a request edit on
+    // 2.3.6, `docs/probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt`), and
+    // the v1.6.1 CRD sets no pattern on it. Refused: every control character
+    // RFC 9110 keeps out of a field value, the bytes Sōzu itself refuses in a
+    // header predicate's exact value (HTAB stays allowed).
+    if value
+        .bytes()
+        .any(|b| matches!(b, 0x00..=0x08 | 0x0A..=0x1F | 0x7F))
+    {
+        problems.push(Problem::FilterUnsupported {
+            kind: format!(
+                "{filter}.{operation} {key} with a control character in its value (Sōzu would \
+                 write it unchecked into the header)"
+            ),
         });
         return false;
     }
@@ -1452,11 +1510,121 @@ fn is_precise_hostname(hostname: &str) -> bool {
         })
 }
 
+/// Why a literal path target cannot become Sōzu's `rewrite_path`, if it
+/// cannot: a `ReplaceFullPath` of a `RequestRedirect` (the `Location`'s
+/// path) or of a `URLRewrite` (the forwarded request's). The CRD bounds the
+/// value's length alone, so it is checked here:
+///
+/// - not an absolute path (empty, or not starting with `/`): Sōzu writes it
+///   where the path goes as it is;
+/// - a `$`: it opens Sōzu's `$HOST[n]`/`$PATH[n]` template grammar, and a
+///   value Sōzu cannot parse makes it reject the frontend (measured, `$$` is
+///   no escape); translation is all-or-nothing, so one such route would fail
+///   every reconcile of the shared instance;
+/// - a `?`: Sōzu then keeps the value's own query and drops the request's
+///   (measured on 2.3.6), where `ReplaceFullPath` replaces the path alone;
+/// - a `#`: the request's query, which Sōzu appends, would land in the
+///   fragment;
+/// - an ASCII control character or whitespace: Sōzu copies the value
+///   unchecked into the forwarded request line or the `Location` header,
+///   where a CR/LF writes header lines of its own (measured for a redirect,
+///   `docs/probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt`);
+/// - anything else a path carries only percent-encoded ([`is_plain_path`]):
+///   a non-ASCII byte, `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`, a `%`
+///   not followed by two hex digits. Sōzu writes it as it is, into a request
+///   line or a `Location` that is then no valid URI reference; its own
+///   parser answers a client `400` for a target holding a non-ASCII byte
+///   (measured, `docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`), as a
+///   strict backend would the rewritten request.
+///
+/// `?` and `#` are refused on every rule, the root prefix included, where
+/// Sōzu drops the request's query whatever the value: one value then means
+/// one thing on every match of its rule.
+fn path_target_refusal(path: &str) -> Option<&'static str> {
+    if !path.starts_with('/') {
+        return Some("that is not an absolute path starting with '/'");
+    }
+    if path.contains('?') {
+        return Some(
+            "containing '?' (Sōzu would keep that query and drop the request's, which \
+             ReplaceFullPath keeps)",
+        );
+    }
+    if path.contains('#') {
+        return Some(
+            "containing '#' (the request's query Sōzu appends would land in the fragment)",
+        );
+    }
+    if let Some(reason) = host_target_refusal(path) {
+        return Some(reason);
+    }
+    if !is_plain_path(path) {
+        return Some(
+            "containing a character a path carries only percent-encoded (outside the \
+             Gateway API's path character set, RFC 3986's)",
+        );
+    }
+    None
+}
+
+/// Whether `path` holds only what the Gateway API admits in an `Exact` or
+/// `PathPrefix` match value, the v1.6.1 CRD's
+/// `^(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|[%][0-9a-fA-F]{2})+$`: RFC 3986's
+/// `pchar` and `/`, a `%` only as a percent-encoding. The CRD sets no
+/// pattern on a `ReplaceFullPath` value, so one is checked here.
+fn is_plain_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'%' => {
+                let hex = |offset: usize| bytes.get(at + offset).is_some_and(u8::is_ascii_hexdigit);
+                if !(hex(1) && hex(2)) {
+                    return false;
+                }
+                at += 3;
+            }
+            b if b.is_ascii_alphanumeric() || b"-/._~!$&'()*+,;=:@".contains(&b) => at += 1,
+            _ => return false,
+        }
+    }
+    !bytes.is_empty()
+}
+
+/// Why a literal target — a redirect hostname, or a path past
+/// [`path_target_refusal`]'s own checks — cannot be sent to Sōzu, if it
+/// cannot: a `$`, or an ASCII control character or whitespace (see
+/// [`path_target_refusal`]). A hostname target's CRD pattern already excludes
+/// all three; refused here anyway, for a CRD that did not.
+fn host_target_refusal(target: &str) -> Option<&'static str> {
+    if target.contains('$') {
+        return Some(
+            "containing '$' (Sōzu reads it as a rewrite template and rejects the frontend)",
+        );
+    }
+    if target
+        .bytes()
+        .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return Some(
+            "containing an ASCII control character or whitespace (Sōzu writes it unchecked \
+             into the request line or the Location header)",
+        );
+    }
+    None
+}
+
 /// Parse HTTPRoute filters into neutral IR filters. Supported: header modifiers
 /// (set→delete+append, add→append, remove→delete), RequestRedirect (scheme,
-/// status, hostname/path/port targets) and URLRewrite `hostname`. Unsupported
-/// filters/sub-fields (incl. a URLRewrite `path`) are reported.
-fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>) -> ParsedFilters {
+/// status, hostname/path/port targets) and URLRewrite (`hostname`, and a
+/// `ReplaceFullPath` `path` where `keeps_query`, see
+/// [`keeps_query_on_rewrite`]). Unsupported filters/sub-fields (incl. a
+/// URLRewrite `ReplacePrefixMatch`) are reported.
+fn parse_filters(
+    filters: &[HttpRouteRulesFilters],
+    keeps_query: bool,
+    problems: &mut Vec<Problem>,
+) -> ParsedFilters {
     let mut ff = ir::FrontendFilters::default();
     let mut unprogrammable = false;
     // A RequestRedirect beside a URLRewrite, and a second URLRewrite, are both
@@ -1588,23 +1756,32 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                     // frontend rejected (measured on 2.2.1, 2.3.2 and 2.3.6). A
                     // capturing spelling of the non-root prefix regex would
                     // express it (measured, PROTOCOL.md §13); not wired yet.
-                    // A literal `path` drops the request's query string from
-                    // `Location` — measured, a known gap of this redirect.
+                    // A literal `path` keeps the request's query in
+                    // `Location` on a path-only rule, every match but the
+                    // root `/` (measured on 2.3.6), and drops it on any other
+                    // rule (measured on a `REGEX` one) — on the root, where
+                    // the redirect is programmed as it always was.
                     let path = match r.path.as_ref() {
                         None => None,
                         Some(p) => match p.r#type {
                             HttpRouteRulesFiltersRequestRedirectPathType::ReplaceFullPath => {
-                                match p.replace_full_path.clone() {
-                                    Some(v) => Some(v),
-                                    None => {
-                                        refuse(
-                                            "RequestRedirect ReplaceFullPath with no value",
-                                            problems,
-                                        );
-                                        unprogrammable = true;
-                                        continue;
-                                    }
+                                let Some(value) = p.replace_full_path.as_deref() else {
+                                    refuse(
+                                        "RequestRedirect ReplaceFullPath with no value",
+                                        problems,
+                                    );
+                                    unprogrammable = true;
+                                    continue;
+                                };
+                                if let Some(reason) = path_target_refusal(value) {
+                                    refuse(
+                                        &format!("RequestRedirect path.replaceFullPath {reason}"),
+                                        problems,
+                                    );
+                                    unprogrammable = true;
+                                    continue;
                                 }
+                                Some(value.to_string())
                             }
                             _ => {
                                 refuse("RequestRedirect path.type ReplacePrefixMatch", problems);
@@ -1618,14 +1795,11 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                     // `$PATH[n]` template grammar, and a value Sōzu cannot parse
                     // makes it **reject the frontend**. Translation is
                     // all-or-nothing, so one such route would fail every
-                    // reconcile cluster-wide — refuse it here instead.
+                    // reconcile cluster-wide — refuse it here instead, with
+                    // what Sōzu would write unchecked into the `Location`.
                     let hostname = r.hostname.clone();
-                    if hostname.iter().chain(path.iter()).any(|v| v.contains('$')) {
-                        refuse(
-                            "RequestRedirect hostname/path containing '$' (Sōzu reads it as a \
-                             rewrite template and rejects the frontend)",
-                            problems,
-                        );
+                    if let Some(reason) = hostname.as_deref().and_then(host_target_refusal) {
+                        refuse(&format!("RequestRedirect hostname {reason}"), problems);
                         unprogrammable = true;
                         continue;
                     }
@@ -1694,67 +1868,126 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                 let Some(rewrite) = &filter.url_rewrite else {
                     continue;
                 };
-                // `path` is not wired. Measured on Sōzu 2.2.0 and re-measured
-                // unchanged on 2.2.1, 2.3.2 and 2.3.6 (PROTOCOL.md §13): a
-                // literal `rewrite_path` drops the query string
-                // `ReplaceFullPath` keeps, and `ReplacePrefixMatch` needs a
-                // capture today's path rule does not have (`$PATH[1]` on it
-                // gets the frontend rejected). A capturing spelling of the rule
-                // fixes both, and is not wired. The rule is served without the
-                // rewrite, its hostname too: applying half of one filter is an
-                // outcome nobody asked for.
-                if rewrite.path.is_some() {
-                    let hostname = if rewrite.hostname.is_some() {
-                        ", its hostname included"
-                    } else {
-                        ""
-                    };
-                    problems.push(Problem::FilterUnsupported {
-                        kind: format!(
-                            "URLRewrite path (not wired: the rule is served without the \
-                             rewrite{hostname})"
-                        ),
-                    });
-                    continue;
+                // A hostname that is present but empty is below the CRD's
+                // minimum length: it reaches here only past an older or
+                // hand-edited CRD and is refused by the grammar check below,
+                // not taken for an absent one.
+                //
+                // Checked before the path, so a hostname that could never be
+                // programmed refuses the rule whatever happens to the path —
+                // a path the rule is served without (`ReplacePrefixMatch`, the
+                // root prefix) included.
+                let hostname = rewrite.hostname.as_deref();
+                if let Some(hostname) = hostname {
+                    // `$` opens Sōzu's `$HOST[n]` / `$PATH[n]` template
+                    // grammar, and a value it cannot parse makes it reject the
+                    // frontend; translation is all-or-nothing, so one such
+                    // route would fail every reconcile. The CRD's hostname
+                    // pattern already excludes it; refused here anyway, as for
+                    // a redirect target.
+                    if hostname.contains('$') {
+                        problems.push(Problem::FilterUnsupported {
+                            kind: "URLRewrite hostname containing '$' (Sōzu reads it as a \
+                                   rewrite template and rejects the frontend)"
+                                .to_string(),
+                        });
+                        unprogrammable = true;
+                        continue;
+                    }
+                    // Sōzu copies the value unchecked into the forwarded
+                    // request's authority, which an HTTP/1 backend reads as its
+                    // `Host` line (read in the upstream 2.3.6 source), so a CR
+                    // or LF would write header lines of its own. The CRD's
+                    // `PreciseHostname` pattern excludes anything but
+                    // lowercase RFC 1123 labels; whatever got past it (an
+                    // older or hand-edited CRD) is refused here rather than
+                    // forwarded.
+                    if !is_precise_hostname(hostname) {
+                        problems.push(Problem::FilterUnsupported {
+                            kind: "URLRewrite hostname outside the Gateway API hostname \
+                                   grammar (Sōzu forwards it unchecked as the request's Host)"
+                                .to_string(),
+                        });
+                        unprogrammable = true;
+                        continue;
+                    }
                 }
+                // A rewrite Sōzu cannot honour whole is not applied at all,
+                // its hostname included: half of one filter is an outcome
+                // nobody asked for. The reports that serve the rule without it
+                // say so.
+                let and_hostname = if rewrite.hostname.is_some() {
+                    ", its hostname included"
+                } else {
+                    ""
+                };
+                let path = match &rewrite.path {
+                    None => None,
+                    Some(p) => match p.r#type {
+                        HttpRouteRulesFiltersUrlRewritePathType::ReplaceFullPath => {
+                            let Some(value) = p.replace_full_path.as_deref() else {
+                                problems.push(Problem::FilterUnsupported {
+                                    kind: "URLRewrite ReplaceFullPath with no value".to_string(),
+                                });
+                                unprogrammable = true;
+                                continue;
+                            };
+                            if let Some(reason) = path_target_refusal(value) {
+                                problems.push(Problem::FilterUnsupported {
+                                    kind: format!("URLRewrite path.replaceFullPath {reason}"),
+                                });
+                                unprogrammable = true;
+                                continue;
+                            }
+                            // `rewrite_path` replaces the path and, on a
+                            // path-only rule, Sōzu appends the request's
+                            // query to it, as `ReplaceFullPath` asks (2.3.4,
+                            // measured on 2.3.6). On the root `/` it drops
+                            // the query (PROTOCOL.md §13): the rule is served
+                            // there as it is, never with a rewrite that loses
+                            // part of the request.
+                            if !keeps_query {
+                                problems.push(Problem::FilterUnsupported {
+                                    kind: format!(
+                                        "URLRewrite path on a rule matching the root prefix '/', \
+                                         where Sōzu would drop the request's query (the rule is \
+                                         served without the rewrite{and_hostname})"
+                                    ),
+                                });
+                                continue;
+                            }
+                            Some(value.to_string())
+                        }
+                        // `ReplacePrefixMatch` needs the matched prefix's
+                        // remainder, a capture the path rules emitted here do
+                        // not have (`$PATH[1]` on them gets the frontend
+                        // rejected, measured; PROTOCOL.md §13).
+                        HttpRouteRulesFiltersUrlRewritePathType::ReplacePrefixMatch => {
+                            problems.push(Problem::FilterUnsupported {
+                                kind: format!(
+                                    "URLRewrite path ReplacePrefixMatch (not wired: the rule is \
+                                     served without the rewrite{and_hostname})"
+                                ),
+                            });
+                            continue;
+                        }
+                        // The CRD asks for `Accepted=False`/`UnsupportedValue`
+                        // on a type it does not know.
+                        HttpRouteRulesFiltersUrlRewritePathType::Unknown => {
+                            problems.push(Problem::FilterUnsupported {
+                                kind: "URLRewrite path.type this controller build does not know"
+                                    .to_string(),
+                            });
+                            unprogrammable = true;
+                            continue;
+                        }
+                    },
+                };
                 // Neither field: both are optional in the CRD, and a rewrite
                 // that names nothing changes nothing, so serving the rule as it
                 // is honours it exactly — nothing to program, nothing to
-                // report. A hostname that is present but empty is below the
-                // CRD's minimum length: it reaches here only past an older or
-                // hand-edited CRD and is refused by the grammar check below,
-                // not taken for an absent one.
-                let Some(hostname) = rewrite.hostname.as_deref() else {
-                    continue;
-                };
-                // `$` opens Sōzu's `$HOST[n]` / `$PATH[n]` template grammar, and
-                // a value it cannot parse makes it reject the frontend;
-                // translation is all-or-nothing, so one such route would fail
-                // every reconcile. The CRD's hostname pattern already excludes
-                // it; refused here anyway, as for a redirect target.
-                if hostname.contains('$') {
-                    problems.push(Problem::FilterUnsupported {
-                        kind: "URLRewrite hostname containing '$' (Sōzu reads it as a rewrite \
-                               template and rejects the frontend)"
-                            .to_string(),
-                    });
-                    unprogrammable = true;
-                    continue;
-                }
-                // Sōzu copies the value unchecked into the forwarded request's
-                // authority, which an HTTP/1 backend reads as its `Host` line
-                // (read in the upstream 2.3.6 source), so a CR or LF would
-                // write header lines of its own. The CRD's `PreciseHostname`
-                // pattern excludes anything but lowercase RFC 1123 labels;
-                // whatever got past it (an older or hand-edited CRD) is
-                // refused here rather than forwarded.
-                if !is_precise_hostname(hostname) {
-                    problems.push(Problem::FilterUnsupported {
-                        kind: "URLRewrite hostname outside the Gateway API hostname grammar \
-                               (Sōzu forwards it unchecked as the request's Host)"
-                            .to_string(),
-                    });
-                    unprogrammable = true;
+                // report.
+                if hostname.is_none() && path.is_none() {
                     continue;
                 }
                 // `rewrite_host` changes the forwarded host only: the proxy
@@ -1765,8 +1998,8 @@ fn parse_filters(filters: &[HttpRouteRulesFilters], problems: &mut Vec<Problem>)
                 // `net/http` answers 400. It also wins over a request header
                 // edit of `Host`. All measured (PROTOCOL.md §13).
                 ff.rewrite = Some(ir::Rewrite {
-                    hostname: Some(hostname.to_string()),
-                    path: None,
+                    hostname: hostname.map(str::to_string),
+                    path,
                 });
             }
             // Sōzu has no CORS support: no response-header synthesis keyed on

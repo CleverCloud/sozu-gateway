@@ -4,6 +4,163 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Path rules match the path without its query string
+
+Every compiled `Prefix` and `Exact` path but the root prefix `/`, Ingress and
+HTTPRoute alike, and every HTTPRoute `RegularExpression` path now goes to
+Sōzu as a `REGEX_PATH` rule (2.3.4), which matches the request path up to its
+first `?`, instead of a `REGEX` rule, which matches the whole request target,
+query string included. An Ingress `ImplementationSpecific` regex and a path
+holding a literal `?` stay `REGEX`. The patterns themselves are unchanged. On
+`REGEX_PATH` Sōzu also carries the request's query over to a rewritten path or
+a redirect `Location` that has no `?` of its own, which it does on no other
+rule ([measured on 2.3.6](probes/regex-path_sozu-2.3.6_2026-11-23.txt)). What
+changes on the first reconcile after the upgrade:
+
+- **An HTTPRoute `RegularExpression` path no longer sees the query string.**
+  `^/api/v2$` now matches `/api/v2?x=1` too, as the Gateway API matches a
+  path, and a pattern written to read the query (`^/search\?q=.*$`) matches
+  nothing any more: a path never holds a `?`. Reading the query was a
+  deviation from the specification.
+- **A `RequestRedirect` `path.replaceFullPath` keeps the query.** The
+  `Location` carries the request's `?query` after the new path — except on a
+  rule matching the root prefix `/`, Sōzu's own `Prefix "/"` rule, where it is
+  still dropped, as before.
+- **A `URLRewrite` `path.replaceFullPath` is applied**, with the rewrite's
+  `hostname` if it has one: the backend receives the new path followed by the
+  request's query. It used to be reported (`FilterUnsupported`) and its rule
+  served without any rewrite, hostname included. That is still what happens
+  to a rule matching the root prefix `/` (a rule without `matches` included),
+  where Sōzu cannot keep the query, and to `ReplacePrefixMatch`.
+- **The path rewrite now counts in what a route does.** It used to be
+  dropped, so a rule carrying one had the effect of a plain rule to the same
+  Service, and another object with the identical match (host, path, method,
+  headers) to that Service was folded into it silently. The two now differ:
+  the newer object is reported `RouteCollision` (`Accepted: False` on an
+  HTTPRoute, a Warning Event on an Ingress) and the oldest claimant's filters
+  serve that key — rewritten or not, whichever object is older. Likewise a
+  header match and a route ranked above it that differ only by the rewrite no
+  longer serve alike, so where Sōzu's order would decide between them the
+  header match is now skipped (`HeaderMatchOverlap` or
+  `HeaderMatchOutranksRoute`). Check the routes the command below prints
+  against your other HTTPRoutes and Ingresses on the same hosts.
+- **Path targets are admitted only as plain literal paths.** A
+  `replaceFullPath` value, redirect or rewrite, is refused
+  (`Accepted: False` / `UnsupportedValue`, the rule not programmed) when it is
+  empty or does not start with `/`; when it contains `$`, which Sōzu reads as
+  a rewrite template; when it contains `?` or `#`; or when it holds anything
+  outside the path character set the Gateway API admits in a path match
+  (RFC 3986's, a `%` only as a percent-encoding): an ASCII control character,
+  whitespace, a non-ASCII byte, `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`
+  or `}`. For a redirect this is stricter than before:
+  - a `?` or `#` target used to be programmed as written, and answered with
+    exactly the `Location` its author wrote, the request's query dropped as
+    for any path target. A `ReplaceFullPath` replaces the path and keeps the
+    request's query, which Sōzu cannot do with either: given a `?` it keeps
+    the target's own query and drops the request's
+    ([measured](probes/regex-path_sozu-2.3.6_2026-11-23.txt)), and after a
+    `#` the query it appends would land in the fragment. Refused on every
+    rule, the root prefix included, so one value means one thing on every
+    match. There is no equivalent: drop the query part, or write a literal
+    `?` or `#` as path data, percent-encoded (`%3F`, `%23`);
+  - a CR/LF, whitespace, an empty or a relative target was programmed too,
+    and written into the `Location` unchecked — a CR/LF writes a response
+    header of its own
+    ([measured](probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt));
+  - the other characters were written as they are, into a `Location` that
+    is no valid URI reference; Sōzu's own parser answers `400` to a client
+    sending a non-ASCII byte in a target
+    ([measured](probes/regex-path_sozu-2.3.6_2026-11-23.txt)). Write them
+    percent-encoded.
+
+  A redirect `hostname` with a control character or whitespace is refused
+  too; the CRD pattern already excludes those. So is a `URLRewrite` hostname
+  outside the hostname grammar beside a `path` the rule is served without
+  (on the root prefix, or `ReplacePrefixMatch`), which went unchecked there.
+- **A header edit value holding a control character is refused.** A
+  `RequestHeaderModifier` or `ResponseHeaderModifier` `set` or `add` whose
+  value holds an ASCII control character other than a tab (a CR/LF, a NUL,
+  DEL) is refused like an empty one: `Accepted: False` / `UnsupportedValue`,
+  the rule not programmed. It used to be programmed, and Sōzu wrote it raw
+  into the header, where a CR/LF writes header lines of its own
+  ([measured](probes/rewrite-redirect_sozu-2.3.6_2026-11-23.txt) for a
+  request edit). RFC 9110 keeps those characters out of a field value; the
+  CRD sets no pattern on it.
+- **Ingress `Prefix` and `Exact` paths accept the same requests**: they go
+  out as `REGEX_PATH` with the same pattern, which matches a target exactly
+  when it matches the target's path. `ImplementationSpecific` keeps `REGEX`,
+  the pattern against the request target with its query, and so does a
+  `Prefix` or `Exact` path containing a literal `?`, which a path alone never
+  holds. **What moves is the order a re-forked worker serves overlaps in.**
+  Where an `ImplementationSpecific` regex and a `Prefix` or `Exact` path
+  without a method, Ingress or HTTPRoute, both match a request on one host,
+  the one Sōzu serves is the one it added last
+  ([#80](https://github.com/CleverCloud/sozu-gateway/issues/80)), and a worker
+  Sōzu forks again adds them in route-key order. That order used to put the
+  regex first (`R/…` before `R^…`), so a re-forked worker served the
+  `Prefix`/`Exact` path; it now puts the regex last (`Q^…` before `R/…`), so a
+  re-forked worker serves the regex. An `ImplementationSpecific` `/.*`
+  catch-all, for instance, now takes `/api/x` from `Prefix /api` on a
+  re-forked worker. A worker programmed incrementally still serves the one
+  its batches added last, as before. That is on a named host, whose rules
+  Sōzu ranks in a tree where the last one added wins. A route without a
+  hostname sits in Sōzu's first-match list instead, so there the change runs
+  the other way: a re-forked worker used to serve the regex and now serves
+  the compiled path — a hostname-less `ImplementationSpecific` `/.*` beside a
+  hostname-less `Prefix /api` now gives `/api/x` to the `Prefix` (read in the
+  upstream source, not measured).
+- **Two regexes whose Sōzu keys differ only by that kind still have one
+  owner.** An Ingress `ImplementationSpecific` regex and an HTTPRoute
+  `RegularExpression` of the same text on one host used to be one Sōzu
+  route; they are now two, read differently, which Sōzu would order by
+  insertion. They are still arbitrated as one, as is an Ingress regex ending
+  in `;GET` against the same HTTPRoute regex restricted to `GET`: the oldest
+  claimant keeps it and the other is reported `RouteCollision`
+  (`Accepted: False` on an HTTPRoute, a Warning Event on an Ingress). Two of
+  the same text are reported now even when both send the requests to the same
+  Service, where they used to be folded silently.
+
+To list the HTTPRoutes these touch:
+
+```sh
+kubectl get httproute -A -o json | jq -r '.items[]
+  | select(any(.spec.rules[]?;
+      any(.matches[]?; .path.type == "RegularExpression")
+      or any(.filters[]?; (.type == "URLRewrite" and .urlRewrite.path != null)
+        or (.type == "RequestRedirect" and .requestRedirect.path != null))))
+  | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+**It needs Sōzu 2.3.4 or later**, already the floor since the 2.3.6 bump
+below: Sōzu 2.3.2 refuses every `REGEX_PATH` frontend
+([measured](probes/regex-path_sozu-2.3.2_2026-11-23.txt)), and the reconcile
+then fails on every pass.
+
+**Upgrade by rolling the Pods**, which a chart upgrade does: the new image
+replaces the Pod, and its Sōzu and shadow start empty. A controller container
+restarted alone onto this version, over a Sōzu still holding the routes it
+sent as `REGEX`, re-sends each of them as a removal of its `R…` key then an
+add of its `Q…` key, removals first, in one batch: those routes are absent
+together while that batch applies, and their requests go to whatever else on
+the host matches them — the root prefix, typically, or a covering wildcard
+host — and an incremental worker may rank overlapping ones in another order
+until Sōzu forks it again. Measured on 2.3.6 with the previous controller's own
+shadow: every migrated route ended under its `Q…` key with none left under `R…`; right
+after the batch, 70 of 72 probed targets answered as on a fresh start, the two
+others being an `ImplementationSpecific` regex overlapping a prefix, still
+served by the prefix on the incrementally fed workers; once both workers were
+forked again, all 72 matched
+([record](probes/regex-path-live_sozu-2.3.6_2026-11-23.txt)).
+
+**Downgrading the controller requires restarting Sōzu.** The IR gains a field:
+the shadow file records each such frontend as `path_only` (skipped when
+false, so a shadow without any is written as before). An older build ignores
+the field, computes `R…` keys for routes Sōzu holds under `Q…` keys, and never
+removes them. Restart the Sōzu container (or roll the Pods) after a
+downgrade; see [Downgrading the controller](#downgrading-the-controller).
+
+---
+
 ## HTTPRoute `URLRewrite.hostname` is applied
 
 A `URLRewrite` filter with a `hostname` and no `path` used to be reported
@@ -51,14 +208,16 @@ kubectl get httproute -A -o json | jq -r '.items[]
   redirect listed first was refused before. The CRD already refuses all but
   the first.
 - **A `URLRewrite` with a `path` is unchanged:** still reported, and its rule
-  still served without the rewrite, hostname included.
+  still served without the rewrite, hostname included. (Applied since, see
+  above.)
 - **It needs Sōzu 2.3.4 or later**, already the floor since the 2.3.6 bump
   below: before upstream 026a1fb8 an HTTP/1 backend receives two `Host` lines,
   which a strict server (Go's `net/http`) answers `400`
   ([measured on 2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt)).
 
-The IR and the shadow format are unchanged. A downgraded controller re-adds
-those frontends without `rewrite_host` on its first reconcile.
+The IR and the shadow format are unchanged by this change alone (the path
+rules above add a field since). A downgraded controller re-adds those
+frontends without `rewrite_host` on its first reconcile.
 
 ---
 

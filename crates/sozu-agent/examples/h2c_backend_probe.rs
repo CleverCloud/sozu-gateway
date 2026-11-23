@@ -598,6 +598,7 @@ fn model(http2: bool, a: &Addrs) -> ir::Ir {
         listener: if tls { a.https } else { a.http },
         filters: ir::FrontendFilters::default(),
         header_matches: vec![],
+        path_only: false,
     };
     ir::Ir {
         clusters: vec![

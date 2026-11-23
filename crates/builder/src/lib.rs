@@ -482,8 +482,9 @@ pub enum Problem {
         reason: String,
     },
     /// Another route already holds the key Sōzu would store this one under
-    /// (listener + host + path + method, joined with `;`) with a different
-    /// match or effect. This route is dropped — never silently applied on top
+    /// (listener + host + path + method, joined with `;`), or that key but for
+    /// the regex rule kind (`kind_twin`), with a different match or effect.
+    /// This route is dropped — never silently applied on top
     /// — in favour of `winner` (a cluster id, or `"<redirect>"` for a
     /// cluster-less redirect frontend). Applies to Ingress and Gateway API
     /// routes alike.
@@ -494,8 +495,20 @@ pub enum Problem {
         /// `true` when the dropped match is *not* the winner's match — it
         /// covers other requests and only Sōzu's `;`-joined key spelling
         /// merges the two (a regex `/x;GET` against `/x` restricted to `GET`),
-        /// so those requests are served by nobody rather than by `winner`.
+        /// or it is a [`kind_twin`](Problem::RouteCollision::kind_twin) — so
+        /// the requests only it matches are served by nobody rather than by
+        /// `winner`.
         key_only: bool,
+        /// `true` when the two are not one Sōzu key at all: their keys differ
+        /// by the rule kind alone, one read against the path alone
+        /// (`REGEX_PATH`, `Q`), the other against the target with its query
+        /// (`REGEX`, `R`) — an Ingress `ImplementationSpecific` regex against
+        /// an HTTPRoute `RegularExpression` of the same text, or `/x;GET`
+        /// against `/x` restricted to `GET`. Sōzu would hold both and rank
+        /// them by the order it added them where both match, so arbitration
+        /// folds the kinds ([`ir::Frontend::contested_route_key`]) and keeps
+        /// the one owner they had when both were `REGEX`. Implies `key_only`.
+        kind_twin: bool,
     },
     /// A user-supplied regex path (Ingress `ImplementationSpecific`, HTTPRoute
     /// `RegularExpression`) that Sōzu cannot compile. Sōzu compiles the
@@ -906,7 +919,21 @@ impl std::fmt::Display for Problem {
                 hostname,
                 path,
                 winner,
+                kind_twin: true,
+                ..
+            } => write!(
+                f,
+                "the match on host+path {hostname}{path} spells the route key of the frontend \
+                 of {winner} in the other regex kind (one read against the request path alone, \
+                 the other against the target with its query); Sōzu would hold both and rank \
+                 them by the order it added them where both match, so this match was dropped"
+            ),
+            Problem::RouteCollision {
+                hostname,
+                path,
+                winner,
                 key_only: false,
+                ..
             } => write!(
                 f,
                 "host+path {hostname}{path} is already served by {winner}; this route was dropped"
@@ -916,6 +943,7 @@ impl std::fmt::Display for Problem {
                 path,
                 winner,
                 key_only: true,
+                ..
             } => write!(
                 f,
                 "the match on host+path {hostname}{path} shares Sōzu's route key with the \
@@ -1221,6 +1249,45 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
     })
 }
 
+/// Whether a frontend on `path` is [`path_only`](ir::Frontend::path_only):
+/// whether Sōzu matches its rule against the request path alone
+/// (`REGEX_PATH`, 2.3.4) rather than the target with its query (`REGEX`).
+///
+/// - A compiled `Prefix` or `Exact` path: yes, unless it is the root `/`
+///   (Sōzu's own `Prefix "/"`, which has no such kind; an `Exact` `/` is a
+///   regex like any other) or its literal holds a `?`. Its pattern accepts a
+///   target exactly when it accepts the target's path, so nothing it routes
+///   changes, and on `REGEX_PATH` Sōzu keeps the query of a rewritten path or
+///   a redirect target, which `ReplaceFullPath` asks for. A `?` in the
+///   literal (an Ingress admits one; the HTTPRoute CRD does not) could never
+///   match a path, which has none, so that rule stays `REGEX`.
+/// - A user regex: `gateway_regex` says whose. An HTTPRoute
+///   `RegularExpression` path is matched against the path alone, as the
+///   Gateway API describes path matching. An Ingress `ImplementationSpecific`
+///   regex keeps what this controller has always documented for it — the
+///   pattern as written, against the target with its query — which
+///   Kubernetes leaves to the implementation.
+///
+/// Every compiled rule of a hostname, Ingress or HTTPRoute, is spelled with
+/// one kind, so the order a worker forked again replays them in (route-key
+/// order, #80) is the order it was before; only an Ingress
+/// `ImplementationSpecific` regex and a literal holding a `?` keep the other
+/// kind, and are replayed after them — so where such a rule and a
+/// method-less path-only one both match a request on a named host, a
+/// re-forked worker now serves the `REGEX` rule, the last it replays. An
+/// `ImplementationSpecific` regex used to replay first (its `R/…` key sorted
+/// before `R^…`), losing those requests to the compiled rule. On a
+/// hostname-less route, Sōzu's first-match `POST` list, it runs the other
+/// way: the path-only rule, replayed first, now wins there.
+pub(crate) fn path_only(path: &ir::PathMatch, gateway_regex: bool) -> bool {
+    match path {
+        ir::PathMatch::Regex(_) => gateway_regex,
+        ir::PathMatch::Prefix(literal) | ir::PathMatch::Exact(literal) => {
+            !literal.contains('?') && matches!(path.sozu_rule(), ir::SozuPathRule::Regex(_))
+        }
+    }
+}
+
 /// Admit a path match into the IR only if the Sōzu rule it compiles to is one
 /// Sōzu can load.
 ///
@@ -1237,11 +1304,15 @@ fn path_match(path_type: &str, path: Option<&str>) -> Result<ir::PathMatch, Prob
 /// version (pinned, see `tests/sozu_lock_pins.rs`), so what compiles here
 /// compiles there; the compiled regexes are discarded. Paths enter the IR only
 /// through here, which is why the check lives here and not in the translator.
+/// A `REGEX_PATH` rule is compiled the same two ways, and refused with the
+/// same message (measured on 2.3.6,
+/// `docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`), so the pattern alone
+/// decides, whichever kind the frontend sends it as.
 pub(crate) fn admit_path(path: ir::PathMatch) -> Result<ir::PathMatch, Problem> {
     let pattern = match path.sozu_rule() {
         // The root `/` is a plain prefix rule: nothing to compile.
         ir::SozuPathRule::Prefix(_) => return Ok(path),
-        ir::SozuPathRule::Regex(pattern) => pattern,
+        ir::SozuPathRule::Regex(pattern) | ir::SozuPathRule::RegexPath(pattern) => pattern,
     };
     match sozu_regex_refusal(&pattern) {
         None => Ok(path),
@@ -2163,13 +2234,13 @@ pub(crate) struct SourcedFrontend {
 }
 
 /// The route identity Sōzu keys on — the exact string its frontend map uses
-/// ([`ir::SozuRouteKey`]), built from the *compiled* path rule. So an `Exact`
-/// and a user regex that spell the same anchored pattern collide here exactly
-/// as they do in Sōzu, and so do two routes that differ as tuples but not as
-/// Sōzu's unescaped `;`-joined string (a regex `/x;GET` and a regex `/x` with
-/// `method: GET`). The loser is reported rather than left for Sōzu to refuse,
-/// which would fail every reconcile of the shared instance. The target cluster
-/// is *not* part of the key.
+/// ([`ir::SozuRouteKey`]), built from the *compiled* path rule, its kind
+/// included. So an `Exact` and a user regex that spell the same anchored
+/// pattern collide here exactly as they do in Sōzu, and so do two routes that
+/// differ as tuples but not as Sōzu's unescaped `;`-joined string (a regex
+/// `/x;GET` and a regex `/x` with `method: GET`). The target cluster is *not*
+/// part of the key. Collision arbitration contends on the coarser
+/// [`contested_key`]; this one answers "does Sōzu already hold this key".
 type RouteKey = ir::SozuRouteKey;
 
 /// The raw path value of a match, for problem context.
@@ -2183,16 +2254,31 @@ fn route_key(frontend: &ir::Frontend) -> RouteKey {
     frontend.sozu_route_key()
 }
 
-/// Whether two frontends sharing a [`RouteKey`] also *match* the same requests:
-/// same listener, hostname, compiled rule, method and header conditions. Only
+/// The key frontends contend for in [`resolve_frontend_collisions`]: the
+/// [`RouteKey`] with a `REGEX_PATH` rule spelled as the `REGEX` rule of the
+/// same pattern ([`ir::Frontend::contested_route_key`]). Sōzu could hold the
+/// two side by side, but ranks them in one class where the one it holds last
+/// wins, so a newer object could take an older one's requests with a twin of
+/// its rule in the other kind. Contending for one key, they keep the single
+/// owner they had when every regex rule was a `REGEX`. The loser is reported
+/// rather than left for Sōzu to refuse or to order, which on a refusal would
+/// fail every reconcile of the shared instance.
+fn contested_key(frontend: &ir::Frontend) -> RouteKey {
+    frontend.contested_route_key()
+}
+
+/// Whether two frontends sharing a key also *match* the same requests: same
+/// listener, hostname, compiled rule (its kind included: a path-only twin
+/// reads a request without its query), method and header conditions. Only
 /// then is the loser a true duplicate; otherwise it is a different route that
 /// Sōzu's key spelling cannot hold alongside the winner (a regex path can
-/// spell a method or a header predicate), and dropping it loses traffic.
+/// spell a method or a header predicate), or one arbitration folds onto it
+/// ([`contested_key`]), and dropping it loses traffic.
 fn same_match(a: &ir::Frontend, b: &ir::Frontend) -> bool {
     a.tls == b.tls
         && a.listener == b.listener
         && a.hostname == b.hostname
-        && a.path.sozu_rule() == b.path.sozu_rule()
+        && a.sozu_rule() == b.sozu_rule()
         && a.method == b.method
         && ir::HeaderMatch::canonical(a.header_matches.iter().cloned())
             == ir::HeaderMatch::canonical(b.header_matches.iter().cloned())
@@ -2274,13 +2360,15 @@ fn claim_for(ident: &OwnerIdent, claims: &BTreeMap<OwnerIdent, OwnerClaim>) -> O
 /// backends never determine the winner.
 ///
 /// Sōzu's key is the `;`-joined string of listener, hostname, path kind/value
-/// and method ([`RouteKey`]), never the target cluster. Prefixes must already
-/// have their trailing slash canonicalised. A repeated match from the *same*
-/// object is legal input (an HTTPRoute's repeated matches, an Ingress's own
-/// rules) and stays benign; so does an identical match with an identical
-/// effect from another object. Anything else sharing the key is a collision
-/// on the losing object's own source and parentRef — including two different
-/// matches of one object that only Sōzu's key spelling merges.
+/// and method ([`RouteKey`]), never the target cluster; frontends contend for
+/// it with the two regex kinds folded into one ([`contested_key`]). Prefixes
+/// must already have their trailing slash canonicalised. A repeated match
+/// from the *same* object is legal input (an HTTPRoute's repeated matches, an
+/// Ingress's own rules) and stays benign; so does an identical match with an
+/// identical effect from another object. Anything else sharing the key is a
+/// collision on the losing object's own source and parentRef — including two
+/// different matches of one object that only Sōzu's key spelling merges, and
+/// two that spell one pattern in the two regex kinds.
 ///
 /// The second list is the frontends folded into a kept one because they match
 /// the same requests with the same effect (cluster and filters) from another
@@ -2310,7 +2398,7 @@ fn resolve_frontend_collisions(
     let mut kept: Vec<SourcedFrontend> = Vec::new();
     let mut winners: BTreeMap<RouteKey, usize> = BTreeMap::new();
     for (_, sf) in &frontends {
-        let key = route_key(&sf.frontend);
+        let key = contested_key(&sf.frontend);
         if let std::collections::btree_map::Entry::Vacant(entry) = winners.entry(key) {
             entry.insert(kept.len());
             kept.push(SourcedFrontend {
@@ -2325,7 +2413,7 @@ fn resolve_frontend_collisions(
     let mut collisions = Vec::new();
     let mut folded = Vec::new();
     for (_, sf) in frontends {
-        let index = winners[&route_key(&sf.frontend)];
+        let index = winners[&contested_key(&sf.frontend)];
         let winner = &kept[index].frontend;
         // A repeated match from the same object is its own rules/matches,
         // resolved by emission order — legal API input, never a collision. An
@@ -2356,6 +2444,9 @@ fn resolve_frontend_collisions(
                     .clone()
                     .unwrap_or_else(|| "<redirect>".to_string()),
                 key_only: !same_match,
+                // Contested as one key, held by Sōzu as two: the keys differ
+                // by the rule kind alone.
+                kind_twin: route_key(winner) != route_key(&sf.frontend),
             },
         ));
     }
@@ -2979,8 +3070,9 @@ impl<'a> GroupPlan<'a> {
 }
 
 /// The copy of plain route `u` lifted above header match `p` (see
-/// [`lift_header_matches`]): `u`'s path, cluster and filters under `p`'s
-/// header conditions, with `p`'s method where `u` names none. A path that
+/// [`lift_header_matches`]): `u`'s path (read the way `u` reads it, path-only
+/// or not), cluster and filters under `p`'s header conditions, with `p`'s
+/// method where `u` names none. A path that
 /// outranks `p`'s (an Exact path it covers, a longer prefix, the same path)
 /// matches no target `p`'s does not, so the copy takes no request `p` cannot
 /// match. One it took would outrank, in Sōzu's predicated class, every plain
@@ -3247,7 +3339,12 @@ fn methods_meet(a: &ir::Frontend, b: &ir::Frontend) -> bool {
 }
 
 /// Whether some request target matches both paths' Sōzu rules. A regex is
-/// assumed to; an Exact path also matches itself with a query string.
+/// assumed to; an Exact path also matches itself with a query string. Read
+/// path-only or not, a compiled path accepts the same targets ([`path_only`]),
+/// so the rule kind does not enter into it. A user regex read path-only
+/// accepts other targets than read whole — `^/foo$` gains `/foo?q=1`, and a
+/// pattern that reads the query loses every request — which the assumption
+/// covers either way.
 fn paths_meet(a: &ir::PathMatch, b: &ir::PathMatch) -> bool {
     use ir::PathMatch::{Exact, Prefix, Regex};
     let queried = |target: &str, exact: &str| {
@@ -3329,13 +3426,20 @@ enum TreeOffer {
     Regex { shortest: usize },
 }
 
+/// A `REGEX_PATH` rule is offered as a regex: Sōzu tests it against the path
+/// alone but files its result in the regex class, and raises the bar to the
+/// whole target's length like any regex (`TreeSelection::offer` is handed
+/// the target, not the path).
 fn tree_offer(f: &ir::Frontend) -> TreeOffer {
-    match (f.path.sozu_rule(), &f.method) {
+    match (f.sozu_rule(), &f.method) {
         (ir::SozuPathRule::Prefix(_), _) => TreeOffer::RootPrefix,
-        (ir::SozuPathRule::Regex(_), Some(_)) => TreeOffer::RegexWithMethod,
-        (ir::SozuPathRule::Regex(_), None) => TreeOffer::Regex {
+        (ir::SozuPathRule::Regex(_) | ir::SozuPathRule::RegexPath(_), Some(_)) => {
+            TreeOffer::RegexWithMethod
+        }
+        (ir::SozuPathRule::Regex(_) | ir::SozuPathRule::RegexPath(_), None) => TreeOffer::Regex {
             // An Exact or non-root Prefix rule matches its literal path and
-            // longer targets only; a user regex could match anything.
+            // longer targets only, path-only or not (a target is never
+            // shorter than its path); a user regex could match anything.
             shortest: match &f.path {
                 ir::PathMatch::Exact(path) => path.len(),
                 ir::PathMatch::Prefix(prefix) => prefix_body(prefix).len(),
@@ -3894,6 +3998,9 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                         }
 
                         let host_has_tls = tls_covers(&tls_ready_hosts, &host);
+                        // An `ImplementationSpecific` regex keeps reading the
+                        // target with its query; see `path_only`.
+                        let path_only = path_only(&pm, false);
                         // The plain-HTTP frontend redirects to HTTPS when the host
                         // has a cert and the redirect isn't opted out; otherwise it
                         // proxies. The redirect wins over the cluster, so keeping
@@ -3926,6 +4033,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                     .expect("HTTP is always exposed"),
                                 filters: http_filters,
                                 header_matches: vec![],
+                                path_only,
                             },
                             source: source.clone(),
                         });
@@ -3942,6 +4050,7 @@ pub fn build(cfg: &BuildConfig, inputs: &Inputs) -> BuildOutput {
                                         .expect("HTTPS is always exposed"),
                                     filters: ir::FrontendFilters::default(),
                                     header_matches: vec![],
+                                    path_only,
                                 },
                                 source: source.clone(),
                             });
@@ -4395,6 +4504,7 @@ mod header_match_precedence {
     fn frontend(path: ir::PathMatch, method: Option<&str>) -> ir::Frontend {
         ir::Frontend {
             hostname: "app.example.com".into(),
+            path_only: path_only(&path, true),
             path,
             method: method.map(str::to_string),
             cluster_id: Some("c".into()),
@@ -4631,6 +4741,7 @@ mod http_route_collisions {
                 listener: "0.0.0.0:8080".parse().unwrap(),
                 filters: Default::default(),
                 header_matches: vec![],
+                path_only: false,
             },
             source: FrontendSource::HttpRoute {
                 namespace: "demo".into(),

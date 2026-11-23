@@ -42,16 +42,25 @@ pub enum PathMatch {
     Regex(String),
 }
 
-/// The Sōzu path rule a [`PathMatch`] compiles to: what the translator emits,
-/// and the rule half of the key Sōzu stores a route under
-/// ([`Frontend::sozu_route_key`]) — one definition, so the builder's collision
-/// arbitration and the translator can never disagree about what collides.
+/// The Sōzu path rule a frontend compiles to ([`Frontend::sozu_rule`]): what
+/// the translator emits, and the rule half of the key Sōzu stores a route
+/// under ([`Frontend::sozu_route_key`]) — one definition, so the builder's
+/// collision arbitration and the translator can never disagree about what
+/// collides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SozuPathRule {
     /// A plain string prefix — only ever the root `/`.
     Prefix(String),
-    /// An anchored regex, Sōzu's `PathRuleKind::Regex`.
+    /// An anchored regex matched against the request target, query string
+    /// included: Sōzu's `PathRuleKind::Regex`, key letter `R`.
     Regex(String),
+    /// The same anchored regex matched against the request path alone, up
+    /// to its first `?`: Sōzu's `PathRuleKind::RegexPath` (2.3.4, upstream
+    /// 660ce27e), key letter `Q`. Sōzu ranks it exactly like a `Regex`, and
+    /// carries the request's query over to a rewritten path or a redirect
+    /// `Location` that has no `?` of its own, which it does on no other kind
+    /// (measured on 2.3.6, `docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt`).
+    RegexPath(String),
 }
 
 impl PathMatch {
@@ -92,6 +101,11 @@ impl PathMatch {
     /// - `Regex`: the user's own pattern, verbatim (validated by the builder).
     ///   Its meaning *does* change with the router: unanchored on 2.2.x,
     ///   full-span on 2.3. That is documented for users, not papered over.
+    ///
+    /// This is the pattern alone, read against the request target with its
+    /// query. Which of the two regex kinds Sōzu matches it with is the
+    /// frontend's to say ([`Frontend::path_only`]), so what is emitted and
+    /// keyed is [`Frontend::sozu_rule`]; the pattern is the same either way.
     pub fn sozu_rule(&self) -> SozuPathRule {
         match self {
             PathMatch::Regex(v) => SozuPathRule::Regex(v.clone()),
@@ -246,6 +260,39 @@ pub struct Frontend {
     /// is why a downgrade restarts Sōzu (`docs/UPGRADING.md`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header_matches: Vec<HeaderMatch>,
+    /// Sōzu matches the path rule against the request path alone, without
+    /// its query string: a regex rule goes out as `REGEX_PATH` (2.3.4, key
+    /// letter `Q`) instead of `REGEX` (`R`), with the same pattern
+    /// ([`Frontend::sozu_rule`]). The root prefix, Sōzu's own `Prefix "/"`,
+    /// ignores it, and the builder leaves it `false` there.
+    ///
+    /// The builder sets it on a compiled `Prefix`/`Exact` path without a
+    /// literal `?` (the pattern then accepts the same requests either way,
+    /// and on `REGEX_PATH` Sōzu keeps the query of a rewritten path or a
+    /// redirect target) and on an HTTPRoute `RegularExpression` path, which
+    /// the Gateway API matches against the path alone. An Ingress
+    /// `ImplementationSpecific` regex keeps reading the target with its
+    /// query, and so does a literal `?`, which a path alone never contains.
+    ///
+    /// It is part of what Sōzu holds, not a way of compiling it: the
+    /// translator diffs a shadow against the desired IR compiling both with
+    /// the current code, so the kind Sōzu was sent must be read back from the
+    /// shadow. A shadow written before the field existed has none, which
+    /// reads `false`: what Sōzu then holds. A controller restarted alone on a
+    /// build that sets it, over a Sōzu still holding those routes as `REGEX`,
+    /// therefore re-sends each of them as a removal then an add, removals
+    /// first, in one batch: the routes are absent together while that batch
+    /// applies, and their requests go to whatever else on the host matches
+    /// them (the root prefix, typically, or a covering wildcard host); and an
+    /// incremental worker may rank overlapping ones in another order until it
+    /// is forked again (#80). A Pod rollout starts Sōzu and the
+    /// shadow afresh and needs none of it. Skipped when `false`, so a shadow
+    /// without path-only rules is byte-identical to one an older build wrote;
+    /// an older build reading one that has them drops the field and compiles
+    /// `R` keys Sōzu does not hold, which is why a downgrade restarts Sōzu
+    /// (`docs/UPGRADING.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub path_only: bool,
 }
 
 /// One request-header condition of a frontend: Sōzu's `HeaderPredicate`.
@@ -310,9 +357,11 @@ impl HeaderMatch {
 /// lands in (`https`, one map per protocol) and the map key itself.
 ///
 /// Sōzu keys the map on `RequestHttpFrontend`'s `Display`, the **unescaped**
-/// string `{address};{hostname};{kind}{rule}[;{method}]`, followed since 2.3.0
-/// by one `;H{kind}:{name:?}={value:?}` per header predicate (canonical order,
-/// see [`HeaderMatch::canonical`]), and rejects an add on an occupied key.
+/// string `{address};{hostname};{kind}{rule}[;{method}]` — `{kind}` is `P`
+/// for a prefix, `R` for a regex and, since 2.3.4, `Q` for a path-only regex
+/// — followed since 2.3.0 by one `;H{kind}:{name:?}={value:?}` per header
+/// predicate (canonical order, see [`HeaderMatch::canonical`]), and rejects
+/// an add on an occupied key.
 /// Because the rule and method are joined with a bare `;`, two routes that
 /// differ as tuples can share one key: a regex `/x;GET` with no method and a
 /// regex `/x` restricted to `GET` both key as `…;R/x;GET`, and a regex path
@@ -329,14 +378,46 @@ pub struct SozuRouteKey {
 }
 
 impl Frontend {
+    /// The path rule Sōzu holds this frontend under: the pattern
+    /// [`PathMatch::sozu_rule`] compiles, as a `REGEX_PATH` rule when the
+    /// frontend is [`path_only`](Frontend::path_only). Only the kind changes,
+    /// never the pattern, so a frontend keeps its place in the key order a
+    /// worker forked again replays its hostname in, among the rules of its
+    /// own kind (#80).
+    pub fn sozu_rule(&self) -> SozuPathRule {
+        match self.path.sozu_rule() {
+            SozuPathRule::Regex(pattern) if self.path_only => SozuPathRule::RegexPath(pattern),
+            rule => rule,
+        }
+    }
+
     /// The key Sōzu stores this frontend under; see [`SozuRouteKey`].
     pub fn sozu_route_key(&self) -> SozuRouteKey {
+        self.route_key_with(self.sozu_rule())
+    }
+
+    /// [`Frontend::sozu_route_key`] with a path-only regex spelled as the
+    /// regex of the same pattern: the key two frontends contend for in the
+    /// builder's arbitration. Sōzu holds a `REGEX` and a `REGEX_PATH` rule of
+    /// one pattern under two keys, but ranks them in one class, where the one
+    /// it holds last wins (#80): programmed side by side, a newer object
+    /// could take an older one's requests with a twin of its rule. Folded,
+    /// they keep the single owner they had when both were `REGEX`.
+    pub fn contested_route_key(&self) -> SozuRouteKey {
+        self.route_key_with(match self.sozu_rule() {
+            SozuPathRule::RegexPath(pattern) => SozuPathRule::Regex(pattern),
+            rule => rule,
+        })
+    }
+
+    fn route_key_with(&self, rule: SozuPathRule) -> SozuRouteKey {
         // Sōzu's wire address carries only the IP and port, so its `Display`
         // never shows an IPv6 flow label or scope id; drop them here too.
         let address = SocketAddr::new(self.listener.ip(), self.listener.port());
-        let (kind, rule) = match self.path.sozu_rule() {
+        let (kind, rule) = match rule {
             SozuPathRule::Prefix(v) => ('P', v),
             SozuPathRule::Regex(v) => ('R', v),
+            SozuPathRule::RegexPath(v) => ('Q', v),
         };
         let mut key = format!("{address};{};{kind}{rule}", self.hostname);
         if let Some(method) = &self.method {
@@ -400,7 +481,9 @@ pub struct Redirect {
     /// Replaces the authority. Sōzu's `rewrite_host`.
     #[serde(default)]
     pub hostname: Option<String>,
-    /// Replaces the whole path. Sōzu's `rewrite_path`.
+    /// Replaces the whole path. Sōzu's `rewrite_path`, after which Sōzu
+    /// appends the request's query on a [`path_only`](Frontend::path_only)
+    /// frontend and drops it on any other.
     #[serde(default)]
     pub path: Option<String>,
     /// An explicit port in the `Location`. Sōzu's `rewrite_port`.
@@ -427,8 +510,10 @@ pub enum RedirectStatus {
 
 /// Rewrite the request's host and/or full path before proxying: Sōzu's
 /// `rewrite_host` / `rewrite_path`, which leave the dialled backend alone. The
-/// builder fills only `hostname` (HTTPRoute `URLRewrite.hostname`); a path
-/// rewrite is not wired.
+/// builder fills them from an HTTPRoute `URLRewrite`: `hostname`, and `path`
+/// for a `ReplaceFullPath` — the latter only on frontends that are
+/// [`path_only`](Frontend::path_only), the one rule kind on which Sōzu keeps
+/// the request's query on a rewritten path.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Rewrite {
     pub hostname: Option<String>,
@@ -636,6 +721,7 @@ mod tests {
             listener: "0.0.0.0:80".parse().expect("listener"),
             filters: FrontendFilters::default(),
             header_matches: vec![],
+            path_only: false,
         };
         assert_eq!(
             frontend.sozu_route_key().key,
@@ -664,9 +750,165 @@ mod tests {
             listener: "0.0.0.0:80".parse().expect("listener"),
             filters: FrontendFilters::default(),
             header_matches: vec![],
+            path_only: false,
         };
         let json = serde_json::to_value(&frontend).expect("serialises");
         assert!(json.get("header_matches").is_none(), "{json}");
+    }
+
+    fn frontend(path: PathMatch, path_only: bool) -> Frontend {
+        Frontend {
+            hostname: "h.example.com".to_string(),
+            path,
+            method: None,
+            cluster_id: Some("c".to_string()),
+            tls: false,
+            listener: "0.0.0.0:80".parse().expect("listener"),
+            filters: FrontendFilters::default(),
+            header_matches: vec![],
+            path_only,
+        }
+    }
+
+    /// A path-only frontend keeps the pattern its path compiles to and
+    /// changes only the kind; the root prefix is Sōzu's own `Prefix "/"`
+    /// either way, while an `Exact` `/` compiles to a regex like any other.
+    #[test]
+    fn a_path_only_frontend_keeps_the_pattern_and_changes_the_kind() {
+        let cases = [
+            PathMatch::Prefix("/foo".into()),
+            PathMatch::Exact("/v1".into()),
+            PathMatch::Exact("/".into()),
+            PathMatch::Regex("^/api/v2$".into()),
+        ];
+        for path in cases {
+            let SozuPathRule::Regex(pattern) = path.sozu_rule() else {
+                panic!("{path:?} compiles to a regex");
+            };
+            assert_eq!(
+                frontend(path.clone(), false).sozu_rule(),
+                SozuPathRule::Regex(pattern.clone())
+            );
+            assert_eq!(
+                frontend(path, true).sozu_rule(),
+                SozuPathRule::RegexPath(pattern)
+            );
+        }
+        for path_only in [false, true] {
+            assert_eq!(
+                frontend(PathMatch::Prefix("/".into()), path_only).sozu_rule(),
+                SozuPathRule::Prefix("/".into()),
+                "the root prefix ignores path_only"
+            );
+        }
+    }
+
+    /// Sōzu spells a `REGEX_PATH` rule with its own letter, `Q`, where the
+    /// method and header predicates follow as for any rule (the translator
+    /// pins the whole key to `RequestHttpFrontend::to_string()`). The key
+    /// the builder arbitrates on folds it back onto the `R` of the same
+    /// pattern; the root prefix has one spelling.
+    #[test]
+    fn a_path_only_regex_is_keyed_with_q_and_contends_as_r() {
+        let mut f = frontend(PathMatch::Exact("/m".into()), true);
+        f.method = Some("GET".to_string());
+        assert_eq!(
+            f.sozu_route_key().key,
+            "0.0.0.0:80;h.example.com;Q^/m(?:\\?(?-u:.*))?$;GET"
+        );
+        assert_eq!(
+            f.contested_route_key().key,
+            "0.0.0.0:80;h.example.com;R^/m(?:\\?(?-u:.*))?$;GET"
+        );
+        let legacy = Frontend {
+            path_only: false,
+            ..f.clone()
+        };
+        assert_ne!(f.sozu_route_key(), legacy.sozu_route_key());
+        assert_eq!(f.contested_route_key(), legacy.sozu_route_key());
+        assert_eq!(legacy.contested_route_key(), legacy.sozu_route_key());
+
+        let root = frontend(PathMatch::Prefix("/".into()), true);
+        assert_eq!(root.sozu_route_key().key, "0.0.0.0:80;h.example.com;P/");
+        assert_eq!(root.contested_route_key(), root.sozu_route_key());
+    }
+
+    /// Why the builder can move a compiled path to `REGEX_PATH` without
+    /// changing what it routes: with no literal `?`, the pattern accepts a
+    /// target exactly when it accepts the target's path (Sōzu's
+    /// `split_query`: everything before the first `?`). A literal `?` is
+    /// the exception — a path never contains one — so such a rule keeps
+    /// `REGEX`.
+    #[test]
+    fn a_compiled_path_accepts_the_same_targets_read_with_or_without_the_query() {
+        let path_of = |target: &[u8]| -> Vec<u8> {
+            target.iter().copied().take_while(|b| *b != b'?').collect()
+        };
+        let targets: &[&[u8]] = &[
+            b"/foo",
+            b"/foo?",
+            b"/foo?q=1",
+            b"/foo/",
+            b"/foo/bar?q=1&r=/x",
+            b"/foobar",
+            b"/foobar?/foo",
+            b"/fo?o",
+            b"/v1",
+            b"/v1?x=1",
+            b"/v1/",
+            b"/v1x?",
+            b"/",
+            b"/?q=1",
+            b"/?/foo",
+            b"/foo/\xff?\xfe",
+        ];
+        for path in [
+            PathMatch::Prefix("/foo".into()),
+            PathMatch::Exact("/v1".into()),
+            PathMatch::Exact("/".into()),
+            PathMatch::Exact("/foo/".into()),
+        ] {
+            let SozuPathRule::Regex(pattern) = path.sozu_rule() else {
+                panic!("{path:?} compiles to a regex");
+            };
+            let rule = regex::bytes::Regex::new(&format!("\\A(?:{pattern})\\z"))
+                .expect("Sōzu compiles the rule");
+            for target in targets {
+                assert_eq!(
+                    rule.is_match(target),
+                    rule.is_match(&path_of(target)),
+                    "{path:?} on {:?}",
+                    String::from_utf8_lossy(target)
+                );
+            }
+        }
+
+        let SozuPathRule::Regex(pattern) = PathMatch::Exact("/a?b".into()).sozu_rule() else {
+            panic!("an exact path compiles to a regex");
+        };
+        let rule = regex::bytes::Regex::new(&format!("\\A(?:{pattern})\\z")).expect("compiles");
+        assert!(rule.is_match(b"/a?b"), "REGEX reads the literal `?`");
+        assert!(
+            !rule.is_match(&path_of(b"/a?b")),
+            "REGEX_PATH would never see it"
+        );
+    }
+
+    #[test]
+    fn a_frontend_that_is_not_path_only_serialises_as_before() {
+        let json = serde_json::to_value(frontend(PathMatch::Exact("/v1".into()), false))
+            .expect("serialises");
+        assert!(json.get("path_only").is_none(), "{json}");
+        let json = serde_json::to_value(frontend(PathMatch::Exact("/v1".into()), true))
+            .expect("serialises");
+        assert_eq!(json["path_only"], true, "{json}");
+        let mut legacy = json.clone();
+        legacy
+            .as_object_mut()
+            .expect("an object")
+            .remove("path_only");
+        let read: Frontend = serde_json::from_value(legacy).expect("an older frontend parses");
+        assert!(!read.path_only, "an older frontend was sent as REGEX");
     }
 
     #[test]

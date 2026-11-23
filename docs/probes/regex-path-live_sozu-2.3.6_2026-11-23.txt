@@ -1,0 +1,1075 @@
+# Provenance: the commit named below (aadaadb) is this change before its rebase onto 2b5f056 (an URLRewrite hostname follow-up
+# that touches no path rule); the routing code it exercises is the one merged. The two ad hoc examples are not in this
+# repository; the method below is complete enough to rebuild them.
+# regex-path-live (rp-live; ad hoc: crates/sozu-agent/examples/regex_path_live.rs built on aadaadbbd555afa8a91a780ad10a38da3dd5bc4a, plus a legacy half regex_path_live_legacy.rs built on its parent 9ac04191b5c3f56e425ac640c6bc09068ad6b121; neither source is committed, both are archived in scratchpad/wf/rp-live.patch) against docker clevercloud/sozu:2.3.6, 2026-11-23
+== image clevercloud/sozu:2.3.6 sha256:27a14a59900be6b234766692b3bf0c2629e17e3a85d69f08532bf928d5543841 (sozu 2.3.6 () +jemallocator +crypto-ring); rustc 1.100.0; both examples built in the dev (debug) profile:
+==   new:    CARGO_TARGET_DIR=$HOME/.cache/wf-target-rp-live cargo build -p sozu-gw-agent --example regex_path_live   (worktree detached at aadaadb; sozu-command-lib =2.3.6)
+==   legacy: the 9ac04191b tree exported as a plain copy to $HOME/.cache/rp-live/legacy-src (Cargo.lock identical byte for byte), CARGO_TARGET_DIR=$HOME/.cache/wf-target-rp-live-legacy cargo build -p sozu-gw-agent --example regex_path_live_legacy
+== run: docker run -d --name rp-live-sozu --network host --user 1000:1000 --log-opt max-size=20m -v $HOME/.cache/rp-live/s:$HOME/.cache/rp-live/s clevercloud/sozu:2.3.6 start -c $HOME/.cache/rp-live/s/config.toml
+== config = deploy/sozu/config.toml at aadaadb with only command_socket -> /home/vscode/.cache/rp-live/s/sozu.sock, pid_file_path -> /home/vscode/.cache/rp-live/s/sozu.pid and the listeners moved to http 0.0.0.0:36080 / https 0.0.0.0:36443 (2 workers, worker_automatic_restart, connect_timeout 2); ONE Sōzu instance for every phase below, never restarted
+== env: SOZU_SOCK=/home/vscode/.cache/rp-live/s/sozu.sock RP_OUT=$HOME/.cache/rp-live/out RP_REPEAT=4 RP_HTTP=36080
+== pipeline: the objects (3 Ingresses, 5 HTTPRoutes, 1 GatewayClass, 1 Gateway with an HTTP listener on port 80, 14 Services + EndpointSlices on 127.0.0.1:36201-36214; BuildConfig exposure http 80 -> bind 36080, https 443 -> bind 36443) go through the REAL builder (`build`), the REAL translator (`reconcile(previous, desired)`) and the REAL agent (`SozuAgent::apply_counted`); the legacy half does the same with the parent commit's builder/translator/agent from an empty shadow and writes the IR it would persist (the shadow's `ir` half), which the new half then reads with this build's serde (`path_only` absent -> false)
+== backends: one echo server per Service, inside the example process (keep-alive capable); it answers backend=<service> line=<request line it received> host=<Host lines joined by |> xfh=<X-Forwarded-Host>
+== client: raw HTTP/1.1 GET, `Connection: close`, one fresh TCP connection per request, each target RP_REPEAT=4 times (two workers, so both answer); "xN" = N identical answers; canonical answer = `200 <backend> [<request line seen by the backend>] host=<Host>[ xfh=<X-Forwarded-Host>]`, `<3xx> location=<Location>`, or the bare status code; target bytes >= 0x80 printed \xNN and sent raw
+== verdict per target: "pass" = every answer identical and equal to the expectation (A and M rounds: this build's expectation; L rounds: the previous controller's, i.e. the same answer or the documented old one); "info" = not asserted (overlap.example.com: an Ingress ImplementationSpecific REGEX over a compiled REGEX_PATH prefix, precedence by insertion/key order, #80)
+== workers re-forked with the UpgradeWorker request (what `sozu upgrade --worker` sends), one at a time, 3 s settle; rounds: A = this build's IR from an empty shadow (A0 incremental workers, A1 one worker re-forked, A2 both), after which everything is removed by reconcile(new IR -> empty);
+==   L = the previous controller's IR applied by the legacy half from empty (L0, L1, L2 likewise); M = this build resuming from that legacy shadow, reconcile(legacy shadow -> new IR) applied on top of L2's state (M0, M1, M2)
+== sequence: regex_path_live objects; regex_path_live fresh; regex_path_live_legacy out/objects.json out/legacy-shadow-ir.json; regex_path_live observe out/legacy-shadow-ir.json; regex_path_live migrate out/legacy-shadow-ir.json; regex_path_live compare
+== no 2.3.2 control was run (the legacy pipeline on the same 2.3.6 instance is the "as before" baseline); Sōzu's log held no error line other than the 400 access lines of the /foo/\xff target
+
+######## $ regex_path_live objects
+wrote /home/vscode/.cache/rp-live/out/objects.json
+
+######## $ regex_path_live fresh
+######## FRESH: new build from an empty shadow ########
+workers (id, pid): [(0, 7), (1, 8)]
+  ingress rp/ing-paths problems=[]
+  ingress rp/ing-root problems=[]
+  ingress rp/ing-overlap problems=[]
+  httproute rp/gw-paths: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-path: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-root: accepted=true (Accepted) problems=[]
+  httproute rp/rewrite-path: accepted=true (Accepted) problems=[]
+  httproute rp/rewrite-root: accepted=true (Accepted) problems=[FilterUnsupported { kind: "URLRewrite path on a rule matching the root prefix '/', where Sōzu would drop the request's query (the rule is served without the rewrite)" }]
+  new IR: 17 frontends
+    path_only=true  rp.gw-foo.80                             0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    path_only=true  rp.gw-foobar.80                          0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$
+    path_only=true  rp.gw-v1.80                              0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$
+    path_only=true  rp.gw-api.80                             0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$
+    path_only=true  rp.ov-prefix.80                          0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$
+    path_only=false rp.ov-regex.80                           0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    path_only=true  rp.ing-foo.80                            0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    path_only=true  rp.ing-exact.80                          0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$
+    path_only=true  rp.ing-v1.80                             0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$
+    path_only=false rp.ing-re.80                             0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    path_only=false rp.ing-qmark.80                          0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    path_only=false rp.ing-root.80                           0.0.0.0:36080;root.example.com;P/
+    path_only=true  (redirect, no cluster)                   0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    path_only=false (redirect, no cluster)                   0.0.0.0:36080;rootmoved.example.com;P/  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    path_only=true  rp.gw-rewrite.80                         0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$  rewrite=Rewrite { hostname: Some("internal.example.com"), path: Some("/new") }
+    path_only=true  rp.gw-api.80                             0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$
+    path_only=false rp.gw-rootrw.80                          0.0.0.0:36080;rootrw.example.com;P/
+== apply empty -> new IR: 45 requests
+    #0   AddCluster rp.gw-api.80
+    #1   AddCluster rp.gw-foo.80
+    #2   AddCluster rp.gw-foobar.80
+    #3   AddCluster rp.gw-rewrite.80
+    #4   AddCluster rp.gw-rootrw.80
+    #5   AddCluster rp.gw-v1.80
+    #6   AddCluster rp.ing-exact.80
+    #7   AddCluster rp.ing-foo.80
+    #8   AddCluster rp.ing-qmark.80
+    #9   AddCluster rp.ing-re.80
+    #10  AddCluster rp.ing-root.80
+    #11  AddCluster rp.ing-v1.80
+    #12  AddCluster rp.ov-prefix.80
+    #13  AddCluster rp.ov-regex.80
+    #14  AddBackend rp.gw-api.80 rp.gw-api.80#127.0.0.1:36210
+    #15  AddBackend rp.gw-foo.80 rp.gw-foo.80#127.0.0.1:36207
+    #16  AddBackend rp.gw-foobar.80 rp.gw-foobar.80#127.0.0.1:36208
+    #17  AddBackend rp.gw-rewrite.80 rp.gw-rewrite.80#127.0.0.1:36211
+    #18  AddBackend rp.gw-rootrw.80 rp.gw-rootrw.80#127.0.0.1:36212
+    #19  AddBackend rp.gw-v1.80 rp.gw-v1.80#127.0.0.1:36209
+    #20  AddBackend rp.ing-exact.80 rp.ing-exact.80#127.0.0.1:36202
+    #21  AddBackend rp.ing-foo.80 rp.ing-foo.80#127.0.0.1:36201
+    #22  AddBackend rp.ing-qmark.80 rp.ing-qmark.80#127.0.0.1:36205
+    #23  AddBackend rp.ing-re.80 rp.ing-re.80#127.0.0.1:36204
+    #24  AddBackend rp.ing-root.80 rp.ing-root.80#127.0.0.1:36206
+    #25  AddBackend rp.ing-v1.80 rp.ing-v1.80#127.0.0.1:36203
+    #26  AddBackend rp.ov-prefix.80 rp.ov-prefix.80#127.0.0.1:36213
+    #27  AddBackend rp.ov-regex.80 rp.ov-regex.80#127.0.0.1:36214
+    #28  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$
+    #29  AddHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$
+    #30  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #31  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$
+    #32  AddHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$
+    #33  AddHttpFrontend 0.0.0.0:36080;rootrw.example.com;P/
+    #34  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #35  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$
+    #36  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #37  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    #38  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    #39  AddHttpFrontend 0.0.0.0:36080;root.example.com;P/
+    #40  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #41  AddHttpFrontend 0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$
+    #42  AddHttpFrontend 0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    #43  AddHttpFrontend 0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$
+    #44  AddHttpFrontend 0.0.0.0:36080;rootmoved.example.com;P/
+    verbs: {"AddBackend": 14, "AddCluster": 14, "AddHttpFrontend": 17}
+    agent.apply_counted: Ok
+== ListFrontends (after the fresh apply): 17 http + 0 https frontends; kinds: P=3 Q(REGEX_PATH)=11 R(REGEX)=3
+    0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$  kind=3 cluster=rp.gw-api.80
+    0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-foo.80
+    0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-foobar.80
+    0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$  kind=3 cluster=rp.gw-v1.80
+    0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$  kind=3 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$  kind=3 cluster=rp.ov-prefix.80
+    0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-regex.80
+    0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$  kind=3 cluster=rp.gw-api.80
+    0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-rewrite.80 rewrite_path="/new" rewrite_host="internal.example.com"
+    0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$  kind=3 cluster=rp.ing-exact.80
+    0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$  kind=3 cluster=rp.ing-foo.80
+    0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$  kind=3 cluster=rp.ing-v1.80
+    0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-re.80
+    0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-qmark.80
+    0.0.0.0:36080;root.example.com;P/  kind=0 cluster=rp.ing-root.80
+    0.0.0.0:36080;rootmoved.example.com;P/  kind=0 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;rootrw.example.com;P/  kind=0 cluster=rp.gw-rootrw.80
+   IR route keys == main process keys: true
+== round A0 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round A0: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 1 (pid 8): status=0 "Upgrade successful:\n- finished soft stop of worker 1\n- finished activation of new worker 2"
+   workers now (id, pid): [(2, 15), (0, 7)]
+== round A1 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round A1: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 0 (pid 7): status=0 "Upgrade successful:\n- finished soft stop of worker 0\n- finished activation of new worker 3"
+   workers now (id, pid): [(3, 16), (2, 15)]
+== round A2 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round A2: 67 pass, 0 FAIL, 5 info, of 72
+== apply new IR -> empty: 45 requests
+    #0   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$
+    #1   RemoveHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$
+    #2   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #3   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$
+    #4   RemoveHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$
+    #5   RemoveHttpFrontend 0.0.0.0:36080;rootrw.example.com;P/
+    #6   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #7   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$
+    #8   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #9   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    #10  RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    #11  RemoveHttpFrontend 0.0.0.0:36080;root.example.com;P/
+    #12  RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #13  RemoveHttpFrontend 0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$
+    #14  RemoveHttpFrontend 0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    #15  RemoveHttpFrontend 0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$
+    #16  RemoveHttpFrontend 0.0.0.0:36080;rootmoved.example.com;P/
+    #17  RemoveBackend rp.gw-api.80 rp.gw-api.80#127.0.0.1:36210
+    #18  RemoveBackend rp.gw-foo.80 rp.gw-foo.80#127.0.0.1:36207
+    #19  RemoveBackend rp.gw-foobar.80 rp.gw-foobar.80#127.0.0.1:36208
+    #20  RemoveBackend rp.gw-rewrite.80 rp.gw-rewrite.80#127.0.0.1:36211
+    #21  RemoveBackend rp.gw-rootrw.80 rp.gw-rootrw.80#127.0.0.1:36212
+    #22  RemoveBackend rp.gw-v1.80 rp.gw-v1.80#127.0.0.1:36209
+    #23  RemoveBackend rp.ing-exact.80 rp.ing-exact.80#127.0.0.1:36202
+    #24  RemoveBackend rp.ing-foo.80 rp.ing-foo.80#127.0.0.1:36201
+    #25  RemoveBackend rp.ing-qmark.80 rp.ing-qmark.80#127.0.0.1:36205
+    #26  RemoveBackend rp.ing-re.80 rp.ing-re.80#127.0.0.1:36204
+    #27  RemoveBackend rp.ing-root.80 rp.ing-root.80#127.0.0.1:36206
+    #28  RemoveBackend rp.ing-v1.80 rp.ing-v1.80#127.0.0.1:36203
+    #29  RemoveBackend rp.ov-prefix.80 rp.ov-prefix.80#127.0.0.1:36213
+    #30  RemoveBackend rp.ov-regex.80 rp.ov-regex.80#127.0.0.1:36214
+    #31  RemoveCluster rp.gw-api.80
+    #32  RemoveCluster rp.gw-foo.80
+    #33  RemoveCluster rp.gw-foobar.80
+    #34  RemoveCluster rp.gw-rewrite.80
+    #35  RemoveCluster rp.gw-rootrw.80
+    #36  RemoveCluster rp.gw-v1.80
+    #37  RemoveCluster rp.ing-exact.80
+    #38  RemoveCluster rp.ing-foo.80
+    #39  RemoveCluster rp.ing-qmark.80
+    #40  RemoveCluster rp.ing-re.80
+    #41  RemoveCluster rp.ing-root.80
+    #42  RemoveCluster rp.ing-v1.80
+    #43  RemoveCluster rp.ov-prefix.80
+    #44  RemoveCluster rp.ov-regex.80
+    verbs: {"RemoveBackend": 14, "RemoveCluster": 14, "RemoveHttpFrontend": 17}
+    agent.apply_counted: Ok
+== ListFrontends (after removing everything): 0 http + 0 https frontends; kinds: P=0 Q(REGEX_PATH)=0 R(REGEX)=0
+
+######## $ regex_path_live_legacy out/objects.json out/legacy-shadow-ir.json   (parent commit 9ac04191b)
+######## LEGACY APPLY: the previous controller (9ac04191b) from an empty shadow ########
+  ingress rp/ing-paths problems=[]
+  ingress rp/ing-root problems=[]
+  ingress rp/ing-overlap problems=[]
+  httproute rp/gw-paths: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-path: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-root: accepted=true (Accepted) problems=[]
+  httproute rp/rewrite-path: accepted=true (Accepted) problems=[FilterUnsupported { kind: "URLRewrite path (not wired: the rule is served without the rewrite, its hostname included)" }]
+  httproute rp/rewrite-root: accepted=true (Accepted) problems=[FilterUnsupported { kind: "URLRewrite path (not wired: the rule is served without the rewrite)" }]
+  legacy IR: 17 frontends
+    rp.gw-foo.80                             0.0.0.0:36080;gw.example.com;R^/foo(?:[/?](?-u:.*))?$
+    rp.gw-foobar.80                          0.0.0.0:36080;gw.example.com;R^/foo/bar(?:[/?](?-u:.*))?$
+    rp.gw-v1.80                              0.0.0.0:36080;gw.example.com;R^/v1(?:\?(?-u:.*))?$
+    rp.gw-api.80                             0.0.0.0:36080;gw.example.com;R^/api/v[0-9]+$
+    rp.ov-prefix.80                          0.0.0.0:36080;overlap.example.com;R^/p(?:[/?](?-u:.*))?$
+    rp.ov-regex.80                           0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    rp.ing-foo.80                            0.0.0.0:36080;prefix.example.com;R^/foo(?:[/?](?-u:.*))?$
+    rp.ing-exact.80                          0.0.0.0:36080;prefix.example.com;R^/exact(?:\?(?-u:.*))?$
+    rp.ing-v1.80                             0.0.0.0:36080;prefix.example.com;R^/v1(?:\?(?-u:.*))?$
+    rp.ing-re.80                             0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    rp.ing-qmark.80                          0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    rp.ing-root.80                           0.0.0.0:36080;root.example.com;P/
+    (redirect, no cluster)                   0.0.0.0:36080;moved.example.com;R^/old(?:[/?](?-u:.*))?$  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    (redirect, no cluster)                   0.0.0.0:36080;rootmoved.example.com;P/  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    rp.gw-rewrite.80                         0.0.0.0:36080;paths.example.com;R^/old(?:[/?](?-u:.*))?$
+    rp.gw-api.80                             0.0.0.0:36080;paths.example.com;R^/api/v[0-9]+$
+    rp.gw-rootrw.80                          0.0.0.0:36080;rootrw.example.com;P/
+== apply empty -> legacy IR: 45 requests
+    #0   AddCluster rp.gw-api.80
+    #1   AddCluster rp.gw-foo.80
+    #2   AddCluster rp.gw-foobar.80
+    #3   AddCluster rp.gw-rewrite.80
+    #4   AddCluster rp.gw-rootrw.80
+    #5   AddCluster rp.gw-v1.80
+    #6   AddCluster rp.ing-exact.80
+    #7   AddCluster rp.ing-foo.80
+    #8   AddCluster rp.ing-qmark.80
+    #9   AddCluster rp.ing-re.80
+    #10  AddCluster rp.ing-root.80
+    #11  AddCluster rp.ing-v1.80
+    #12  AddCluster rp.ov-prefix.80
+    #13  AddCluster rp.ov-regex.80
+    #14  AddBackend rp.gw-api.80 rp.gw-api.80#127.0.0.1:36210
+    #15  AddBackend rp.gw-foo.80 rp.gw-foo.80#127.0.0.1:36207
+    #16  AddBackend rp.gw-foobar.80 rp.gw-foobar.80#127.0.0.1:36208
+    #17  AddBackend rp.gw-rewrite.80 rp.gw-rewrite.80#127.0.0.1:36211
+    #18  AddBackend rp.gw-rootrw.80 rp.gw-rootrw.80#127.0.0.1:36212
+    #19  AddBackend rp.gw-v1.80 rp.gw-v1.80#127.0.0.1:36209
+    #20  AddBackend rp.ing-exact.80 rp.ing-exact.80#127.0.0.1:36202
+    #21  AddBackend rp.ing-foo.80 rp.ing-foo.80#127.0.0.1:36201
+    #22  AddBackend rp.ing-qmark.80 rp.ing-qmark.80#127.0.0.1:36205
+    #23  AddBackend rp.ing-re.80 rp.ing-re.80#127.0.0.1:36204
+    #24  AddBackend rp.ing-root.80 rp.ing-root.80#127.0.0.1:36206
+    #25  AddBackend rp.ing-v1.80 rp.ing-v1.80#127.0.0.1:36203
+    #26  AddBackend rp.ov-prefix.80 rp.ov-prefix.80#127.0.0.1:36213
+    #27  AddBackend rp.ov-regex.80 rp.ov-regex.80#127.0.0.1:36214
+    #28  AddHttpFrontend 0.0.0.0:36080;gw.example.com;R^/api/v[0-9]+$
+    #29  AddHttpFrontend 0.0.0.0:36080;paths.example.com;R^/api/v[0-9]+$
+    #30  AddHttpFrontend 0.0.0.0:36080;gw.example.com;R^/foo(?:[/?](?-u:.*))?$
+    #31  AddHttpFrontend 0.0.0.0:36080;gw.example.com;R^/foo/bar(?:[/?](?-u:.*))?$
+    #32  AddHttpFrontend 0.0.0.0:36080;paths.example.com;R^/old(?:[/?](?-u:.*))?$
+    #33  AddHttpFrontend 0.0.0.0:36080;rootrw.example.com;P/
+    #34  AddHttpFrontend 0.0.0.0:36080;gw.example.com;R^/v1(?:\?(?-u:.*))?$
+    #35  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/exact(?:\?(?-u:.*))?$
+    #36  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/foo(?:[/?](?-u:.*))?$
+    #37  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    #38  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    #39  AddHttpFrontend 0.0.0.0:36080;root.example.com;P/
+    #40  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/v1(?:\?(?-u:.*))?$
+    #41  AddHttpFrontend 0.0.0.0:36080;overlap.example.com;R^/p(?:[/?](?-u:.*))?$
+    #42  AddHttpFrontend 0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    #43  AddHttpFrontend 0.0.0.0:36080;moved.example.com;R^/old(?:[/?](?-u:.*))?$
+    #44  AddHttpFrontend 0.0.0.0:36080;rootmoved.example.com;P/
+    agent.apply_counted: Ok
+wrote the legacy shadow's ir half to out/legacy-shadow-ir.json
+
+######## $ regex_path_live observe out/legacy-shadow-ir.json
+######## LEGACY STATE: what the previous controller programmed ########
+== ListFrontends (legacy state, as applied by 9ac0419): 17 http + 0 https frontends; kinds: P=3 Q(REGEX_PATH)=0 R(REGEX)=14
+    0.0.0.0:36080;gw.example.com;R^/api/v[0-9]+$  kind=1 cluster=rp.gw-api.80
+    0.0.0.0:36080;gw.example.com;R^/foo(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-foo.80
+    0.0.0.0:36080;gw.example.com;R^/foo/bar(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-foobar.80
+    0.0.0.0:36080;gw.example.com;R^/v1(?:\?(?-u:.*))?$  kind=1 cluster=rp.gw-v1.80
+    0.0.0.0:36080;moved.example.com;R^/old(?:[/?](?-u:.*))?$  kind=1 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-regex.80
+    0.0.0.0:36080;overlap.example.com;R^/p(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-prefix.80
+    0.0.0.0:36080;paths.example.com;R^/api/v[0-9]+$  kind=1 cluster=rp.gw-api.80
+    0.0.0.0:36080;paths.example.com;R^/old(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-rewrite.80
+    0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-re.80
+    0.0.0.0:36080;prefix.example.com;R^/exact(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-exact.80
+    0.0.0.0:36080;prefix.example.com;R^/foo(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-foo.80
+    0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-qmark.80
+    0.0.0.0:36080;prefix.example.com;R^/v1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-v1.80
+    0.0.0.0:36080;root.example.com;P/  kind=0 cluster=rp.ing-root.80
+    0.0.0.0:36080;rootmoved.example.com;P/  kind=0 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;rootrw.example.com;P/  kind=0 cluster=rp.gw-rootrw.80
+   legacy shadow read by THIS build: 17 frontends, path_only=true on 0; its route keys == main process keys: true
+== round L0 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 404  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 404  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 404  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /old HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /old?q=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /old/page?q=1&r=2 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round L0: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 2 (pid 15): status=0 "Upgrade successful:\n- finished soft stop of worker 2\n- finished activation of new worker 4"
+   workers now (id, pid): [(3, 16), (4, 17)]
+== round L1 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 404  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 404  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 404  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /old HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /old?q=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /old/page?q=1&r=2 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x2 200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com | x2 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x1 200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com | x3 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round L1: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 3 (pid 16): status=0 "Upgrade successful:\n- finished soft stop of worker 3\n- finished activation of new worker 5"
+   workers now (id, pid): [(4, 17), (5, 18)]
+== round L2 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 404  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 404  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 404  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /old HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /old?q=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /old/page?q=1&r=2 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round L2: 67 pass, 0 FAIL, 5 info, of 72
+
+######## $ regex_path_live migrate out/legacy-shadow-ir.json
+######## MIGRATION: this build resumes from the legacy shadow ########
+  ingress rp/ing-paths problems=[]
+  ingress rp/ing-root problems=[]
+  ingress rp/ing-overlap problems=[]
+  httproute rp/gw-paths: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-path: accepted=true (Accepted) problems=[]
+  httproute rp/redirect-root: accepted=true (Accepted) problems=[]
+  httproute rp/rewrite-path: accepted=true (Accepted) problems=[]
+  httproute rp/rewrite-root: accepted=true (Accepted) problems=[FilterUnsupported { kind: "URLRewrite path on a rule matching the root prefix '/', where Sōzu would drop the request's query (the rule is served without the rewrite)" }]
+  new IR: 17 frontends
+    path_only=true  rp.gw-foo.80                             0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    path_only=true  rp.gw-foobar.80                          0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$
+    path_only=true  rp.gw-v1.80                              0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$
+    path_only=true  rp.gw-api.80                             0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$
+    path_only=true  rp.ov-prefix.80                          0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$
+    path_only=false rp.ov-regex.80                           0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$
+    path_only=true  rp.ing-foo.80                            0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    path_only=true  rp.ing-exact.80                          0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$
+    path_only=true  rp.ing-v1.80                             0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$
+    path_only=false rp.ing-re.80                             0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$
+    path_only=false rp.ing-qmark.80                          0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$
+    path_only=false rp.ing-root.80                           0.0.0.0:36080;root.example.com;P/
+    path_only=true  (redirect, no cluster)                   0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    path_only=false (redirect, no cluster)                   0.0.0.0:36080;rootmoved.example.com;P/  redirect=Redirect { scheme: None, status: Found, hostname: None, path: Some("/new"), port: None }
+    path_only=true  rp.gw-rewrite.80                         0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$  rewrite=Rewrite { hostname: Some("internal.example.com"), path: Some("/new") }
+    path_only=true  rp.gw-api.80                             0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$
+    path_only=false rp.gw-rootrw.80                          0.0.0.0:36080;rootrw.example.com;P/
+== ListFrontends (before the migration batch): 17 http + 0 https frontends; kinds: P=3 Q(REGEX_PATH)=0 R(REGEX)=14
+    0.0.0.0:36080;gw.example.com;R^/api/v[0-9]+$  kind=1 cluster=rp.gw-api.80
+    0.0.0.0:36080;gw.example.com;R^/foo(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-foo.80
+    0.0.0.0:36080;gw.example.com;R^/foo/bar(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-foobar.80
+    0.0.0.0:36080;gw.example.com;R^/v1(?:\?(?-u:.*))?$  kind=1 cluster=rp.gw-v1.80
+    0.0.0.0:36080;moved.example.com;R^/old(?:[/?](?-u:.*))?$  kind=1 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-regex.80
+    0.0.0.0:36080;overlap.example.com;R^/p(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-prefix.80
+    0.0.0.0:36080;paths.example.com;R^/api/v[0-9]+$  kind=1 cluster=rp.gw-api.80
+    0.0.0.0:36080;paths.example.com;R^/old(?:[/?](?-u:.*))?$  kind=1 cluster=rp.gw-rewrite.80
+    0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-re.80
+    0.0.0.0:36080;prefix.example.com;R^/exact(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-exact.80
+    0.0.0.0:36080;prefix.example.com;R^/foo(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-foo.80
+    0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-qmark.80
+    0.0.0.0:36080;prefix.example.com;R^/v1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-v1.80
+    0.0.0.0:36080;root.example.com;P/  kind=0 cluster=rp.ing-root.80
+    0.0.0.0:36080;rootmoved.example.com;P/  kind=0 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;rootrw.example.com;P/  kind=0 cluster=rp.gw-rootrw.80
+== apply legacy shadow -> new IR: 22 requests
+    #0   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;R^/api/v[0-9]+$
+    #1   RemoveHttpFrontend 0.0.0.0:36080;paths.example.com;R^/api/v[0-9]+$
+    #2   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;R^/foo(?:[/?](?-u:.*))?$
+    #3   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;R^/foo/bar(?:[/?](?-u:.*))?$
+    #4   RemoveHttpFrontend 0.0.0.0:36080;paths.example.com;R^/old(?:[/?](?-u:.*))?$
+    #5   RemoveHttpFrontend 0.0.0.0:36080;gw.example.com;R^/v1(?:\?(?-u:.*))?$
+    #6   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/exact(?:\?(?-u:.*))?$
+    #7   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/foo(?:[/?](?-u:.*))?$
+    #8   RemoveHttpFrontend 0.0.0.0:36080;prefix.example.com;R^/v1(?:\?(?-u:.*))?$
+    #9   RemoveHttpFrontend 0.0.0.0:36080;overlap.example.com;R^/p(?:[/?](?-u:.*))?$
+    #10  RemoveHttpFrontend 0.0.0.0:36080;moved.example.com;R^/old(?:[/?](?-u:.*))?$
+    #11  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$
+    #12  AddHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$
+    #13  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #14  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$
+    #15  AddHttpFrontend 0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$
+    #16  AddHttpFrontend 0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #17  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$
+    #18  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$
+    #19  AddHttpFrontend 0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$
+    #20  AddHttpFrontend 0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$
+    #21  AddHttpFrontend 0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$
+    verbs: {"AddHttpFrontend": 11, "RemoveHttpFrontend": 11}
+    agent.apply_counted: Ok
+== ListFrontends (after the migration batch): 17 http + 0 https frontends; kinds: P=3 Q(REGEX_PATH)=11 R(REGEX)=3
+    0.0.0.0:36080;gw.example.com;Q^/api/v[0-9]+$  kind=3 cluster=rp.gw-api.80
+    0.0.0.0:36080;gw.example.com;Q^/foo(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-foo.80
+    0.0.0.0:36080;gw.example.com;Q^/foo/bar(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-foobar.80
+    0.0.0.0:36080;gw.example.com;Q^/v1(?:\?(?-u:.*))?$  kind=3 cluster=rp.gw-v1.80
+    0.0.0.0:36080;moved.example.com;Q^/old(?:[/?](?-u:.*))?$  kind=3 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;overlap.example.com;Q^/p(?:[/?](?-u:.*))?$  kind=3 cluster=rp.ov-prefix.80
+    0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ov-regex.80
+    0.0.0.0:36080;paths.example.com;Q^/api/v[0-9]+$  kind=3 cluster=rp.gw-api.80
+    0.0.0.0:36080;paths.example.com;Q^/old(?:[/?](?-u:.*))?$  kind=3 cluster=rp.gw-rewrite.80 rewrite_path="/new" rewrite_host="internal.example.com"
+    0.0.0.0:36080;prefix.example.com;Q^/exact(?:\?(?-u:.*))?$  kind=3 cluster=rp.ing-exact.80
+    0.0.0.0:36080;prefix.example.com;Q^/foo(?:[/?](?-u:.*))?$  kind=3 cluster=rp.ing-foo.80
+    0.0.0.0:36080;prefix.example.com;Q^/v1(?:\?(?-u:.*))?$  kind=3 cluster=rp.ing-v1.80
+    0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$  kind=1 cluster=rp.ing-re.80
+    0.0.0.0:36080;prefix.example.com;R^/q\?x=1(?:\?(?-u:.*))?$  kind=1 cluster=rp.ing-qmark.80
+    0.0.0.0:36080;root.example.com;P/  kind=0 cluster=rp.ing-root.80
+    0.0.0.0:36080;rootmoved.example.com;P/  kind=0 cluster=- rewrite_path="/new" redirect=3
+    0.0.0.0:36080;rootrw.example.com;P/  kind=0 cluster=rp.gw-rootrw.80
+   desired IR route keys == main process keys: true
+   P=3 Q=11 R=3; R keys left: ["0.0.0.0:36080;overlap.example.com;R/{0}^/p/x(?:[/?](?-u:.*))?$", "0.0.0.0:36080;prefix.example.com;R/{0}^/re(?:[/?](?-u:.*))?$", "0.0.0.0:36080;prefix.example.com;R^/q\\?x=1(?:\\?(?-u:.*))?$"]
+== round M0 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round M0: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 5 (pid 18): status=0 "Upgrade successful:\n- finished soft stop of worker 5\n- finished activation of new worker 6"
+   workers now (id, pid): [(4, 17), (6, 19)]
+== round M1 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x2 200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com | x2 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x2 200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com | x2 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round M1: 67 pass, 0 FAIL, 5 info, of 72
+== UpgradeWorker 4 (pid 17): status=0 "Upgrade successful:\n- finished soft stop of worker 4\n- finished activation of new worker 7"
+   workers now (id, pid): [(6, 19), (7, 20)]
+== round M2 (4 requests per target, fresh connection each)
+  [b-ing  ] prefix.example.com     /foo                 -> x4 200 ing-foo [GET /foo HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/                -> x4 200 ing-foo [GET /foo/ HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar             -> x4 200 ing-foo [GET /foo/bar HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?q=1             -> x4 200 ing-foo [GET /foo?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo/bar?q=1         -> x4 200 ing-foo [GET /foo/bar?q=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?                -> x4 200 ing-foo [GET /foo? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foo?/x              -> x4 200 ing-foo [GET /foo?/x HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /foobar              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foobar?/foo         -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2F              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo%2Fbar           -> x4 404  pass
+  [b-ing  ] prefix.example.com     /foo/\xff            -> x4 400  pass
+  [b-ing  ] prefix.example.com     /                    -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exact               -> x4 200 ing-exact [GET /exact HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact?x=1           -> x4 200 ing-exact [GET /exact?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /exact/              -> x4 404  pass
+  [b-ing  ] prefix.example.com     /exactly             -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1                  -> x4 200 ing-v1 [GET /v1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?x=1              -> x4 200 ing-v1 [GET /v1?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1?                 -> x4 200 ing-v1 [GET /v1? HTTP/1.1] host=prefix.example.com  pass
+  [b-ing  ] prefix.example.com     /v1/                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1/x                -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1x                 -> x4 404  pass
+  [b-ing  ] prefix.example.com     /v1%3Fx=1            -> x4 404  pass
+  [c      ] prefix.example.com     /re                  -> x4 200 ing-re [GET /re HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re/x?y=1            -> x4 200 ing-re [GET /re/x?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /re?y=1              -> x4 200 ing-re [GET /re?y=1 HTTP/1.1] host=prefix.example.com  pass
+  [c      ] prefix.example.com     /rex                 -> x4 404  pass
+  [c      ] prefix.example.com     /x/re                -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=1               -> x4 200 ing-qmark [GET /q?x=1 HTTP/1.1] host=prefix.example.com  pass
+  [c-qmark] prefix.example.com     /q                   -> x4 404  pass
+  [c-qmark] prefix.example.com     /q?x=2               -> x4 404  pass
+  [root   ] root.example.com       /                    -> x4 200 ing-root [GET / HTTP/1.1] host=root.example.com  pass
+  [root   ] root.example.com       /any/thing?q=1       -> x4 200 ing-root [GET /any/thing?q=1 HTTP/1.1] host=root.example.com  pass
+  [b-gw   ] gw.example.com         /foo                 -> x4 200 gw-foo [GET /foo HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/                -> x4 200 gw-foo [GET /foo/ HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo?q=1             -> x4 200 gw-foo [GET /foo?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/barx            -> x4 200 gw-foo [GET /foo/barx HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foobar              -> x4 404  pass
+  [b-gw   ] gw.example.com         /foo/bar             -> x4 200 gw-foobar [GET /foo/bar HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar/x           -> x4 200 gw-foobar [GET /foo/bar/x HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /foo/bar?q=1         -> x4 200 gw-foobar [GET /foo/bar?q=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1                  -> x4 200 gw-v1 [GET /v1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1?x=1              -> x4 200 gw-v1 [GET /v1?x=1 HTTP/1.1] host=gw.example.com  pass
+  [b-gw   ] gw.example.com         /v1/                 -> x4 404  pass
+  [b-gw   ] gw.example.com         /v1x                 -> x4 404  pass
+  [a      ] gw.example.com         /api/v2              -> x4 200 gw-api [GET /api/v2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2?             -> x4 200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v10?x=1&y=2     -> x4 200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com  pass
+  [a      ] gw.example.com         /api/v2/             -> x4 404  pass
+  [a      ] gw.example.com         /api/v2/x            -> x4 404  pass
+  [a      ] gw.example.com         /api/vx              -> x4 404  pass
+  [a      ] gw.example.com         /api/v2%3Fx=1        -> x4 404  pass
+  [a      ] paths.example.com      /api/v2?x=1          -> x4 200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com  pass
+  [e      ] paths.example.com      /old                 -> x4 200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old?q=1             -> x4 200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /old/page?q=1&r=2    -> x4 200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com  pass
+  [e      ] paths.example.com      /oldx                -> x4 404  pass
+  [e-root ] rootrw.example.com     /x?q=1               -> x4 200 gw-rootrw [GET /x?q=1 HTTP/1.1] host=rootrw.example.com  pass
+  [d      ] moved.example.com      /old                 -> x4 302 location=http://moved.example.com/new  pass
+  [d      ] moved.example.com      /old?q=1             -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /old/page?q=1        -> x4 302 location=http://moved.example.com/new?q=1  pass
+  [d      ] moved.example.com      /oldx?q=1            -> x4 404  pass
+  [d-root ] rootmoved.example.com  /                    -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /?q=1                -> x4 302 location=http://rootmoved.example.com/new  pass
+  [d-root ] rootmoved.example.com  /x?q=1               -> x4 302 location=http://rootmoved.example.com/new  pass
+  [info-ov] overlap.example.com    /p                   -> x4 200 ov-prefix [GET /p HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x                 -> x4 200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/x?q=1             -> x4 200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/y                 -> x4 200 ov-prefix [GET /p/y HTTP/1.1] host=overlap.example.com  info
+  [info-ov] overlap.example.com    /p/xy                -> x4 200 ov-prefix [GET /p/xy HTTP/1.1] host=overlap.example.com  info
+-- round M2: 67 pass, 0 FAIL, 5 info, of 72
+== reconcile(new IR, new IR) after migration: 0 requests
+
+######## $ regex_path_live compare
+== compare saved rounds (answer sets per target; counts ignored)
+-- A0 vs A1 (g) fresh: after re-forking worker 1: 0 of 72 targets differ
+-- A0 vs A2 (g) fresh: after re-forking both workers: 0 of 72 targets differ
+-- M0 vs M1 (g) migrated: after re-forking worker 1: 2 of 72 targets differ
+    info-ov overlap.example.com /p/x: M0=["200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com"] M1=["200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com", "200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com"]
+    info-ov overlap.example.com /p/x?q=1: M0=["200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"] M1=["200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com", "200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"]
+-- M0 vs M2 (g) migrated: after re-forking both workers: 2 of 72 targets differ
+    info-ov overlap.example.com /p/x: M0=["200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com"] M2=["200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com"]
+    info-ov overlap.example.com /p/x?q=1: M0=["200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"] M2=["200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"]
+-- A0 vs M0 (f) migrated (incremental workers) vs fresh: 2 of 72 targets differ
+    info-ov overlap.example.com /p/x: A0=["200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com"] M0=["200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com"]
+    info-ov overlap.example.com /p/x?q=1: A0=["200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"] M0=["200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"]
+-- A2 vs M2 (f) migrated vs fresh, both re-forked: 0 of 72 targets differ
+-- L0 vs A0 legacy vs new, fresh/incremental workers: 9 of 72 targets differ
+    a gw.example.com /api/v10?x=1&y=2: L0=["404"] A0=["200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com"]
+    a gw.example.com /api/v2?: L0=["404"] A0=["200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com"]
+    a gw.example.com /api/v2?x=1: L0=["404"] A0=["200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com"]
+    a paths.example.com /api/v2?x=1: L0=["404"] A0=["200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com"]
+    d moved.example.com /old/page?q=1: L0=["302 location=http://moved.example.com/new"] A0=["302 location=http://moved.example.com/new?q=1"]
+    d moved.example.com /old?q=1: L0=["302 location=http://moved.example.com/new"] A0=["302 location=http://moved.example.com/new?q=1"]
+    e paths.example.com /old: L0=["200 gw-rewrite [GET /old HTTP/1.1] host=paths.example.com"] A0=["200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+    e paths.example.com /old/page?q=1&r=2: L0=["200 gw-rewrite [GET /old/page?q=1&r=2 HTTP/1.1] host=paths.example.com"] A0=["200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+    e paths.example.com /old?q=1: L0=["200 gw-rewrite [GET /old?q=1 HTTP/1.1] host=paths.example.com"] A0=["200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+-- L2 vs A2 legacy vs new, both re-forked: 11 of 72 targets differ
+    a gw.example.com /api/v10?x=1&y=2: L2=["404"] A2=["200 gw-api [GET /api/v10?x=1&y=2 HTTP/1.1] host=gw.example.com"]
+    a gw.example.com /api/v2?: L2=["404"] A2=["200 gw-api [GET /api/v2? HTTP/1.1] host=gw.example.com"]
+    a gw.example.com /api/v2?x=1: L2=["404"] A2=["200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=gw.example.com"]
+    a paths.example.com /api/v2?x=1: L2=["404"] A2=["200 gw-api [GET /api/v2?x=1 HTTP/1.1] host=paths.example.com"]
+    d moved.example.com /old/page?q=1: L2=["302 location=http://moved.example.com/new"] A2=["302 location=http://moved.example.com/new?q=1"]
+    d moved.example.com /old?q=1: L2=["302 location=http://moved.example.com/new"] A2=["302 location=http://moved.example.com/new?q=1"]
+    e paths.example.com /old: L2=["200 gw-rewrite [GET /old HTTP/1.1] host=paths.example.com"] A2=["200 gw-rewrite [GET /new HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+    e paths.example.com /old/page?q=1&r=2: L2=["200 gw-rewrite [GET /old/page?q=1&r=2 HTTP/1.1] host=paths.example.com"] A2=["200 gw-rewrite [GET /new?q=1&r=2 HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+    e paths.example.com /old?q=1: L2=["200 gw-rewrite [GET /old?q=1 HTTP/1.1] host=paths.example.com"] A2=["200 gw-rewrite [GET /new?q=1 HTTP/1.1] host=internal.example.com xfh=paths.example.com"]
+    info-ov overlap.example.com /p/x: L2=["200 ov-prefix [GET /p/x HTTP/1.1] host=overlap.example.com"] A2=["200 ov-regex [GET /p/x HTTP/1.1] host=overlap.example.com"]
+    info-ov overlap.example.com /p/x?q=1: L2=["200 ov-prefix [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"] A2=["200 ov-regex [GET /p/x?q=1 HTTP/1.1] host=overlap.example.com"]
+

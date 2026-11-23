@@ -109,10 +109,14 @@ backends), so it maps to a frontend with no cluster — Sōzu answers the 301 it
 
 The suite now also applies a `URLRewrite.hostname` route
 ([url-rewrite.yaml](../examples/api-gateway/url-rewrite.yaml)) and asserts that whoami sees the
-rewritten `Host` and an `X-Forwarded-Host` carrying the requested one. No run of it is recorded
-here yet; the data-plane behaviour it relies on is measured in §5c and
-[rewrite-host-go](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt), except `X-Forwarded-Host`,
-which is read in the upstream source.
+rewritten `Host` and an `X-Forwarded-Host` carrying the requested one; and, since path rules
+match the path alone (`REGEX_PATH`), that a `RegularExpression` match takes a target with a query
+string, that a `URLRewrite` `ReplaceFullPath` reaches whoami with the request's query, and that a
+`RequestRedirect` `ReplaceFullPath` keeps it in `Location`. No run of these is recorded here yet;
+the data-plane behaviour they rely on is measured in §5c,
+[rewrite-host-go](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt) and
+[regex-path](probes/regex-path_sozu-2.3.6_2026-11-23.txt), except `X-Forwarded-Host`, which is
+read in the upstream source.
 
 ## 5b. Layer-4 routing through the Gateway API (TCPRoute / UDPRoute)
 
@@ -198,7 +202,7 @@ table above:
 | `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful, so it was left unwired (one line since 2.3.4, and wired since: see the 2026-11-23 addendum) |
 | `ReplacePrefixMatch` via `$PATH[n]` | On today's capture-less prefix regex, `$PATH[1]` gets the frontend **rejected** (the `/` above came from the older regex). With a capturing spelling of the same rule, `/foo` → `/xyz`, `/foo/bar?q=1` → `/xyz/bar?q=1`: feasible for a non-root prefix |
 | Query string across a path rewrite | Dropped by a literal `rewrite_path`; kept when the rule captures it and the template appends that group |
-| `RequestRedirect` path target and the query | **Dropped** (`Location: …/new` for `/original?q=1&x=2`), which the shipped `path.replaceFullPath` redirect inherits; a redirect without a path target keeps it |
+| `RequestRedirect` path target and the query | **Dropped** (`Location: …/new` for `/original?q=1&x=2`), which the shipped `path.replaceFullPath` redirect inherited until its rules moved to `REGEX_PATH` (2026-11-23 addendum; it still does on the root prefix); a redirect without a path target keeps it |
 | `$$` in a rewrite value | Rejected like `$`: there is no escape |
 
 **Addendum, 2026-11-23 — re-measured on Sōzu 2.3.6.** The same probe gave the same answers on
@@ -208,9 +212,18 @@ about `Host` (upstream 026a1fb8, first released in 2.3.4):
 
 | Question | Answer on 2.3.6 |
 | -------- | --------------- |
-| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **one** `Host` line, and the Go `net/http` backend answers `200` ([2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [2.3.6](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)); an HTTP/2 backend gets it as `:authority`. Nothing upstream blocks it any more, and `URLRewrite.hostname` is now wired onto it; a `URLRewrite` with a `path` is still reported and served without the rewrite |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **one** `Host` line, and the Go `net/http` backend answers `200` ([2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [2.3.6](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)); an HTTP/2 backend gets it as `:authority`. Nothing upstream blocks it any more, and `URLRewrite.hostname` is now wired onto it; a `URLRewrite` with a `path` was still reported then and served without the rewrite (wired since, below) |
 | Gateway `set` (or `add`) of `Host` | Replaces the `Host` the backend receives (on 2.3.2 a second, different line); `rewrite_host` wins over it; a delete of `Host` still removes nothing |
 | Everything else above | Unchanged: the literal `$`/`$$` refusals, the dropped query, `$PATH[n]` on a capture-less rule, the redirect targets and the CR/LF passthrough |
+
+The query those rows drop is the one a `Prefix` or `Regex` rule loses. On the path-only
+`REGEX_PATH` rule (2.3.4, measured on 2.3.6,
+[regex-path](probes/regex-path_sozu-2.3.6_2026-11-23.txt)), Sōzu appends the request's query to
+a rewritten path or a redirect `Location` that has no `?` of its own: `/lit/x?q=1&y=2` reaches
+the backend as `/rewritten?q=1&y=2` and redirects to `…/new?q=1&y=2`. Every HTTPRoute match the
+controller emits but the root prefix is now one, which is what wires `URLRewrite`
+`ReplaceFullPath` and keeps the query of a `RequestRedirect` path target
+([UPGRADING](UPGRADING.md)).
 
 ## 5d. Data-plane shutdown — a measurement, not a feature
 

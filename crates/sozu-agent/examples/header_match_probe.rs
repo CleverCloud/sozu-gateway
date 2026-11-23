@@ -889,6 +889,7 @@ fn forced_frontends(base: u16) -> Vec<ir::Frontend> {
                 listener: listener(offset),
                 filters: ir::FrontendFilters::default(),
                 header_matches: vec![],
+                path_only: false,
             };
             frontends.push(ir::Frontend {
                 header_matches: canary.clone(),

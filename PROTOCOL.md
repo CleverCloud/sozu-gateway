@@ -175,11 +175,30 @@ never produces them. A 2.2.x data plane does not answer verbs it does not know.
 Added in 2.3.4, not sent either: `HttpListenerConfig.h2c_prior_knowledge` (field 38;
 `UpdateHttpListenerConfig` field 44), cleartext HTTP/2 by prior knowledge on an HTTP listener, off
 by default, which the chart sets as the HTTP listeners' TOML key instead (`sozu.h2cPriorKnowledge`;
-those listeners are declared at boot); and `PathRuleKind::REGEX_PATH = 3`, a full-span regex
-matched against the path without
-its query, whose route key carries its own letter (`…;Q<value>` in `RequestHttpFrontend::to_string()`),
-so `ir::Frontend::sozu_route_key` would have to follow it before one is emitted. A worker older than
-2.3.4 refuses a `REGEX_PATH` frontend as an invalid path rule.
+those listeners are declared at boot).
+
+Added in 2.3.4 and **used**: `PathRuleKind::REGEX_PATH = 3` (upstream 660ce27e), a full-span regex
+matched against the request path up to its first `?`, the query excluded. Every compiled
+`Prefix`/`Exact` path but the root prefix `/`, which then accepts the same requests, and every
+HTTPRoute `RegularExpression`, which the Gateway API matches against the path, goes out as one
+(`ir::Frontend::path_only`), with the pattern a `REGEX` rule would carry. An Ingress
+`ImplementationSpecific` regex and a `Prefix`/`Exact` literal holding a `?` stay `REGEX`.
+Measured on 2.3.6 ([regex-path](docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt)): it ranks in
+the regex class — between a `REGEX` and a `REGEX_PATH` rule that both match, the one held last
+wins, and it raises the bar to the whole target's length, so the root prefix never takes
+`/?q=1` from a path-only `^/$`; the main process compiles it bare and wrapped, refusing what a
+`REGEX` rule's compile refuses, with the same message; and its route key carries its own letter
+(`…;Q<value>[;<method>]` in `RequestHttpFrontend::to_string()`), so a `REGEX` and a `REGEX_PATH`
+rule of one pattern are two keys, and a removal naming the other kind is refused "Did not find
+HttpFrontend". A worker forked again replays a hostname's frontends in key order, `P` < `Q` < `R`,
+so a `REGEX` rule beside `REGEX_PATH` ones replays last and, on a named host (where the last
+method-less regex offered wins), wins what it shares with a method-less one; an Ingress
+`ImplementationSpecific` regex (`R/…`) used to replay before the compiled rules (`R^…`) and lose
+it. On a hostname-less route, Sōzu's first-match `POST` list, the first replayed wins instead, so
+there the compiled rule now wins and the regex used to (read in the upstream source).
+On a rewritten path or a redirect `Location`, Sōzu appends the request's `?query` to a value that
+has no `?` of its own, on this kind alone (§13 item 5). A worker older than 2.3.4 refuses a
+`REGEX_PATH` frontend as an invalid path rule ([2.3.2](docs/probes/regex-path_sozu-2.3.2_2026-11-23.txt)).
 
 ### `AddBackend` / `RemoveBackend`
 ```rust
@@ -214,7 +233,7 @@ batches remove the frontends and backends explicitly before the cluster either w
 
 ### `PathRule`
 ```rust
-kind:  i32      // PathRuleKind: Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, unused)
+kind:  i32      // PathRuleKind: Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, path-only)
 value: String   // the prefix / regex / exact value
 ```
 
@@ -251,7 +270,7 @@ cert under SNI (`openssl s_client -servername app.example.com` returned our CN/S
 
 ```text
 ResponseStatus:           Ok=0, Processing=1, Failure=2
-PathRuleKind:             Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, unused)
+PathRuleKind:             Prefix=0, Regex=1, Equals=2, RegexPath=3 (2.3.4, path-only)
 RulePosition:             Pre=0, Post=1, Tree=2
 LoadBalancingAlgorithms:  RoundRobin=0, Random=1, LeastLoaded=2, PowerOfTwo=3, Hrw=4, Maglev=5
 TlsVersion:               SslV2=0, SslV3=1, TlsV10=2, TlsV11=3, TlsV12=4, TlsV13=5
@@ -439,9 +458,10 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
 |---|---|
 | Ingress rule `host` (exact) | `RequestHttpFrontend.hostname` |
 | Ingress rule `host` wildcard `*.x` | `hostname` wildcard (Sōzu supports `*.` prefix) — to confirm in Étape 2 |
-| `pathType: Prefix` | `PathRule { Regex, "^<value>(?:[/?](?-u:.*))?$" }` — element-boundary matching (raw `Prefix` also matches `/foobar`), full-span so it reads the same once Sōzu anchors regexes (§13 item 3); the root `/` stays `PathRule { Prefix, "/" }` |
-| `pathType: Exact` | `PathRule { Regex, "^<value>(?:\\?(?-u:.*))?$" }` — never `Equals`: 2.2.x compares `Equals` against the query-bearing target (`/get?x=1` misses), and cannot remove an `Equals` rule it holds (`PathRule::eq` has no `Equals` arm), so a removed route kept serving — both measured live 2026-09-21 |
-| `pathType: ImplementationSpecific` | `PathRule { Regex, value }` (2.2.1 does **not** anchor regexes — measured; 2.3.0 and later anchor them at both ends and compile the value bare, then wrapped — write full-span patterns) |
+| `pathType: Prefix` | `PathRule { RegexPath, "^<value>(?:[/?](?-u:.*))?$" }` — element-boundary matching (raw `Prefix` also matches `/foobar`), full-span so it reads the same once Sōzu anchors regexes (§12 item 3); matched against the path without its query, where the pattern accepts the same requests as against the target (the `ir` crate's tests, with Sōzu's `split_query` read in the upstream source) and Sōzu keeps the query of a rewritten path or redirect target (§4); a literal `?` in the value keeps `Regex`, which a path never holds; the root `/` stays `PathRule { Prefix, "/" }` |
+| `pathType: Exact` | `PathRule { RegexPath, "^<value>(?:\\?(?-u:.*))?$" }` (a literal `?` keeps `Regex`) — never `Equals`: 2.2.x compares `Equals` against the query-bearing target (`/get?x=1` misses), and cannot remove an `Equals` rule it holds (`PathRule::eq` has no `Equals` arm), so a removed route kept serving — both measured live 2026-09-21 |
+| `pathType: ImplementationSpecific` | `PathRule { Regex, value }`, against the target with its query (2.2.1 does **not** anchor regexes — measured; 2.3.0 and later anchor them at both ends and compile the value bare, then wrapped — write full-span patterns) |
+| HTTPRoute `PathPrefix` / `Exact` / `RegularExpression` | as `Prefix` / `Exact` above, and `PathRule { RegexPath, value }` for a `RegularExpression`: the Gateway API matches a path, never its query |
 | backend `Service` → `EndpointSlice` pod IPs | one `Cluster` + N `AddBackend` (pod `IP:port`) |
 | `spec.tls[].secretName` (`tls.crt`/`tls.key`) | `AddCertificate` on the `:443` listener address |
 | HTTP rule | `AddHttpFrontend` on `:80` listener address |
@@ -477,7 +497,9 @@ Reproduce: `bash .scratch/run-probe.sh` (will be promoted into the `justfile`).
    stays a regex. Host matching (2.3.0, measured): case-insensitive (704b60d; a trailing dot
    still matches no host); `*.` covers exactly one label; and an exact host whose rules all miss
    the path or method hands the request to a covering `*.` host before the `POST` catch-all
-   (2ea35516; 2.2.1 went straight to `POST`, or 404).
+   (2ea35516; 2.2.1 went straight to `POST`, or 404). Since 2.3.4 a `REGEX_PATH` rule reads
+   the path alone, up to the first `?` (§4); every rule emitted here but the root prefix, an
+   Ingress `ImplementationSpecific` regex and a literal `?` is one.
 4. **Multi-worker fan-in**: with `worker_count > 1`, confirm whether to inspect per-worker
    `WorkerResponses` for partial failure (we'll add defensive handling in `sozu-agent`).
 
@@ -534,8 +556,7 @@ What that settles:
    whose probe could not see it) an HTTP/1 backend receives the rewritten `Host` **twice**, which
    a strict backend refuses. Since 2.3.4 (upstream 026a1fb8) it receives one, and an HTTP/2
    backend gets the value as `:authority` (measured on 2.3.6), so `URLRewrite.hostname` is
-   wired onto it; a `URLRewrite` that also carries a `path` is still reported and its rule served
-   without the rewrite (5). On a host rewrite Sōzu also writes `X-Forwarded-Host`, carrying the
+   wired onto it, and a `ReplaceFullPath` beside it onto `rewrite_path` (5). On a host rewrite Sōzu also writes `X-Forwarded-Host`, carrying the
    host the client sent, after the frontend's request edits, when the listener's
    `forwarded_headers` emits that family (the default `both`) — read in the upstream 2.3.6 source
    (`apply_request_rewrites_and_headers`), not measured — so the builder refuses a `set` or
@@ -563,12 +584,22 @@ What that settles:
    group (`/new$PATH[1]` on an `Exact` rule) keeps it (measured). Since 2.3.4 a `REGEX_PATH` rule
    (upstream 660ce27e) matches the path without its query, takes `$PATH[n]` from the path alone
    and appends the original query to a rewritten path or redirect `Location` that carries no `?`
-   of its own (measured on 2.3.6, [regex-path](docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt));
-   this controller emits none (see the 2.3.4 additions in §4).
-6. **A redirect keeps the query only when no path target is set.** `rewrite_host` with
-   `rewrite_path` unset answers `Location: <request scheme>://<new host><request path><request
-   query>`, so only the authority moves; with `rewrite_path` set the query is gone, as on the
-   forwarding path (2026-10-19 — 2.2.0 measured only the first case).
+   of its own (measured on 2.3.6, [regex-path](docs/probes/regex-path_sozu-2.3.6_2026-11-23.txt)):
+   `rewrite_path="/rewritten"` turns `/lit/x?q=1&y=2` into `GET /rewritten?q=1&y=2`, a `FOUND`
+   redirect to `"/new"` answers `Location: …/new?q=1`, and a value with a query of its own
+   (`"/rewritten?own=1"`) keeps that one and drops the request's. Every HTTPRoute match but
+   the root prefix is one (§4), so a `ReplaceFullPath` — redirect or `URLRewrite` — keeps the
+   query there; the builder admits a path target only as a literal absolute path with no `$`,
+   `?` or `#`, within the Gateway API's path character set (RFC 3986's: no control character,
+   whitespace or non-ASCII byte; a CR/LF is written raw into the `Location`, measured, below).
+   On the root `/`, Sōzu's own `Prefix "/"`, the query is still dropped: a redirect there is
+   programmed as before and loses it, a `URLRewrite` path there is reported and its rule served
+   without the rewrite.
+6. **A redirect keeps the query only when no path target is set**, but on a `REGEX_PATH` rule
+   (5). `rewrite_host` with `rewrite_path` unset answers `Location: <request scheme>://<new
+   host><request path><request query>`, so only the authority moves; with `rewrite_path` set the
+   query is gone on a `Prefix` or `Regex` rule, as on the forwarding path (2026-10-19 — 2.2.0
+   measured only the first case).
 
 ### Header `set` appends instead of replacing — measured
 
@@ -602,11 +633,12 @@ the frontend on the next reconcile.
 
 Raw run: [docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt](docs/probes/rewrite-redirect-headers_sozu-2.2.0_2026-08-05.txt).
 Re-measured unchanged on 2.2.1 and 2.3.2 (2026-10-19, the raw runs above), which also show two
-edits the builder admits but Sōzu does not apply faithfully: a delete + append of `Host`
-reaches the backend as two different `Host` lines and a delete of `Host` removes nothing, and a
-CR/LF in a header value or a redirect path is written raw into the backend request or the
-client response. On 2.3.6 (2026-11-23) the `Host` half changed (upstream 026a1fb8, 2.3.4): a
-non-empty request edit of `Host` replaces the request authority — the last one wins and
+edits Sōzu does not apply faithfully: a delete + append of `Host` reaches the backend as two
+different `Host` lines and a delete of `Host` removes nothing, and a CR/LF in a header value or
+a redirect path is written raw into the backend request or the client response. The builder
+now refuses both of the latter: a header edit value holding a control character other than a
+tab, and a path target outside the Gateway API's path character set (§13 item 5). On 2.3.6
+(2026-11-23) the `Host` half changed (upstream 026a1fb8, 2.3.4): a non-empty request edit of `Host` replaces the request authority — the last one wins and
 `rewrite_host` wins over it — so the backend gets one `Host` carrying it, an HTTP/2 backend as
 `:authority`, and a Gateway `add` of `Host` acts as a `set`; a delete still removes nothing. The
 CR/LF half is unchanged.

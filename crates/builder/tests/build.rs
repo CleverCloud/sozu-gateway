@@ -469,6 +469,84 @@ fn path_types_map_correctly() {
     insta::assert_json_snapshot!(out.ir.frontends);
 }
 
+/// An Ingress `Prefix`/`Exact` path compiled to a regex is matched against
+/// the request path alone (`REGEX_PATH`), which accepts the same requests
+/// with the same pattern; the root prefix is Sōzu's own `Prefix "/"`, an
+/// `ImplementationSpecific` regex keeps reading the target with its query,
+/// and so does a literal `?`, which a path alone never holds. Every frontend
+/// of a path says the same, the HTTPS one and the HTTP redirect to it
+/// included.
+#[test]
+fn ingress_paths_are_read_without_the_query_but_regexes_and_literal_queries() {
+    use sozu_command_lib::proto::command::{request::RequestType, PathRuleKind};
+    let path = |path: &str, path_type: &str| {
+        json!({ "path": path, "pathType": path_type,
+                "backend": { "service": { "name": "web", "port": { "number": 80 } } } })
+    };
+    let ing: Ingress = from_json(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": { "name": "paths", "namespace": "demo" },
+        "spec": {
+            "ingressClassName": "sozu",
+            "tls": [{ "hosts": ["app.example.com"], "secretName": "app-tls" }],
+            "rules": [{
+                "host": "app.example.com",
+                "http": { "paths": [
+                    path("/", "Prefix"),
+                    path("/api", "Prefix"),
+                    path("/", "Exact"),
+                    path("/v1", "Exact"),
+                    path("/a?b", "Exact"),
+                    path("/p?x", "Prefix"),
+                    path("/re.*", "ImplementationSpecific"),
+                ]}
+            }]
+        }
+    }));
+    let inputs = Inputs {
+        ingresses: arcs(vec![ing]),
+        services: arcs(vec![web_service()]),
+        endpointslices: arcs(vec![web_slice()]),
+        secrets: arcs(vec![tls_secret("demo", "app-tls", CERT_A, KEY_A)]),
+        ..Default::default()
+    };
+    let out = build(&BuildConfig::default(), &inputs);
+    assert!(out.results[0].problems.is_empty(), "{:?}", out.results[0]);
+    let expected = |path: &ir::PathMatch| match path {
+        ir::PathMatch::Prefix(p) if p == "/" => false,
+        ir::PathMatch::Prefix(p) | ir::PathMatch::Exact(p) => !p.contains('?'),
+        ir::PathMatch::Regex(_) => false,
+    };
+    assert_eq!(out.ir.frontends.len(), 14, "{:?}", out.ir.frontends);
+    for f in &out.ir.frontends {
+        assert_eq!(f.path_only, expected(&f.path), "{f:?}");
+    }
+    let requests = sozu_gw_translator::reconcile(&ir::Ir::default(), &out.ir).expect("translate");
+    let kinds: std::collections::BTreeSet<(String, i32)> = requests
+        .iter()
+        .filter_map(|r| match &r.request_type {
+            Some(RequestType::AddHttpFrontend(p) | RequestType::AddHttpsFrontend(p)) => {
+                Some((p.path.value.clone(), p.path.kind))
+            }
+            _ => None,
+        })
+        .collect();
+    let q = PathRuleKind::RegexPath as i32;
+    let r = PathRuleKind::Regex as i32;
+    assert_eq!(
+        kinds,
+        std::collections::BTreeSet::from([
+            ("/".to_string(), PathRuleKind::Prefix as i32),
+            ("^/api(?:[/?](?-u:.*))?$".to_string(), q),
+            ("^/(?:\\?(?-u:.*))?$".to_string(), q),
+            ("^/v1(?:\\?(?-u:.*))?$".to_string(), q),
+            ("^/a\\?b(?:\\?(?-u:.*))?$".to_string(), r),
+            ("^/p\\?x(?:[/?](?-u:.*))?$".to_string(), r),
+            ("/re.*".to_string(), r),
+        ])
+    );
+}
+
 /// Ingress with two `ImplementationSpecific` (regex) paths on one host.
 fn regex_paths_ingress(first: &str, second: &str) -> Ingress {
     from_json(json!({
@@ -1497,6 +1575,7 @@ fn cross_namespace_host_path_collision_is_reported_on_the_loser() {
             path: "/".to_string(),
             winner: "aaa.web.80".to_string(),
             key_only: false,
+            kind_twin: false,
         }]
     );
     assert_eq!(
@@ -1541,13 +1620,18 @@ fn the_documented_ingress_regex_spelling_is_admitted() {
 
 #[test]
 fn an_exact_path_collides_with_a_user_regex_spelling_the_same_rule() {
-    // `Exact("/foo")` compiles to the same Sōzu rule as the user regex
-    // `^/foo(?:\?(?-u:.*))?$`; Sōzu holds that route once. The collision must be
-    // arbitrated and reported here, on the compiled rule, not silently
-    // dropped by the translator's dedup. (The apiserver requires an Ingress
-    // path to start with `/`, so in a cluster only an HTTPRoute
-    // `RegularExpression` can spell this; the builder does not know that, and
-    // the arbitration is the same for both kinds.)
+    // `Exact("/foo")` compiles to the same pattern as the user regex
+    // `^/foo(?:\?(?-u:.*))?$`. The Exact path reads the path alone
+    // (`REGEX_PATH`) and the Ingress regex the target with its query
+    // (`REGEX`): two Sōzu keys now, which Sōzu would rank by insertion. They
+    // still contend for one route, as when both were `REGEX`, so the collision
+    // is arbitrated and reported here, on the compiled pattern, as a twin in
+    // the other kind (`kind_twin`). This pair cannot come from a cluster: the
+    // apiserver requires an Ingress path to start with `/`, and an HTTPRoute
+    // `RegularExpression` spelling this pattern is path-only too, one Sōzu key
+    // with the Exact path. The twin a cluster can produce is an Ingress regex
+    // beside an HTTPRoute `RegularExpression` of the same text (`gateway.rs`);
+    // the builder arbitrates both alike.
     let (svc_a, slice_a) = web_service_in("aaa");
     let (svc_b, slice_b) = web_service_in("bbb");
     let exact: Ingress = from_json(json!({
@@ -1599,7 +1683,7 @@ fn an_exact_path_collides_with_a_user_regex_spelling_the_same_rule() {
     assert!(
         matches!(
             loser.problems.as_slice(),
-            [Problem::RouteCollision { hostname, winner, .. }]
+            [Problem::RouteCollision { hostname, winner, key_only: true, kind_twin: true, .. }]
                 if hostname == "clash.example.com" && winner == "aaa.web.80"
         ),
         "{loser:?}"

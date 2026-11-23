@@ -16,7 +16,8 @@ expression: out.ir.frontends
       "header_mods": [],
       "redirect": null,
       "rewrite": null
-    }
+    },
+    "path_only": true
   },
   {
     "hostname": "app.example.com",
