@@ -425,7 +425,10 @@ pub enum RedirectStatus {
     PermanentRedirect,
 }
 
-/// Rewrite the request's host and/or full path before proxying.
+/// Rewrite the request's host and/or full path before proxying: Sōzu's
+/// `rewrite_host` / `rewrite_path`, which leave the dialled backend alone. The
+/// builder fills only `hostname` (HTTPRoute `URLRewrite.hostname`); a path
+/// rewrite is not wired.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Rewrite {
     pub hostname: Option<String>,

@@ -1,0 +1,97 @@
+# HTTPRoute URLRewrite filter (Gateway API) — host rewrite.
+#
+#   urlRewrite.hostname -> the backend receives this Host instead of the one the
+#                          client sent; Sōzu still dials the route's own Service,
+#                          and adds X-Forwarded-Host with the original host.
+# Needs Sōzu >= 2.3.4 (2.3.2 sent the backend two Host lines, which a Go server
+# such as whoami answers 400). A `path` rewrite is not wired yet: a URLRewrite
+# carrying one is reported, and the rule is served without any rewrite.
+#
+# Verify (whoami echoes the request it got):
+#   curl -s -H 'Host: rewrite.example.com' http://<lb-ip>/ | grep -i host
+#   # Host: internal.example.com
+#   # X-Forwarded-Host: rewrite.example.com
+#
+# Requires the Gateway API CRDs installed in the cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-rewrite
+  namespace: sozu-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-rewrite
+  template:
+    metadata:
+      labels:
+        app: echo-rewrite
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.2
+          args: ["--port=8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-rewrite
+  namespace: sozu-demo
+spec:
+  selector:
+    app: echo-rewrite
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: sozu
+spec:
+  controllerName: sozu.io/gateway-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: examples-gw
+  namespace: sozu-demo
+spec:
+  gatewayClassName: sozu
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rewrite-host
+  namespace: sozu-demo
+spec:
+  parentRefs:
+    - name: examples-gw
+  hostnames: ["rewrite.example.com"]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            hostname: internal.example.com
+      backendRefs:
+        - name: echo-rewrite
+          port: 80

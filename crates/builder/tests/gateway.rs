@@ -390,15 +390,14 @@ fn http_route_filters_map_to_ir() {
         .header_mods
         .iter()
         .any(|m| matches!(m.on, ir::HeaderTarget::Response) && m.key == "X-Served-By"));
-    // URLRewrite is reported unsupported rather than mapped, and the rule is
-    // served without it: a literal path rewrite drops the query string
-    // (measured on Sōzu 2.2.1, 2.3.2 and 2.3.6, PROTOCOL.md §13). rewrite_host
-    // sent the backend two Host lines through 2.3.3; it is not wired either.
+    // A URLRewrite carrying a path is reported rather than mapped, and the rule
+    // is served without it, hostname included: a literal path rewrite drops
+    // the query string (measured on Sōzu 2.2.1, 2.3.2 and 2.3.6, PROTOCOL.md
+    // §13), and applying the hostname alone would half-apply the filter.
     assert!(f.rewrite.is_none());
-    assert!(out.routes[0].parents[0]
-        .problems
-        .iter()
-        .any(|p| matches!(p, Problem::FilterUnsupported { kind } if kind == "URLRewrite")));
+    assert!(out.routes[0].parents[0].problems.iter().any(
+        |p| matches!(p, Problem::FilterUnsupported { kind } if kind.starts_with("URLRewrite path"))
+    ));
     assert!(out.routes[0].parents[0].resolved_refs);
 }
 
@@ -2692,6 +2691,278 @@ fn a_redirect_combined_with_url_rewrite_is_refused() {
         .iter()
         .any(|p| matches!(p, Problem::FilterUnsupported { kind }
             if kind.contains("combined with RequestRedirect"))));
+}
+
+/// HTTPRoute `URLRewrite`: the `hostname` is wired onto Sōzu's `rewrite_host`
+/// (one `Host` line since Sōzu 2.3.4, measured); a `path` is not wired yet.
+mod url_rewrite {
+    use super::*;
+    use sozu_command_lib::proto::command::request::RequestType;
+    use sozu_gw_translator::reconcile;
+
+    /// One rule to `web:80` carrying `filters`, plus a plain sibling rule that
+    /// must keep routing whatever happens to the first.
+    fn build_rule(filters: serde_json::Value) -> sozu_gw_builder::BuildOutput {
+        let route: HttpRoute = from_json(json!({
+            "metadata": { "name": "route", "namespace": "demo" },
+            "spec": {
+                "parentRefs": [{ "name": "gw" }],
+                "hostnames": ["app.example.com"],
+                "rules": [
+                    {
+                        "matches": [{ "path": { "type": "PathPrefix", "value": "/rewritten" } }],
+                        "filters": filters,
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    },
+                    {
+                        "matches": [{ "path": { "type": "PathPrefix", "value": "/plain" } }],
+                        "backendRefs": [{ "name": "web", "port": 80 }]
+                    }
+                ]
+            }
+        }));
+        build(&BuildConfig::default(), &inputs_with(route))
+    }
+
+    fn rewritten(out: &sozu_gw_builder::BuildOutput) -> Option<&ir::Frontend> {
+        out.ir
+            .frontends
+            .iter()
+            .find(|f| f.path == ir::PathMatch::Prefix("/rewritten".into()))
+    }
+
+    fn plain_routes(out: &sozu_gw_builder::BuildOutput) -> bool {
+        out.ir
+            .frontends
+            .iter()
+            .any(|f| f.path == ir::PathMatch::Prefix("/plain".into()))
+    }
+
+    fn reported(out: &sozu_gw_builder::BuildOutput, needle: &str) -> bool {
+        out.routes[0].parents[0]
+            .problems
+            .iter()
+            .any(|p| matches!(p, Problem::FilterUnsupported { kind } if kind.contains(needle)))
+    }
+
+    /// The rule is refused whole: not programmed, the route reads
+    /// `Accepted=False`/`UnsupportedValue`, and the sibling rule still routes.
+    fn assert_refused(out: &sozu_gw_builder::BuildOutput, needle: &str) {
+        assert!(rewritten(out).is_none(), "the rule must not be programmed");
+        assert!(plain_routes(out), "the sibling rule keeps routing");
+        assert!(!out.routes[0].parents[0].accepted);
+        assert_eq!(out.routes[0].parents[0].accepted_reason, "UnsupportedValue");
+        assert!(
+            reported(out, needle),
+            "expected a FilterUnsupported naming {needle:?}: {:?}",
+            out.routes[0].parents[0].problems
+        );
+    }
+
+    #[test]
+    fn a_hostname_rewrite_is_programmed_as_rewrite_host() {
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "internal.example.com" } }
+        ]));
+        let parent = &out.routes[0].parents[0];
+        assert!(parent.accepted);
+        assert_eq!(parent.accepted_reason, "Accepted");
+        assert!(parent.resolved_refs);
+        assert!(parent.problems.is_empty(), "{:?}", parent.problems);
+
+        let front = rewritten(&out).expect("the rule is programmed");
+        assert_eq!(
+            front.filters.rewrite,
+            Some(ir::Rewrite {
+                hostname: Some("internal.example.com".into()),
+                path: None,
+            })
+        );
+        assert!(front.filters.redirect.is_none());
+        assert!(
+            front.cluster_id.is_some(),
+            "a rewrite forwards to its backend"
+        );
+
+        // Down to the wire: the frontend carries `rewrite_host` and nothing
+        // that would turn it into a redirect or a path rewrite.
+        let requests = reconcile(&ir::Ir::default(), &out.ir).expect("reconcile");
+        let payloads: Vec<_> = requests
+            .iter()
+            .filter_map(|r| match &r.request_type {
+                Some(RequestType::AddHttpFrontend(f)) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let with_rewrite: Vec<_> = payloads
+            .iter()
+            .filter(|f| f.rewrite_host.is_some())
+            .collect();
+        assert_eq!(with_rewrite.len(), 1, "only the rewritten rule");
+        let f = with_rewrite[0];
+        assert_eq!(f.rewrite_host.as_deref(), Some("internal.example.com"));
+        assert_eq!(f.rewrite_path, None);
+        assert_eq!(f.rewrite_port, None);
+        assert_eq!(f.redirect, None);
+        assert_eq!(f.redirect_scheme, None);
+    }
+
+    /// A rewrite with a `path` is reported and the rule served without it —
+    /// unchanged from before the hostname was wired, and the hostname is not
+    /// applied on its own.
+    #[test]
+    fn a_rewrite_with_a_path_is_reported_and_not_applied_at_all() {
+        for path in [
+            json!({ "type": "ReplaceFullPath", "replaceFullPath": "/v2" }),
+            json!({ "type": "ReplacePrefixMatch", "replacePrefixMatch": "/v2" }),
+        ] {
+            for with_hostname in [true, false] {
+                let mut rewrite = json!({ "path": path.clone() });
+                if with_hostname {
+                    rewrite["hostname"] = json!("internal.example.com");
+                }
+                let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": rewrite }]));
+                let front = rewritten(&out).expect("the rule is still served");
+                assert_eq!(front.filters.rewrite, None, "{rewrite}");
+                assert!(out.routes[0].parents[0].accepted, "{rewrite}");
+                assert!(reported(&out, "URLRewrite path"), "{rewrite}");
+                // The report names the hostname only when the route set one.
+                assert_eq!(
+                    reported(&out, "its hostname included"),
+                    with_hostname,
+                    "{rewrite}"
+                );
+            }
+        }
+    }
+
+    /// Both fields are optional; a rewrite naming neither changes nothing, so
+    /// the rule is served as it is and nothing is reported.
+    #[test]
+    fn a_rewrite_naming_nothing_is_a_no_op() {
+        let out = build_rule(json!([{ "type": "URLRewrite", "urlRewrite": {} }]));
+        let front = rewritten(&out).expect("the rule is served");
+        assert_eq!(front.filters, ir::FrontendFilters::default());
+        assert!(out.routes[0].parents[0].accepted);
+        assert!(out.routes[0].parents[0].problems.is_empty());
+    }
+
+    /// `$` opens Sōzu's rewrite-template grammar and an unparseable template
+    /// makes it reject the frontend, which an all-or-nothing translation turns
+    /// into a failed reconcile for everyone. The CRD pattern excludes it; the
+    /// builder refuses it anyway.
+    #[test]
+    fn a_dollar_in_the_hostname_is_refused() {
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "in$ternal.example.com" } }
+        ]));
+        assert_refused(&out, "'$'");
+    }
+
+    /// Sōzu forwards the value unchecked as the request's authority, so a
+    /// CR/LF would write header lines into the backend request. Anything the
+    /// CRD's `PreciseHostname` pattern refuses is refused here too, for a CRD
+    /// that did not.
+    #[test]
+    fn a_hostname_outside_the_crd_grammar_is_refused() {
+        for hostname in [
+            "internal.example.com\r\nX-Injected: 1",
+            "Internal.example.com",
+            "internal.example.com:8080",
+            "*.example.com",
+            "-internal.example.com",
+            "internal-.example.com",
+            "internal..example.com",
+            "internal.example.com.",
+            // Present but empty is below the CRD's minimum length, not an
+            // absent hostname: refused, never taken for the no-op above.
+            "",
+        ] {
+            let out = build_rule(json!([
+                { "type": "URLRewrite", "urlRewrite": { "hostname": hostname } }
+            ]));
+            assert_refused(&out, "hostname grammar");
+        }
+        let too_long = format!("{}.example.com", ["a"; 121].join("."));
+        assert_eq!(too_long.len(), 253);
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": too_long } }
+        ]));
+        assert!(rewritten(&out).is_some(), "253 bytes is the CRD's maximum");
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": format!("a.{too_long}") } }
+        ]));
+        assert_refused(&out, "hostname grammar");
+
+        // Digits and inner hyphens are labels like any other.
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "10-0.internal1.example.com" } }
+        ]));
+        assert!(rewritten(&out).is_some_and(|f| f.filters.rewrite.is_some()));
+    }
+
+    /// Refused whatever the order: the CRD forbids the pair, and both write
+    /// the same Sōzu fields.
+    #[test]
+    fn a_rewrite_before_a_redirect_is_refused_too() {
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "internal.example.com" } },
+            { "type": "RequestRedirect", "requestRedirect": { "hostname": "example.org" } }
+        ]));
+        assert_refused(&out, "combined with RequestRedirect");
+    }
+
+    /// The CRD forbids a second URLRewrite in one rule; letting the last one
+    /// win would pick a rewrite by list order.
+    #[test]
+    fn a_repeated_rewrite_is_refused() {
+        let out = build_rule(json!([
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "one.example.com" } },
+            { "type": "URLRewrite", "urlRewrite": { "hostname": "two.example.com" } }
+        ]));
+        assert_refused(&out, "repeated");
+    }
+
+    /// On a host rewrite Sōzu writes its own `X-Forwarded-Host` after the
+    /// frontend's edits, so a `set` or `remove` of that header cannot take
+    /// effect (read in the upstream source); an `add` appends to it as asked.
+    #[test]
+    fn deleting_x_forwarded_host_beside_a_hostname_rewrite_is_refused() {
+        for modifier in [
+            json!({ "set": [{ "name": "x-forwarded-host", "value": "public.example.com" }] }),
+            json!({ "remove": ["X-Forwarded-Host"] }),
+        ] {
+            let out = build_rule(json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": modifier },
+                { "type": "URLRewrite", "urlRewrite": { "hostname": "internal.example.com" } }
+            ]));
+            assert_refused(&out, "X-Forwarded-Host");
+        }
+
+        // `add` is honoured, and so is a `set` without a host rewrite or on
+        // the response side.
+        for filters in [
+            json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                    "add": [{ "name": "X-Forwarded-Host", "value": "public.example.com" }] } },
+                { "type": "URLRewrite", "urlRewrite": { "hostname": "internal.example.com" } }
+            ]),
+            json!([
+                { "type": "RequestHeaderModifier", "requestHeaderModifier": {
+                    "set": [{ "name": "X-Forwarded-Host", "value": "public.example.com" }] } }
+            ]),
+            json!([
+                { "type": "ResponseHeaderModifier", "responseHeaderModifier": {
+                    "set": [{ "name": "X-Forwarded-Host", "value": "public.example.com" }] } },
+                { "type": "URLRewrite", "urlRewrite": { "hostname": "internal.example.com" } }
+            ]),
+        ] {
+            let out = build_rule(filters.clone());
+            assert!(rewritten(&out).is_some(), "{filters}");
+            assert!(out.routes[0].parents[0].accepted, "{filters}");
+            assert!(out.routes[0].parents[0].problems.is_empty(), "{filters}");
+        }
+    }
 }
 
 mod header_modifiers {

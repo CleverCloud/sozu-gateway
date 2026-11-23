@@ -11,7 +11,8 @@ intermediate representation (IR), diffs that IR against the last-applied state, 
 minimal set of mutations to a co-located Sōzu instance over its protobuf **command socket** —
 hot, with no proxy restarts. **Phase 1 (Ingress + TLS), Phase 2 (Gateway API) and Phase 3
 (HTTPRoute filters: header edits, redirect) are implemented** and validated
-end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md).
+end-to-end; see [docs/E2E-RESULTS.md](docs/E2E-RESULTS.md). The `URLRewrite` hostname is
+implemented too; its end-to-end check has no recorded run yet.
 
 ## Commands
 
@@ -321,8 +322,9 @@ agent's settlements and evictions, and the failed-batch replay with its simulati
 (`translator::replay_if_exact`), treat verbs 66-69 as their plain siblings, under a key that
 carries the predicates. See [PROTOCOL.md §14](PROTOCOL.md).
 
-**Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier` and
-`RequestRedirect` (scheme, status, and hostname/path/port targets since 52cf36e) compile into
+**Phase 3 — HTTPRoute filters.** `RequestHeaderModifier`/`ResponseHeaderModifier`,
+`RequestRedirect` (scheme, status, and hostname/path/port targets since 52cf36e) and
+`URLRewrite.hostname` compile into
 per-frontend `ir::FrontendFilters`, which the translator maps onto Sōzu's frontend fields. A
 non-empty header value appends; an empty value deletes. Gateway `set` therefore emits a deletion
 followed by an append on the same frontend,
@@ -330,9 +332,25 @@ while `add` appends and `remove` deletes. Empty Gateway `set`/`add` values are r
 `Accepted=False`, `UnsupportedValue`, because they would otherwise become deletions. Unsupported
 sub-fields (`RequestMirror`, for example) are reported, never half-applied. A `RequestRedirect`
 rule has no `backendRef` (the API forbids it), so it becomes a **cluster-less frontend** — hence `ir::Frontend::cluster_id` is
-`Option<String>`. **`URLRewrite` is reported, not wired** — a *choice* for its path; its
-hostname was an upstream bug until 2.3.4. Measured on Sōzu 2.2.0 and re-measured unchanged on
-2.2.1, 2.3.2 and 2.3.6 but for `Host` ([PROTOCOL.md §13](PROTOCOL.md),
+`Option<String>`. **`URLRewrite.hostname` is wired, its `path` is not** — a *choice* for the
+path: a rewrite carrying one is reported and its rule served without the rewrite, hostname
+included, never half-applied. The hostname becomes `rewrite_host`, which changes only the
+forwarded host — the backend dialled stays the cluster's. Through 2.3.3 it sent **two** `Host:`
+lines to an HTTP/1 backend, which a Go backend answers `400`; since 2.3.4 (upstream 026a1fb8)
+one, `:authority` to an HTTP/2 backend, and the same Go backend answers `200`; it also wins over
+a request header edit of `Host` (measured on 2.3.2 and 2.3.6, `rewrite-host-go_*`). On a host
+rewrite Sōzu writes its own `X-Forwarded-Host`, the host the client sent, after the frontend's
+edits (read in the upstream source, under the default `forwarded_headers`), so a `set` or
+`remove` of that header beside the rewrite is refused. So are a hostname outside the CRD's
+`PreciseHostname` grammar (Sōzu reads a `$` as a template, and copies the value unchecked into
+the forwarded authority, CR/LF included — read in the upstream source) and, whatever the filter
+order, the two shapes the CRD forbids: a `RequestRedirect` beside a `URLRewrite`, which write
+the same fields, and a repeated `URLRewrite`. A rewrite naming neither field is a no-op. Since
+the hostname now counts in a frontend's filters, an identical match to the same Service from
+another object no longer folds into a rewriting one: it is a `RouteCollision`, and a header
+match that differs from a plain route only by the rewrite can be skipped. The rewrite fields
+were measured on Sōzu 2.2.0 and re-measured unchanged on 2.2.1, 2.3.2 and 2.3.6 but for `Host`
+([PROTOCOL.md §13](PROTOCOL.md),
 [docs/E2E-RESULTS.md §5c](docs/E2E-RESULTS.md)), which also retired an earlier `408` result
 taken against 2.1.0. Two measured conditions gate any path wiring: a literal `$` in a rewrite
 value makes Sōzu **reject the frontend** (`$$` is no escape, and translation is all-or-nothing,
@@ -350,11 +368,8 @@ capturing spelling of the non-root prefix regex,
 `^<esc>(?:(/)((?-u:[^?\n]*)))?((?:\?(?-u:.*))?)$` (the same language), yields boundary,
 remainder and query: it keeps the query and makes `ReplacePrefixMatch` expressible (measured),
 but is not wired. The root `/` must stay Sōzu's native `Prefix "/"`: a root regex competes with
-every other regex and the last added wins (measured). `URLRewrite.hostname` is no longer
-blocked: through 2.3.3 `rewrite_host` sent **two** `Host:` lines to an HTTP/1 backend, which a Go
-backend answers `400`; since 2.3.4 (upstream 026a1fb8) it sends one and the same Go backend
-answers `200` (measured on 2.3.2 and 2.3.6, `rewrite-host-go_*`). The translator already maps
-`ir::Rewrite`, so the builder side is the only piece missing.
+every other regex and the last added wins (measured). The translator already maps
+`ir::Rewrite::path`, so wiring the path is a builder change.
 
 The CRDs are **optional**, in two tiers: GatewayClass/Gateway/HTTPRoute/ReferenceGrant are
 *required* (any one missing ⇒ Ingress-only), TCPRoute/UDPRoute are *optional* (missing ⇒ no

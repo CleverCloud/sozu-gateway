@@ -1502,6 +1502,48 @@ fn ir_to_requests_with_filters() {
     insta::assert_json_snapshot!(tr::ir_to_requests(&model));
 }
 
+/// A hostname-only rewrite (HTTPRoute `URLRewrite.hostname`) sets
+/// `rewrite_host` and nothing else: no path rewrite, and none of the fields
+/// that would make Sōzu answer a redirect instead of forwarding.
+#[test]
+fn a_hostname_rewrite_sets_rewrite_host_alone() {
+    for tls in [false, true] {
+        let mut f = frontend(
+            "app.example.com",
+            ir::PathMatch::Prefix("/".into()),
+            "app",
+            tls,
+        );
+        f.filters.rewrite = Some(ir::Rewrite {
+            hostname: Some("internal.example.com".into()),
+            path: None,
+        });
+        let model = ir::Ir {
+            clusters: vec![cluster("app", ir::LbAlgorithm::RoundRobin, false)],
+            backends: vec![backend("app", "10.0.0.1:8080", None)],
+            frontends: vec![f],
+            certificates: vec![],
+            l4_frontends: vec![],
+        };
+        let reqs = tr::reconcile(&ir::Ir::default(), &model).expect("reconcile");
+        let adds: Vec<_> = reqs.iter().filter_map(added_frontend).collect();
+        assert_eq!(adds.len(), 1, "{}", dump(&reqs));
+        let (https, payload) = adds[0];
+        assert_eq!(https, tls);
+        assert_eq!(
+            payload.rewrite_host.as_deref(),
+            Some("internal.example.com")
+        );
+        assert_eq!(payload.rewrite_path, None);
+        assert_eq!(payload.rewrite_port, None);
+        assert_eq!(payload.redirect, None);
+        assert_eq!(payload.redirect_scheme, None);
+        assert_eq!(payload.cluster_id.as_deref(), Some("app"));
+        // A desired state equal to itself diffs to nothing.
+        assert!(tr::reconcile(&model, &model).expect("reconcile").is_empty());
+    }
+}
+
 #[test]
 fn reconcile_add_new_route() {
     let small = ir::Ir {
