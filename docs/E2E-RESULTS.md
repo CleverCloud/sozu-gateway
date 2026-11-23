@@ -107,6 +107,13 @@ against the `whoami` demo (which echoes the request it received):
 The redirect route has no `backendRef` (the Gateway API forbids combining `RequestRedirect` with
 backends), so it maps to a frontend with no cluster — Sōzu answers the 301 itself.
 
+The suite now also applies a `URLRewrite.hostname` route
+([url-rewrite.yaml](../examples/api-gateway/url-rewrite.yaml)) and asserts that whoami sees the
+rewritten `Host` and an `X-Forwarded-Host` carrying the requested one. No run of it is recorded
+here yet; the data-plane behaviour it relies on is measured in §5c and
+[rewrite-host-go](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt), except `X-Forwarded-Host`,
+which is read in the upstream source.
+
 ## 5b. Layer-4 routing through the Gateway API (TCPRoute / UDPRoute)
 
 `just e2e-l4-routes`, on Gateway API **v1.6.1** standard-channel CRDs (which is where
@@ -188,7 +195,7 @@ table above:
 
 | Question | Answer on 2.2.1 and 2.3.2 |
 | -------- | ------------------------- |
-| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful: stays unwired (one line since 2.3.4, see the 2026-11-23 addendum) |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **two** `Host` lines; a Go `net/http` backend answers `400` (separate probe). Not faithful, so it was left unwired (one line since 2.3.4, and wired since: see the 2026-11-23 addendum) |
 | `ReplacePrefixMatch` via `$PATH[n]` | On today's capture-less prefix regex, `$PATH[1]` gets the frontend **rejected** (the `/` above came from the older regex). With a capturing spelling of the same rule, `/foo` → `/xyz`, `/foo/bar?q=1` → `/xyz/bar?q=1`: feasible for a non-root prefix |
 | Query string across a path rewrite | Dropped by a literal `rewrite_path`; kept when the rule captures it and the template appends that group |
 | `RequestRedirect` path target and the query | **Dropped** (`Location: …/new` for `/original?q=1&x=2`), which the shipped `path.replaceFullPath` redirect inherits; a redirect without a path target keeps it |
@@ -201,7 +208,7 @@ about `Host` (upstream 026a1fb8, first released in 2.3.4):
 
 | Question | Answer on 2.3.6 |
 | -------- | --------------- |
-| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **one** `Host` line, and the Go `net/http` backend answers `200` ([2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [2.3.6](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)); an HTTP/2 backend gets it as `:authority`. Nothing upstream blocks wiring it; it is still unwired |
+| `URLRewrite` with `hostname` (`rewrite_host`) | The backend receives **one** `Host` line, and the Go `net/http` backend answers `200` ([2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt), [2.3.6](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)); an HTTP/2 backend gets it as `:authority`. Nothing upstream blocks it any more, and `URLRewrite.hostname` is now wired onto it; a `URLRewrite` with a `path` is still reported and served without the rewrite |
 | Gateway `set` (or `add`) of `Host` | Replaces the `Host` the backend receives (on 2.3.2 a second, different line); `rewrite_host` wins over it; a delete of `Host` still removes nothing |
 | Everything else above | Unchanged: the literal `$`/`$$` refusals, the dropped query, `$PATH[n]` on a capture-less rule, the redirect targets and the CR/LF passthrough |
 

@@ -4,6 +4,64 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## HTTPRoute `URLRewrite.hostname` is applied
+
+A `URLRewrite` filter with a `hostname` and no `path` used to be reported
+(`FilterUnsupported`, a Warning Event on the route) while its rule was served
+**without** it: the backend got the `Host` the client sent. It is now
+programmed as Sōzu's `rewrite_host`, so on the first reconcile after the
+upgrade such a route's backend receives the rewritten host instead, as its one
+`Host` line or as `:authority` to an HTTP/2 backend
+([measured](probes/rewrite-host-go_sozu-2.3.6_2026-11-23.txt)). The backend
+dialled does not change: still the route's own Service. To list the routes
+this affects before upgrading, with their hostnames:
+
+```sh
+kubectl get httproute -A -o json | jq -r '.items[]
+  | select(any(.spec.rules[]?.filters[]?; .type == "URLRewrite"
+      and .urlRewrite.hostname != null and .urlRewrite.path == null))
+  | "\(.metadata.namespace)/\(.metadata.name) \(.spec.hostnames // ["*"] | join(","))"'
+```
+
+- **`X-Forwarded-Host` appears.** On a host rewrite Sōzu sends the backend
+  `X-Forwarded-Host` carrying the host the client sent, in place of any the
+  client sent itself, under the default `forwarded_headers = "both"` the chart
+  keeps. Read in the upstream 2.3.6 source, not measured here. A backend that
+  builds absolute URLs from that header now gets the public host.
+- **The rewrite now counts in what a route does.** It used to be dropped, so a
+  rule carrying one had the effect of a plain rule to the same Service, and
+  another object with the identical match (host, path, method, headers) to
+  that Service was folded into it silently. The two now differ: the newer
+  object is reported `RouteCollision` (`Accepted: False` on an HTTPRoute, a
+  Warning Event on an Ingress) and the oldest claimant's filters serve that
+  key: rewritten, when the rewriting route is the older, although the newer
+  object asked for those same requests as they are; not rewritten at all on
+  that key when the plain object is the older.
+  Likewise a header match and a route ranked above it that differ only by the
+  rewrite no longer serve alike, so where Sōzu's order would decide between
+  them the header match is now skipped (`HeaderMatchOverlap` or
+  `HeaderMatchOutranksRoute`). Check the hostnames the command above prints
+  against your other HTTPRoutes and Ingresses.
+- **A few rules are now refused** (`Accepted: False` / `UnsupportedValue`, the
+  rule no longer programmed): a hostname rewrite beside a
+  `RequestHeaderModifier` that `set`s or `remove`s `X-Forwarded-Host`, which
+  Sōzu's own header would defeat; a rewrite hostname outside the Gateway API
+  hostname grammar (`$`, a CR/LF, uppercase, a port); and a `URLRewrite`
+  repeated or paired with a `RequestRedirect` in either order, where only a
+  redirect listed first was refused before. The CRD already refuses all but
+  the first.
+- **A `URLRewrite` with a `path` is unchanged:** still reported, and its rule
+  still served without the rewrite, hostname included.
+- **It needs Sōzu 2.3.4 or later**, already the floor since the 2.3.6 bump
+  below: before upstream 026a1fb8 an HTTP/1 backend receives two `Host` lines,
+  which a strict server (Go's `net/http`) answers `400`
+  ([measured on 2.3.2](probes/rewrite-host-go_sozu-2.3.2_2026-11-23.txt)).
+
+The IR and the shadow format are unchanged. A downgraded controller re-adds
+those frontends without `rewrite_host` on its first reconcile.
+
+---
+
 ## Cleartext HTTP/2 by prior knowledge, opt-in
 
 New and off by default, so nothing changes until you ask: the rendered Sōzu

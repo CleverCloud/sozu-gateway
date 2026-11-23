@@ -40,9 +40,9 @@ still contribute to convergence time.
 **Ingress** and **Gateway API** (`GatewayClass` / `Gateway` / `HTTPRoute` / `TCPRoute` / `UDPRoute` /
 `ReferenceGrant`, with `Accepted` / `Programmed` / `ResolvedRefs` status) routing through one shared
 IR; exact + wildcard hosts; `Prefix` / `Exact` / regex paths; TLS termination from Secrets with SNI
-and zero-gap rotation; pod-IP backends from `EndpointSlice`s; HTTPRoute filters (header edits and
-redirects); raw TCP / UDP (L4) forwarding; Prometheus `/metrics`; and idempotent hot reload
-with no proxy restart.
+and zero-gap rotation; pod-IP backends from `EndpointSlice`s; HTTPRoute filters (header edits,
+redirects and host rewrites); raw TCP / UDP (L4) forwarding; Prometheus `/metrics`; and idempotent
+hot reload with no proxy restart.
 
 > **Note:** Basic auth and per-IP rate limiting exist in Sōzu but have no core Gateway API filter, so
 > they are not wired yet. See the full support matrix — supported / planned / not supported, with

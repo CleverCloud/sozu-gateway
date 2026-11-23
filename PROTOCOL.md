@@ -533,8 +533,13 @@ What that settles:
    not reproduce here. It was not faithful either: on 2.2.1 and 2.3.2 (and presumably 2.2.0,
    whose probe could not see it) an HTTP/1 backend receives the rewritten `Host` **twice**, which
    a strict backend refuses. Since 2.3.4 (upstream 026a1fb8) it receives one, and an HTTP/2
-   backend gets the value as `:authority` (measured on 2.3.6), so nothing upstream blocks
-   `URLRewrite.hostname` any more; it is still unwired.
+   backend gets the value as `:authority` (measured on 2.3.6), so `URLRewrite.hostname` is
+   wired onto it; a `URLRewrite` that also carries a `path` is still reported and its rule served
+   without the rewrite (5). On a host rewrite Sōzu also writes `X-Forwarded-Host`, carrying the
+   host the client sent, after the frontend's request edits, when the listener's
+   `forwarded_headers` emits that family (the default `both`) — read in the upstream 2.3.6 source
+   (`apply_request_rewrites_and_headers`), not measured — so the builder refuses a `set` or
+   `remove` of `X-Forwarded-Host` beside a hostname rewrite: neither could take effect.
 2. **All three redirect policies honour the rewrite fields**, `FOUND` and `PERMANENT_REDIRECT`
    included, despite the proto documenting only `PERMANENT`. `rewrite_port` lands as an explicit
    port in `Location`.
