@@ -95,6 +95,8 @@ bash scripts/e2e.sh
 
 The suites **cannot run in parallel**: `e2e.sh` and `e2e-gateway.sh` both port-forward to local
 port 18080, so a concurrent run silently curls the other cluster's Sōzu. Run them in series.
+`e2e.sh` also needs a `curl` built with HTTP/2 (`curl -V` lists `HTTP2`) for its cleartext HTTP/2
+step, and stops with a message without one.
 
 The core loop:
 

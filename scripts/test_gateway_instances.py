@@ -133,7 +133,7 @@ class GatewayProvisioning(unittest.TestCase):
             image={"controller": {"repository": "registry.example/controller", "digest": "sha256:" + "a" * 64}},
             resources={"sozu": {"requests": {"cpu": "350m"}}, "controller": {"limits": {"memory": "256Mi"}}},
             sozu={"workerCount": 4, "timeouts": {"connect": 8}, "drain": {"delaySeconds": 8, "gracePeriodSeconds": 45},
-                  "maxBuffers": 50000, "maxConnectionsPerIp": 64},
+                  "maxBuffers": 50000, "maxConnectionsPerIp": 64, "h2cPriorKnowledge": True},
             nodeSelector={"pool": "gateways"}, tolerations=[{"key": "gateway", "operator": "Exists"}])
         template = config(resources)
         parent = select(resources, "Deployment", "sozu")
@@ -144,6 +144,8 @@ class GatewayProvisioning(unittest.TestCase):
         lines = template["config_map"]["data"]["config.toml"].splitlines()
         self.assertIn("max_buffers = 50000", lines)
         self.assertIn("max_connections_per_ip = 64", lines)
+        # And the release's listener options: cleartext HTTP/2 on its HTTP listener.
+        self.assertEqual(lines.count("h2c_prior_knowledge = true"), 1)
         parent_spec = parent["spec"]["template"]["spec"]
         worker_spec = worker["spec"]["template"]["spec"]
         for field in ["securityContext", "nodeSelector", "tolerations", "terminationGracePeriodSeconds", "serviceAccountName"]:

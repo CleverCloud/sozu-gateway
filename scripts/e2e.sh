@@ -13,7 +13,12 @@
 #   - switching an Ingress to another Service moves its traffic in the
 #     reconcile that retires the old Service's cluster, and none fails;
 #   - deleting the Ingress withdraws its routes (404) and its cert, and leaves
-#     the other Ingress serving.
+#     the other Ingress serving;
+#   - the HTTP listener refuses cleartext HTTP/2 by prior knowledge by default
+#     and serves it once `sozu.h2cPriorKnowledge` is turned on (a `helm upgrade
+#     --reuse-values` that rolls the Pod), still `http` to the backend and
+#     still HTTP/1.1 to every other client; turned back off at the end, the
+#     state the other suites expect.
 # Every transition is polled to a bound (`wait_for`), never slept through.
 # Companion suites: e2e-gateway.sh (Gateway API + filters),
 # e2e-l4-routes.sh (TCPRoute/UDPRoute).
@@ -29,7 +34,8 @@ PLAIN_HOST="plain.example.com"   # no cert, so plain HTTP proxies
 PREFIX_HOST="prefix.example.com" # routes /foo (Prefix), /exact (Exact), a regex
 RETARGET_HOST="retarget.example.com" # switched from Service whoami-a to whoami-b
 UPPER_PLAIN_HOST="$(printf '%s' "$PLAIN_HOST" | tr '[:lower:]' '[:upper:]')"
-HTTP="http://127.0.0.1:18080"
+HTTP_PORT=18080
+HTTP="http://127.0.0.1:$HTTP_PORT"
 HTTPS_PORT=18443
 # The TLS host: SNI and Host pinned to $HOST while the socket goes to the
 # port-forward; -k because the cert is self-signed.
@@ -126,6 +132,61 @@ issue_cert() {
     -subj "/CN=$HOST" -addext "subjectAltName=DNS:$HOST" 2>/dev/null
   kubectl create secret tls app-tls -n "$DEMO_NS" --cert="$1.crt" --key="$1.key" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+# "<HTTP version> <status>" of one cleartext HTTP/2 request by prior knowledge
+# to $PLAIN_HOST, e.g. "2 200", or "no HTTP/2 answer (curl exit N)" when none
+# came back: without `sozu.h2cPriorKnowledge` Sōzu answers the preface with an
+# HTTP/1.1 400, which curl reports as a protocol error. The authority comes
+# from the URL (--resolve), so nothing depends on curl turning a Host header
+# into `:authority`.
+h2c_answer() {
+  local out rc=0
+  out="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_version} %{http_code}' --max-time 5 \
+    --http2-prior-knowledge --resolve "$PLAIN_HOST:$HTTP_PORT:127.0.0.1" \
+    "http://$PLAIN_HOST:$HTTP_PORT/" 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then echo "no HTTP/2 answer (curl exit $rc)"; else echo "$out"; fi
+}
+
+# The status line the HTTP listener answers the HTTP/2 connection preface and
+# an empty SETTINGS frame with, "none" when nothing comes back within 5 s. Only
+# read with the option off: on, the answer is binary HTTP/2 frames.
+preface_status() {
+  local line
+  line="$(
+    exec 2>/dev/null 3<>"/dev/tcp/127.0.0.1/$HTTP_PORT" || exit 0
+    printf 'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00' >&3
+    timeout 5 head -n1 <&3 | tr -d '\r'
+  )" || true
+  echo "${line:-none}"
+}
+
+# The listener refuses prior knowledge, while HTTP/1.1 on the same port, the
+# proof that the port-forward is up, is served.
+assert_h2c_refused() {
+  local got
+  assert_eq "$(http_code -H "Host: $PLAIN_HOST" "$HTTP/")" 200 "HTTP/1.1 to $PLAIN_HOST is served"
+  assert_eq "$(preface_status)" "HTTP/1.1 400 Bad Request" "the HTTP/2 preface is answered with an HTTP/1.1 400"
+  got="$(h2c_answer)"
+  case "$got" in
+    "no HTTP/2 answer"*) echo "  OK   curl --http2-prior-knowledge gets no HTTP/2 answer ($got)" ;;
+    *) echo "  FAIL curl --http2-prior-knowledge: expected no HTTP/2 answer, got '$got'"; exit 1 ;;
+  esac
+}
+
+# Set sozu.h2cPriorKnowledge on the installed release, every other value kept
+# (--reuse-values, as an operator would), and re-attach the port-forward: the
+# value changes the Sōzu ConfigMap, whose checksum rolls the Pod, so the old
+# port-forward points at a proxy being torn down. The rollout's new Pod reads
+# Ready only once the controller has programmed its Sōzu.
+set_h2c_prior_knowledge() {
+  echo "==> helm upgrade --reuse-values --set sozu.h2cPriorKnowledge=$1"
+  pf_stop
+  pf_log_cleanup
+  helm upgrade "$RELEASE" "$ROOT/charts/sozu-gateway" -n "$NS" --reuse-values \
+    --set sozu.h2cPriorKnowledge="$1" --wait --timeout 180s >/dev/null
+  kubectl rollout status deploy/"$RELEASE" -n "$NS" --timeout 120s
+  pf_start "$HTTP_PORT:80" "$HTTPS_PORT:443"
 }
 
 # Release the routing objects this suite creates, pass or fail, so a rerun
@@ -279,13 +340,22 @@ EOF
 kubectl rollout status deploy/whoami -n "$DEMO_NS" --timeout 120s
 kubectl rollout status deploy/whoami-b -n "$DEMO_NS" --timeout 120s
 
-pf_start 18080:80 "$HTTPS_PORT:443"
+pf_start "$HTTP_PORT:80" "$HTTPS_PORT:443"
 
 echo "==> a host without a cert proxies plain HTTP"
 wait_for 200 "GET $PLAIN_HOST/ over HTTP" http_code -H "Host: $PLAIN_HOST" "$HTTP/"
 curl -sS --max-time 5 -o "$WORK/body.out" -H "Host: $PLAIN_HOST" "$HTTP/"
 assert_grep '^Hostname: whoami-' "$WORK/body.out" "body comes from a whoami pod"
 assert_eq "$(http_code -H "Host: nobody.example.com" "$HTTP/")" 404 "unknown host is a 404"
+
+echo "==> the HTTP listener refuses cleartext HTTP/2 by prior knowledge by default"
+# A curl without HTTP/2 would fail the prior-knowledge request for its own
+# reason and pass this step, then fail the opt-in one below for nothing.
+if ! grep -qw HTTP2 <<<"$(curl -V)"; then
+  echo "  FAIL this curl has no HTTP/2 support (curl -V lists no HTTP2 feature)"
+  exit 1
+fi
+assert_h2c_refused
 
 echo "==> the Host header matches whatever its case"
 # A hostname is case-insensitive (RFC 9110). Sōzu matches it so from 2.3.0
@@ -356,5 +426,25 @@ kubectl -n "$DEMO_NS" delete ingress/whoami >/dev/null
 wait_for 404 "GET $HOST/ over HTTP after the delete" http_code -H "Host: $HOST" "$HTTP/"
 wait_for yes "certificate withdrawn from the HTTPS listener (default served)" cert_withdrawn "$WORK/first.crt" "$WORK/second.crt"
 assert_eq "$(http_code -H "Host: $PLAIN_HOST" "$HTTP/")" 200 "$PLAIN_HOST unaffected by the delete"
+
+echo "==> sozu.h2cPriorKnowledge serves cleartext HTTP/2 by prior knowledge"
+# Last, because it rolls the Pod twice. Sōzu speaks HTTP/1.1 to whoami (its
+# port declares no h2c), so this is the client side alone: the preface is
+# served as HTTP/2, the request still reads `http` to the backend, and HTTP/1.1
+# clients of the same listener are unaffected.
+set_h2c_prior_knowledge true
+wait_for "2 200" "curl --http2-prior-knowledge to $PLAIN_HOST" h2c_answer
+curl -sS --noproxy '*' --max-time 5 --http2-prior-knowledge --resolve "$PLAIN_HOST:$HTTP_PORT:127.0.0.1" \
+  -o "$WORK/h2c.out" "http://$PLAIN_HOST:$HTTP_PORT/"
+assert_grep '^Hostname: whoami-' "$WORK/h2c.out" "the HTTP/2 answer comes from a whoami pod"
+# whoami echoes the request in HTTP/1.1 wire form, CRLF included.
+assert_grep '^X-Forwarded-Proto: http[[:space:]]*$' "$WORK/h2c.out" "the backend is told the request is http"
+assert_eq "$(http_code --http1.1 -H "Host: $PLAIN_HOST" "$HTTP/")" 200 "HTTP/1.1 to $PLAIN_HOST is still served"
+# Back to the chart default, so the other suites find the release as they
+# always did: their `ensure_addon` would reset the value too, but by rolling
+# the Pod under them.
+set_h2c_prior_knowledge false
+wait_for 200 "GET $PLAIN_HOST/ over HTTP once turned off" http_code -H "Host: $PLAIN_HOST" "$HTTP/"
+assert_h2c_refused
 
 echo "==> e2e DONE"

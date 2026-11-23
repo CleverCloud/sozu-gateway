@@ -393,7 +393,10 @@ changes.
 
 - **HTTP/HTTPS listeners are NOT modelled in the IR.** They are declared
   statically in Sōzu's `config.toml` ([deploy/sozu/config.toml](deploy/sozu/config.toml)) and
-  activated at boot; their addresses come from the chart's `exposure` table. **L4 (TCP/UDP)
+  activated at boot; their addresses come from the chart's `exposure` table and their options from
+  chart values. A key an older Sōzu would refuse is rendered only when on: `sozu.h2cPriorKnowledge`
+  → `h2c_prior_knowledge` on HTTP listeners only, which Sōzu < 2.3.4 does not boot with, so the
+  chart also `fail`s on such an `image.sozu.tag`. **L4 (TCP/UDP)
   listeners are the exception**: their ports are user-defined, so the IR carries
   `ir::L4Frontend`s and the translator adds + activates the listeners dynamically over the socket —
   `ConfigState::diff` emits `Add{Tcp,Udp}Listener` + `ActivateListener` (and the reverse on removal)
@@ -559,12 +562,14 @@ rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
 The library and data-plane image are aligned at 2.3.6 and move together (an `image.sozu.tag`
 below 2.3.4 is documented unsupported, not refused: 2.3.0–2.3.3 parse hostnames with Unicode 17
 data, so the builder would admit a name they refuse, measured in
-[docs/probes/](docs/probes/) `idna-hostnames_*`). The ICU4X data (2.4.0, Unicode 18), rustls
+[docs/probes/](docs/probes/) `idna-hostnames_*`; the exception is `sozu.h2cPriorKnowledge` on,
+which the chart refuses below 2.3.4, see the HTTP/HTTPS listeners bullet). The ICU4X data (2.4.0, Unicode 18), rustls
 0.23.46, rustls-webpki 0.103.16 and rustls-pki-types 1.15.1 are held at Sōzu 2.3.6's versions by
 the lock (see the tenant-input bullet). The library redacts certificate and key material from
 `Debug`. The proto adds fields we leave unset (listener `interface`,
-`HttpListenerConfig.h2c_prior_knowledge` (2.3.4), `AddBackend.unix_path`, `Cluster` fields
-17–23), a path rule kind we never send (`REGEX_PATH`, 2.3.4) and verbs 60–75 we never send, but
+`HttpListenerConfig.h2c_prior_knowledge` (2.3.4; its TOML key is chart-rendered, never sent over
+the socket), `AddBackend.unix_path`, `Cluster` fields 17–23), a path rule kind we never send
+(`REGEX_PATH`, 2.3.4) and verbs 60–75 we never send, but
 for frontend `header_predicates` and their verbs 66–69 (HTTPRoute header matches, above);
 `tier()` places the predicate verbs with the plain ones, and the `silent_close` and unix-backend
 verbs defensively. If the versions diverge again, verify that the wire format still agrees before
@@ -605,8 +610,9 @@ above; `rewrite_host` and a request edit of `Host` reach an HTTP/1.1 backend as 
 edit replacing the authority (`:authority` on HTTP/2) unless `rewrite_host` is set, while
 deleting `Host` still removes nothing (026a1fb8, 2.3.4: what blocked `URLRewrite.hostname`); the
 `REGEX_PATH` rule kind and the `h2c_prior_knowledge` listener option (660ce27e, 2c3b43e3, 2.3.4,
-both unused, both measured; a 2.3.2 data plane refuses the first per frontend and fails to boot
-with the second in its TOML); and data-plane fixes with no controller side — large transfers no
+both measured; the first unused, the second the chart's opt-in `sozu.h2cPriorKnowledge`, never
+sent over the socket; a 2.3.2 data plane refuses the first per frontend and fails to boot with the
+second in its TOML); and data-plane fixes with no controller side — large transfers no
 longer cut at the loop budget, per-peer timeouts (2.3.4), timed-out HTTP/2 backend connections
 and reset stream slots (2.3.5, security), the UDP PROXY v2 destination (2.3.6; never enabled
 here). Measured unchanged on 2.3.6 (records dated 2026-11-23): the per-cluster `QueryMetrics`

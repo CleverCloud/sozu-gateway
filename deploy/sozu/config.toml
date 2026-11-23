@@ -51,6 +51,9 @@ connect_timeout = 2
 [[listeners]]
 protocol = "http"
 address = "0.0.0.0:8080"
+# Cleartext HTTP/2 by prior knowledge stays off: the chart renders
+# `h2c_prior_knowledge = true` here only with `sozu.h2cPriorKnowledge`, since a
+# Sōzu older than 2.3.4 refuses to start with the key present at all.
 
 [[listeners]]
 protocol = "https"

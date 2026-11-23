@@ -116,7 +116,9 @@ ensure_demo_ns() {
 # Targets a *Ready* pod explicitly instead of `svc/`: right after a rolling
 # update, `kubectl port-forward svc/...` can attach to a Terminating or
 # not-yet-ready pod (it picks the first selector match, ignoring readiness),
-# which makes the suite probe a proxy that is already being torn down.
+# which makes the suite probe a proxy that is already being torn down. A
+# Terminating pod may still report Ready while its preStop delay runs, so one
+# with a deletionTimestamp is skipped too.
 pf_start() {
   local pod pair local_port svc_port target deadline
   local pairs=()
@@ -127,8 +129,8 @@ pf_start() {
   on_exit pf_log_cleanup
   pod=$(kubectl -n "$NS" get pods \
     -l "app.kubernetes.io/instance=$RELEASE" \
-    -o jsonpath='{range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
-    | awk '$2 == "True" { print $1; exit }')
+    -o jsonpath='{range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status} {.metadata.deletionTimestamp}{"\n"}{end}' \
+    | awk '$2 == "True" && $3 == "" { print $1; exit }')
   if [ -z "$pod" ]; then
     echo "FAIL: no Ready gateway pod to port-forward to" >&2
     exit 1

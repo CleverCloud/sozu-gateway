@@ -86,6 +86,30 @@ chart-lint:
     # ceiling, well below what Sōzu's u64 fields could parse.
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=abc > /dev/null 2>&1
     ! helm template {{HELM_RELEASE}} {{CHART}} --set sozu.maxConnectionsPerIp=4294967296 > /dev/null 2>&1
+    # Cleartext HTTP/2 by prior knowledge is off unless asked for, and off means
+    # the key is absent, not false: a Sōzu older than 2.3.4 refuses to start
+    # with it in its config. A removed key (as --reuse-values from a pre-key
+    # release replays) is off too. On, it lands on every HTTP listener and no
+    # HTTPS one (the multi-listener fixture below checks it per listener).
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml | python3 scripts/check-listener-config.py --h2c off
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.h2cPriorKnowledge=false | python3 scripts/check-listener-config.py --h2c off
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.h2cPriorKnowledge=null | python3 scripts/check-listener-config.py --h2c off
+    helm template {{HELM_RELEASE}} {{CHART}} --show-only templates/configmap.yaml --set sozu.h2cPriorKnowledge=true | python3 scripts/check-listener-config.py --h2c on
+    # An image that cannot boot with the key fails the render, with the reason,
+    # whether its tag carries a `v` or a digest (`tag@sha256:…` is how this
+    # chart pins Sōzu by digest); off, an old image is still accepted, and a tag
+    # that is not a plain version is not second-guessed. The value is a boolean
+    # or nothing.
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=2.3.2 2>&1 | grep -q 'sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=v2.3.3 2>&1 | grep -q 'sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set-string image.sozu.tag=2.3.2@sha256:0000000000000000000000000000000000000000000000000000000000000000 2>&1 | grep -q 'sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=2.3.4 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set-string image.sozu.tag=2.3.6@sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=false --set image.sozu.tag=2.3.2 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=latest > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=yes 2>&1 | grep -q 'sozu.h2cPriorKnowledge must be true or false'
+    helm template {{HELM_RELEASE}} {{CHART}} --set-string sozu.h2cPriorKnowledge=true 2>&1 | grep -q 'sozu.h2cPriorKnowledge must be true or false'
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=1 2>&1 | grep -q 'sozu.h2cPriorKnowledge must be true or false'
     helm template {{HELM_RELEASE}} {{CHART}} --set metrics.serviceMonitor.enabled=true > /dev/null
     # The controller refuses header matches on what Sōzu sets before routing,
     # so the listener options that change it must reach the controller too.

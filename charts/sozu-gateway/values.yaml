@@ -336,6 +336,40 @@ sozu:
       includeSubdomains: false
       preload: false
 
+  # Serve cleartext HTTP/2 to a client that opens with the HTTP/2 connection
+  # preface ("prior knowledge"), on every HTTP entry of `exposure`; HTTPS
+  # entries are not touched (they negotiate HTTP/2 with ALPN already). This is
+  # how a gRPC client without TLS speaks: route it with an Ingress or an
+  # HTTPRoute to a Service port declaring `appProtocol: kubernetes.io/h2c`, so
+  # Sōzu speaks HTTP/2 to the pods too. GRPCRoute itself is not implemented.
+  #
+  # Off by default, because it changes what the HTTP port answers. Measured on
+  # Sōzu 2.3.6 (docs/probes/h2c-prior-knowledge_sozu-2.3.6_2026-11-23.txt):
+  #   - a connection that opens with the preface is served HTTP/2, while every
+  #     other client stays on HTTP/1.x. The request stays plain `http`:
+  #     `:scheme` and X-Forwarded-Proto say so to the backend;
+  #   - `Upgrade: h2c` is still never honoured, only prior knowledge;
+  #   - a connection that sends nothing, or stops partway through the 24-byte
+  #     preface, is closed at `timeouts.request` (Sōzu's 10 s unless set) with
+  #     no answer and no access log line. Without the option, nothing sent gets
+  #     a 408, and the preface's first 16 bytes (an HTTP/1 request line with a
+  #     bad version) an immediate 400; a shorter piece is an incomplete
+  #     HTTP/1 request that also waits for the 408. Measured: nothing sent and
+  #     16 bytes. A partial HTTP/1.1 request still gets its 408.
+  #
+  # Needs Sōzu 2.3.4 or later: an older Sōzu does not know the key and refuses
+  # to start with it in its config (measured on 2.3.2,
+  # docs/probes/h2c-prior-knowledge_sozu-2.3.2_2026-11-23.txt), so the new
+  # Pods would crash-loop: a rolling upgrade stalls on its first one (and an old
+  # Pod whose Sōzu restarts reads the same ConfigMap), a fresh install never
+  # gets one Ready. The render fails when this is on and `image.sozu.tag` is a
+  # version below 2.3.4, one pinned by digest (`2.3.2@sha256:…`) included;
+  # `latest` or a pre-release is not checked. Sōzu also wants `buffer_size` of
+  # at least 16 393 on such a listener, which the chart renders. The key is
+  # rendered only when on, so the default config is the one an older Sōzu
+  # boots with. Changing it rolls the Pods. A true/false, not a string.
+  h2cPriorKnowledge: false
+
   # Timeouts, in whole seconds. Like `hardening` above, an empty entry is
   # omitted and leaves Sōzu's own default in force — so `timeouts: {}` is not
   # "no timeouts", it is Sōzu's (connect 3, front 60, back 30, request 10).

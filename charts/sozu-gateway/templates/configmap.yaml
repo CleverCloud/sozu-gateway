@@ -42,6 +42,10 @@ data:
     {{- if not (kindIs "invalid" $.Values.sozu.hardening.strictSniBinding) }}
     strict_sni_binding = {{ $.Values.sozu.hardening.strictSniBinding }}
     {{- end }}
+    {{- else if eq (include "sozu-gateway.h2cPriorKnowledge" $) "true" }}
+    {{- /* HTTP only (this branch), and only when on: Sōzu before 2.3.4
+         refuses to start with the key in its config, whatever its value. */}}
+    h2c_prior_knowledge = true
     {{- end }}
     {{- with $.Values.sozu.hardening.sozuIdHeader }}
     sozu_id_header = {{ . | quote }}
