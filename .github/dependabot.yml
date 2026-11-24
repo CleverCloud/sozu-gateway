@@ -8,7 +8,7 @@ updates:
       cargo:
         patterns: ["*"]
     # The builder refuses tenant input with the crates Sōzu parses it with, so
-    # these must stay at the versions Sōzu 2.3.6 resolves; they move with the
+    # these must stay at the versions Sōzu 2.3.7 resolves; they move with the
     # Sōzu version (crates/builder/tests/sozu_lock_pins.rs fails on drift).
     # rustls, rustls-webpki, rustls-pki-types and ring are pinned by the same
     # test but deliberately not ignored: they are the controller's own TLS

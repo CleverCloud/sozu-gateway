@@ -65,7 +65,7 @@ You need:
 - **[`just`](https://github.com/casey/just)** — the [`justfile`](justfile) is the authoritative
   source for task and command names. Run `just` with no args to list every recipe.
 - **Python 3.11 or newer** for the TOML validation in `just chart-lint`.
-- **Rust 1.93.1 (stable)**, edition 2021. The floor comes from the dependency tree, not from our own
+- **Rust 1.95.0 (stable)**, edition 2021. The floor comes from the dependency tree, not from our own
   code — `sozu-command-lib` sets it. No nightly is required — unlike Sōzu, formatting and lints
   run on the stable toolchain.
 - The **devcontainer** ([`.devcontainer`](.devcontainer)) brings the Rust toolchain, Go, and a
@@ -129,7 +129,7 @@ status. This protocol is verified against a live Sōzu and documented in
   [`config.toml`](deploy/sozu/config.toml).
 
 Remember the deployment shape when reproducing socket issues: control plane (this repo) and data
-plane (`clevercloud/sozu:2.3.6`) run as separate containers in one Pod, sharing the command socket
+plane (`clevercloud/sozu:2.3.7`) run as separate containers in one Pod, sharing the command socket
 via an `emptyDir` volume, both as uid `1000`.
 
 ## Testing

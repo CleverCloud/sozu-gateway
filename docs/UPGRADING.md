@@ -4,6 +4,11 @@ Breaking changes, what they cost, and what to do about them. Newest first.
 
 ---
 
+## Sōzu 2.3.7
+
+The chart deploys Sōzu 2.3.7 and the controller links the matching command library.
+If you pin the image or use Helm’s `--reuse-values`, set `--set-string image.sozu.tag=2.3.7` when upgrading. Building the controller from source requires Rust 1.95.0. The upstream command protobuf schema is identical to 2.3.6.
+
 ## Path rules match the path without its query string
 
 Every compiled `Prefix` and `Exact` path but the root prefix `/`, Ingress and

@@ -5,12 +5,12 @@ verbatim from the real crate source and **confirmed against a live Sōzu 2.1.0**
 with the probe in [`crates/sozu-agent/examples/probe.rs`](crates/sozu-agent/examples/probe.rs).
 If this document and the scoping prompt disagree, this document wins.
 
-- **Crate**: `sozu-command-lib` **2.3.6** (pinned). License **LGPL-3.0**.
-  Edition 2024, `rust-version = 1.93.1`. protobuf via **prost 0.14**. It redacts sensitive
+- **Crate**: `sozu-command-lib` **2.3.7** (pinned). License **LGPL-3.0**.
+  Edition 2024, `rust-version = 1.95.0`. protobuf via **prost 0.14**. It redacts sensitive
   `Debug` and error output (since 2.2.1). Its `command.proto` only *adds* to 2.2.1's — new
   fields, verbs and a path rule kind we leave unset, §4, but for the header predicates of §14 — so every message
   without a header match is encoded as before.
-- **Data plane**: Sōzu **2.3.6** (`clevercloud/sozu:2.3.6`; binary is **musl** → run via Docker).
+- **Data plane**: Sōzu **2.3.7** (`clevercloud/sozu:2.3.7`; binary is **musl** → run via Docker).
   The dated 2.1.0/2.2.0/2.2.1 observations below retain their original versions; what 2.3
   changed in the state semantics we rely on is in §3, §6, §7 and §9, and
   [the 2.2.1 validation](docs/E2E-RESULTS.md#sozu-221-upgrade-validation-2026-09-10)
