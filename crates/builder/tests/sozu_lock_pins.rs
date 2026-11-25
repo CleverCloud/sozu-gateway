@@ -4,9 +4,9 @@
 //! PEM/X.509 parsing followed by `rustls::sign::CertifiedKey::keys_match`
 //! (webpki parses the leaf, ring derives the key's public half). That only
 //! holds while those crates, and the Unicode data behind IDNA, resolve to the
-//! versions Sōzu 2.3.6 builds against. Most of them are held by `Cargo.lock`
+//! versions Sōzu 2.3.7 builds against. Most of them are held by `Cargo.lock`
 //! alone, which a routine `cargo update` moves: a newer grammar, Unicode table
-//! or certificate parser could then admit input Sōzu 2.3.6 still refuses, and
+//! or certificate parser could then admit input Sōzu 2.3.7 still refuses, and
 //! one such object fails every reconcile of the shared instance. This test
 //! reads the lock and fails on that drift.
 //!
@@ -23,14 +23,14 @@ const BUILDER: &str = "sozu-gw-builder";
 /// The builder's direct dependencies that carry Sōzu's validation calls.
 const ROOTS: &[&str] = &["regex", "idna", "rustls", "sozu-command-lib"];
 
-/// `(crate, version)` as resolved by Sōzu 2.3.6's own `Cargo.lock`. Move an
+/// `(crate, version)` as resolved by Sōzu 2.3.7's own `Cargo.lock`. Move an
 /// entry only together with the Sōzu version the chart deploys, and re-verify
 /// the builder's refusals against that release.
-const SOZU_2_3_6: &[(&str, &str)] = &[
+const SOZU_2_3_7: &[(&str, &str)] = &[
     // Path rules (`admit_path`).
-    ("regex", "1.13.1"),
-    ("regex-syntax", "0.8.11"),
-    ("regex-automata", "0.4.18"),
+    ("regex", "1.13.2"),
+    ("regex-syntax", "0.8.12"),
+    ("regex-automata", "0.4.19"),
     // Hostnames (`admit_hostname`): IDNA and its UTS #46 / normalization data.
     ("idna", "1.1.0"),
     ("idna_adapter", "1.2.2"),
@@ -42,8 +42,8 @@ const SOZU_2_3_6: &[(&str, &str)] = &[
     // Certificates (`extract_cert`): the leaf parsed as Sōzu parses it, and
     // paired with its key by `CertifiedKey::keys_match` (webpki + ring).
     ("rustls", "0.23.46"),
-    ("rustls-webpki", "0.103.16"),
-    ("rustls-pki-types", "1.15.1"),
+    ("rustls-webpki", "0.103.17"),
+    ("rustls-pki-types", "1.16.0"),
     ("ring", "0.17.14"),
     ("x509-parser", "0.18.1"),
     ("der-parser", "10.0.0"),
@@ -153,12 +153,12 @@ fn drift(lock: &str) -> Vec<String> {
             .insert(packages[idx].version);
     }
 
-    problems.extend(SOZU_2_3_6.iter().filter_map(|&(name, want)| {
+    problems.extend(SOZU_2_3_7.iter().filter_map(|&(name, want)| {
         let got: Vec<&str> = reached
             .get(name)
             .map(|v| v.iter().copied().collect())
             .unwrap_or_default();
-        (got != [want]).then(|| format!("{name}: builder links {got:?}, Sōzu 2.3.6 uses {want}"))
+        (got != [want]).then(|| format!("{name}: builder links {got:?}, Sōzu 2.3.7 uses {want}"))
     }));
     problems
 }
@@ -171,7 +171,7 @@ fn validation_crates_resolve_to_the_versions_sozu_builds_against() {
     let drift = drift(&lock);
     assert!(
         drift.is_empty(),
-        "the builder would no longer judge input the way Sōzu 2.3.6 does; \
+        "the builder would no longer judge input the way Sōzu 2.3.7 does; \
          restore with `cargo update -p <crate> --precise <version>`:\n{}",
         drift.join("\n")
     );
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.13.1"
+version = "1.13.2"
 dependencies = [
  "regex-automata",
  "{syntax}",
@@ -205,14 +205,14 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "{syntax}",
 ]
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.11"
+version = "0.8.12"
 
 [[package]]
 name = "idna"
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.15.1"
+version = "1.16.0"
 
 [[package]]
 name = "ring"
@@ -285,7 +285,7 @@ version = "0.17.14"
 
 [[package]]
 name = "sozu-command-lib"
-version = "2.3.6"
+version = "2.3.7"
 dependencies = [
  "rustls",
  "x509-parser",
@@ -321,7 +321,7 @@ fn a_lock_matching_sozu_passes() {
 #[test]
 fn a_second_version_used_only_elsewhere_is_not_drift() {
     let lock = fixture(
-        "regex-syntax 0.8.11",
+        "regex-syntax 0.8.12",
         r#"
 [[package]]
 name = "regex-syntax"
@@ -340,25 +340,25 @@ dependencies = [
 
 #[test]
 fn a_drift_of_the_version_the_builder_links_fails() {
-    // The builder's chain moves to 0.8.12 while 0.8.11 survives elsewhere.
-    let lock = fixture("regex-syntax 0.8.12", "").replace(
-        "name = \"regex-syntax\"\nversion = \"0.8.11\"",
+    // The builder's chain moves to 0.8.13 while 0.8.12 survives elsewhere.
+    let lock = fixture("regex-syntax 0.8.13", "").replace(
         "name = \"regex-syntax\"\nversion = \"0.8.12\"",
+        "name = \"regex-syntax\"\nversion = \"0.8.13\"",
     ) + r#"
 [[package]]
 name = "regex-syntax"
-version = "0.8.11"
+version = "0.8.12"
 
 [[package]]
 name = "unrelated"
 version = "1.0.0"
 dependencies = [
- "regex-syntax 0.8.11",
+ "regex-syntax 0.8.12",
 ]
 "#;
     assert_eq!(
         drift(&lock),
-        ["regex-syntax: builder links [\"0.8.12\"], Sōzu 2.3.6 uses 0.8.11"]
+        ["regex-syntax: builder links [\"0.8.13\"], Sōzu 2.3.7 uses 0.8.12"]
     );
 }
 
@@ -374,7 +374,7 @@ fn a_crate_that_leaves_the_builder_chain_fails() {
     assert!(
         drift
             .iter()
-            .any(|d| d == "idna_adapter: builder links [], Sōzu 2.3.6 uses 1.2.2"),
+            .any(|d| d == "idna_adapter: builder links [], Sōzu 2.3.7 uses 1.2.2"),
         "{drift:?}"
     );
 }

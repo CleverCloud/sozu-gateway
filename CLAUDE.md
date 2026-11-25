@@ -612,21 +612,21 @@ changes.
 
 ### Version pins (verified, do not bump casually)
 
-`sozu-command-lib` **2.3.6** (LGPL-3.0, pinned exactly) against Sōzu **2.3.6**, `kube` **4**, `k8s-openapi`
+`sozu-command-lib` **2.3.7** (LGPL-3.0, pinned exactly) against Sōzu **2.3.7**, `kube` **4**, `k8s-openapi`
 **0.28** with feature `v1_36` (the e2e cluster's version). Gateway API types are generated from the
 **v1.6.1** standard-channel CRDs with `kopium` **0.24** (the published `gateway-api` crate targets
 `kube` 3 / `k8s-openapi` 0.27, so it can't be used here). Workspace is edition 2021,
-rust-version 1.93.1 — a floor the dependency tree sets, not our own code.
+rust-version 1.95.0 — a floor the dependency tree sets, not our own code.
 
-The library and data-plane image are aligned at 2.3.6 and move together (an `image.sozu.tag`
+The library and data-plane image are aligned at 2.3.7 and move together (an `image.sozu.tag`
 below 2.3.4 is documented unsupported, not refused: 2.3.0–2.3.3 predate `REGEX_PATH` and
 refuse every frontend using it, so any non-root path fails every reconcile, and a fresh Pod
 never turns ready (refusal measured on 2.3.2, [docs/probes/](docs/probes/)
 `regex-path_sozu-2.3.2_*`); they also parse hostnames with Unicode 17 data, so the builder would
 admit a name they refuse (measured, `idna-hostnames_*`); the exception is
 `sozu.h2cPriorKnowledge` on, which the chart refuses below 2.3.4, see the HTTP/HTTPS listeners
-bullet). The ICU4X data (2.4.0, Unicode 18), rustls 0.23.46, rustls-webpki 0.103.16 and
-rustls-pki-types 1.15.1 are held at Sōzu 2.3.6's versions by the lock (see the tenant-input
+bullet). The ICU4X data (2.4.0, Unicode 18), rustls 0.23.46, rustls-webpki 0.103.17 and
+rustls-pki-types 1.16.0 are held at Sōzu 2.3.7's versions by the lock (see the tenant-input
 bullet). The library redacts certificate and key material from `Debug`. The proto adds fields we
 leave unset (listener `interface`, `HttpListenerConfig.h2c_prior_knowledge` (2.3.4; its TOML key
 is chart-rendered, never sent over the socket), `AddBackend.unix_path`, `Cluster` fields 17–23)
@@ -692,7 +692,7 @@ Control plane (this repo) and data plane (Sōzu) are **separate processes/contai
 sharing the command socket via an `emptyDir` volume. Both run as the **same unprivileged uid
 (1000)** so they can share that socket. The Helm chart ([charts/sozu-gateway](charts/sozu-gateway))
 ships both containers, an `IngressClass`, RBAC, and Sōzu's `ConfigMap`. The Sōzu image is used
-as-is (`clevercloud/sozu:2.3.6`) because the release binary is musl-linked.
+as-is (`clevercloud/sozu:2.3.7`) because the release binary is musl-linked.
 
 Releases (`v*` tags) publish the controller image (`ghcr.io/clevercloud/sozu-gateway-controller`)
 and the Helm chart (`oci://ghcr.io/clevercloud/sozu-gateway`) via

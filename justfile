@@ -104,7 +104,7 @@ chart-lint:
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=v2.3.3 2>&1 | grep -q 'sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later'
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set-string image.sozu.tag=2.3.2@sha256:0000000000000000000000000000000000000000000000000000000000000000 2>&1 | grep -q 'sozu.h2cPriorKnowledge needs Sōzu 2.3.4 or later'
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=2.3.4 > /dev/null
-    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set-string image.sozu.tag=2.3.6@sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
+    helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set-string image.sozu.tag=2.3.7@sha256:0000000000000000000000000000000000000000000000000000000000000000 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=false --set image.sozu.tag=2.3.2 > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=true --set image.sozu.tag=latest > /dev/null
     helm template {{HELM_RELEASE}} {{CHART}} --set sozu.h2cPriorKnowledge=yes 2>&1 | grep -q 'sozu.h2cPriorKnowledge must be true or false'
